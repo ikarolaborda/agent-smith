@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" role="img" aria-label="agent-smith — single binary, local-first, inevitable">
+  <title>agent-smith</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6f7f9"/>
+      <stop offset="1" stop-color="#eef0f4"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="220" rx="14" fill="url(#bg)"/>
+
+  <g transform="translate(296,38) scale(4.4)">
+    <polygon points="3,12 15,12 14,20 4,19" fill="#0d0d0d"/>
+    <polygon points="17,12 29,12 28,19 18,20" fill="#0d0d0d"/>
+    <rect x="13.5" y="12" width="5" height="1.6" fill="#0d0d0d"/>
+    <line x1="4.5" y1="18.4" x2="13.5" y2="19" stroke="#00ff7a" stroke-width="0.6" stroke-linecap="round"/>
+    <line x1="18.5" y1="19" x2="27.5" y2="18.4" stroke="#00ff7a" stroke-width="0.6" stroke-linecap="round"/>
+  </g>
+
+  <text x="360" y="158" text-anchor="middle"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace"
+        font-size="42" font-weight="700" fill="#0d1117" letter-spacing="-0.6">agent-smith</text>
+
+  <text x="360" y="190" text-anchor="middle"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace"
+        font-size="14" font-weight="500" fill="#6b7280" letter-spacing="2">
+    SINGLE BINARY  ·  LOCAL-FIRST  ·  INEVITABLE
+  </text>
+</svg>

@@ -1,0 +1,384 @@
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f6f7f9;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebar {
+  background: #1f2937;
+  color: #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #111827;
+}
+
+.sidebar-header {
+  padding: 1rem;
+  border-bottom: 1px solid #111827;
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.sidebar-list .list-group-item {
+  background: transparent;
+  color: #e5e7eb;
+  border: 0;
+  border-radius: 8px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  padding: 0.6rem 0.8rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sidebar-list .list-group-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.sidebar-list .list-group-item.active {
+  background: #374151;
+  color: white;
+}
+
+.sidebar-list .conv-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  margin-right: 8px;
+}
+
+.sidebar-list .delete-btn {
+  opacity: 0;
+  border: 0;
+  background: transparent;
+  color: #e5e7eb;
+  padding: 0;
+}
+
+.sidebar-list .list-group-item:hover .delete-btn {
+  opacity: 0.7;
+}
+
+.sidebar-list .delete-btn:hover {
+  opacity: 1;
+}
+
+.main-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /*
+   * min-height:0 is required because .main-pane is a grid item.
+   * Grid items default to min-height:auto, which lets them grow to fit
+   * intrinsic content. Without this, the flex child .message-list with
+   * overflow-y:auto is allowed to expand past the viewport and the
+   * scrollbar never appears.
+   */
+  min-height: 0;
+}
+
+.top-bar {
+  background: white;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 0.6rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.top-bar .title {
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem 0;
+  /*
+   * Defense-in-depth: flex items also default to min-height:auto.
+   * Explicit min-height:0 keeps overflow-y:auto effective even if a
+   * future nested layout would otherwise force min-content growth.
+   */
+  min-height: 0;
+}
+
+.message-row {
+  max-width: 760px;
+  margin: 0 auto 1.2rem;
+  padding: 0 1rem;
+  display: flex;
+  gap: 0.8rem;
+}
+
+.message-row .avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  color: white;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.message-row.user .avatar {
+  background: #0d6efd;
+}
+
+.message-row.assistant .avatar {
+  background: #16a34a;
+}
+
+.message-row.tool .avatar {
+  background: #f59e0b;
+}
+
+.message-row .bubble {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 0.7rem 1rem;
+  flex: 1;
+  min-width: 0;
+  /*
+   * Defensive wrapping for long URLs and unbreakable identifiers in
+   * paragraphs. Without this a long path or URL would size the flex item
+   * past min-width:0 and push the row beyond its 760px max-width.
+   */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.bubble img {
+  max-width: 100%;
+  height: auto;
+}
+
+/*
+ * Markdown tables can be arbitrarily wide. The MessageBubble component
+ * wraps every <table> in <div class="table-scroll"> so the table keeps its
+ * normal column layout while horizontal overflow scrolls inside the bubble
+ * instead of pushing the whole page wider.
+ */
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0.4rem 0;
+}
+
+.table-scroll table {
+  border-collapse: collapse;
+  min-width: max-content;
+}
+
+.table-scroll th,
+.table-scroll td {
+  border: 1px solid #e5e7eb;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.table-scroll th {
+  background: #f9fafb;
+  font-weight: 600;
+}
+
+.message-row.user .bubble {
+  background: #eef4ff;
+  border-color: #c9dbff;
+}
+
+.bubble pre {
+  background: #0d1117;
+  color: #e6edf3;
+  padding: 0.8rem 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.bubble code {
+  font-size: 0.88rem;
+}
+
+.bubble p:last-child {
+  margin-bottom: 0;
+}
+
+.tool-card {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  margin-top: 0.6rem;
+  font-size: 0.88rem;
+}
+
+.tool-card .tool-head {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.tool-card pre {
+  background: #fffdf7;
+  border: 1px dashed #fed7aa;
+  padding: 0.4rem 0.6rem;
+  margin: 0.4rem 0 0;
+  font-size: 0.82rem;
+  color: #92400e;
+}
+
+.tool-card.error {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.tool-card.error pre {
+  background: #fff;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.composer {
+  border-top: 1px solid #e5e7eb;
+  background: white;
+  padding: 0.8rem 1rem;
+}
+
+.composer .form-control {
+  resize: none;
+  max-height: 200px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 4rem 1rem;
+  color: #6b7280;
+}
+
+.empty-state h2 {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.streaming-cursor::after {
+  content: '▍';
+  margin-left: 2px;
+  color: #6b7280;
+  animation: blink 1s steps(2) infinite;
+}
+
+.message-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  opacity: 0;
+  transition: opacity 120ms ease-in;
+}
+
+.message-row:hover .message-actions {
+  opacity: 1;
+}
+
+.action-btn {
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 0.78rem;
+  color: #4b5563;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.action-btn:hover {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.action-btn-danger {
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+.action-btn-danger:hover {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
+
+.toast-message {
+  position: absolute;
+  bottom: 5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #111827;
+  color: white;
+  padding: 0.5rem 1rem;
+  border-radius: 999px;
+  font-size: 0.88rem;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  z-index: 10;
+}
+
+.correction-quote {
+  background: #f9fafb;
+  border-left: 3px solid #d1d5db;
+  padding: 0.6rem 0.8rem;
+  border-radius: 4px;
+  font-size: 0.92rem;
+  white-space: pre-wrap;
+}
+
+.correction-wrong {
+  background: #fef2f2;
+  border-left-color: #fecaca;
+}
+
+.web-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: #4b5563;
+  user-select: none;
+  cursor: pointer;
+}
+
+.web-toggle input[type="checkbox"] {
+  accent-color: #0d6efd;
+  cursor: pointer;
+}
+
+.web-toggle input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}

@@ -1,0 +1,29 @@
+# Force LF line endings for text — Vite builds and Go source must round-trip
+# identically across Windows/macOS/Linux contributors.
+* text=auto eol=lf
+
+# Shell scripts and Makefiles need LF unconditionally.
+*.sh    text eol=lf
+*.bash  text eol=lf
+Makefile text eol=lf
+
+# Binary files — never normalise.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff  binary
+*.woff2 binary
+*.ttf  binary
+*.otf  binary
+*.pdf  binary
+
+# Linguist hints — exclude generated/vendored content from language stats.
+web/dist/**         linguist-generated=true
+web/package-lock.json linguist-generated=true
+go.sum              linguist-generated=true
+docs/rag/**         linguist-documentation=true
+
+# Diff-friendly: treat SVG as text so PRs show useful diffs.
+*.svg text

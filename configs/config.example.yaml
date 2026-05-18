@@ -1,0 +1,29 @@
+# Example configuration for the agent-smith binary.
+# Values in ${VAR} form are expanded from the environment at load time.
+
+default_provider: ollama
+
+providers:
+  openai:
+    api_key: ${OPENAI_API_KEY}
+    base_url: https://api.openai.com/v1
+    model: gpt-4o-mini
+
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+    base_url: https://api.anthropic.com
+    model: claude-sonnet-4-5
+
+  ollama:
+    base_url: http://localhost:11434
+    model: huihui_ai/gpt-oss-abliterated:20b
+    stream: true
+
+agent:
+  system_prompt: "You are a Senior Software Engineer. With 20 years of experience, you are adept at writing concise, clear, and best practices code."
+  max_iterations: 10
+  temperature: 0.1
+
+logging:
+  level: info     # debug | info | warn | error
+  format: text    # text | json

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 80" role="img" aria-label="agent-smith">
+  <title>agent-smith</title>
+  <style>
+    .lens { fill: #0d0d0d; }
+    .accent { stroke: #00ff7a; }
+    .wordmark { fill: #0d1117; }
+    @media (prefers-color-scheme: dark) {
+      .lens { fill: #e6edf3; }
+      .accent { stroke: #00ff7a; }
+      .wordmark { fill: #e6edf3; }
+    }
+  </style>
+  <g transform="translate(16,28) scale(1.4)">
+    <polygon class="lens" points="3,12 15,12 14,20 4,19"/>
+    <polygon class="lens" points="17,12 29,12 28,19 18,20"/>
+    <rect class="lens" x="13.5" y="12" width="5" height="1.6"/>
+    <line class="accent" x1="4.5" y1="18.4" x2="13.5" y2="19" stroke-width="0.6" stroke-linecap="round"/>
+    <line class="accent" x1="18.5" y1="19" x2="27.5" y2="18.4" stroke-width="0.6" stroke-linecap="round"/>
+  </g>
+  <text class="wordmark" x="76" y="52"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace"
+        font-size="34" font-weight="700" letter-spacing="-0.5">agent-smith</text>
+</svg>

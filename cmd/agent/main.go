@@ -1,0 +1,317 @@
+/*
+Command agent is the CLI entrypoint. It parses flags, loads configuration,
+wires a llm.Provider through to an agent.Agent, and either answers a single
+--prompt or reads lines from stdin in interactive mode.
+
+Provider packages are imported with a blank identifier so their init()
+functions register themselves with the llm registry.
+*/
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+
+	"github.com/ikarolaborda/agent-smith/internal/agent"
+	"github.com/ikarolaborda/agent-smith/internal/config"
+	"github.com/ikarolaborda/agent-smith/internal/llm"
+	"github.com/ikarolaborda/agent-smith/internal/llm/anthropic"
+	"github.com/ikarolaborda/agent-smith/internal/llm/ollama"
+	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
+	"github.com/ikarolaborda/agent-smith/internal/logging"
+	"github.com/ikarolaborda/agent-smith/internal/rag"
+	"github.com/ikarolaborda/agent-smith/internal/server"
+	"github.com/ikarolaborda/agent-smith/internal/tools"
+	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
+	"github.com/ikarolaborda/agent-smith/internal/web"
+)
+
+/* flags groups the CLI flag values so we can pass them around as one value. */
+type flags struct {
+	configPath  string
+	provider    string
+	model       string
+	prompt      string
+	stream      bool
+	serve       bool
+	addr        string
+	ingest      bool
+	collection  string
+	source      string
+	embedder    string
+	embedModel  string
+	ragDir      string
+	disableRAG  bool
+	disableWeb  bool
+}
+
+func main() {
+	f := parseFlags()
+	if err := run(f); err != nil {
+		fmt.Fprintln(os.Stderr, "agent:", err)
+		os.Exit(1)
+	}
+}
+
+/* parseFlags reads CLI flags. */
+func parseFlags() flags {
+	var f flags
+	flag.StringVar(&f.configPath, "config", "configs/config.example.yaml", "path to YAML config file")
+	flag.StringVar(&f.provider, "provider", "", "override default provider (openai, anthropic, ollama)")
+	flag.StringVar(&f.model, "model", "", "override provider model")
+	flag.StringVar(&f.prompt, "prompt", "", "single-shot prompt; if empty, read lines from stdin")
+	flag.BoolVar(&f.stream, "stream", false, "stream the assistant response incrementally")
+	flag.BoolVar(&f.serve, "serve", false, "start the HTTP+SSE server and serve the embedded React UI instead of the stdin loop")
+	flag.StringVar(&f.addr, "addr", ":9090", "address to bind when --serve is set")
+	flag.BoolVar(&f.ingest, "ingest", false, "ingest markdown docs into a RAG collection and exit")
+	flag.StringVar(&f.collection, "collection", "", "collection name when --ingest is set")
+	flag.StringVar(&f.source, "source", "", "directory of .md files to ingest")
+	flag.StringVar(&f.embedder, "embedder", "ollama", "embedder provider: openai | ollama")
+	flag.StringVar(&f.embedModel, "embed-model", "", "embedding model override (defaults: text-embedding-3-small / nomic-embed-text)")
+	flag.StringVar(&f.ragDir, "rag-dir", "data/rag/collections", "directory holding RAG collection JSON files")
+	flag.BoolVar(&f.disableRAG, "no-rag", false, "disable RAG augmentation (still loads collections for /v1/rag endpoints)")
+	flag.BoolVar(&f.disableWeb, "no-web-search", false, "operator kill switch for the web-grounding gate (overrides all per-request flags)")
+	flag.Parse()
+	return f
+}
+
+/*
+run wires the application together. It loads config (including the .env
+adjacent to the config file), builds the active provider, constructs the
+Agent, and dispatches to either runOnce or runInteractive depending on
+whether --prompt is set.
+*/
+func run(f flags) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	cfg, err := config.Load(f.configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	logger := logging.New(logging.Options{Format: cfg.Logging.Format, Level: cfg.Logging.Level})
+	logger.Info("agent starting", "config", f.configPath, "provider", chooseProviderName(cfg, f), "stream", f.stream, "serve", f.serve, "ingest", f.ingest)
+
+	if f.ingest {
+		return runIngest(ctx, cfg, f, logger)
+	}
+
+	if f.serve {
+		return runServe(ctx, cfg, f, logger)
+	}
+
+	provider, err := buildProvider(cfg, f)
+	if err != nil {
+		return fmt.Errorf("build provider: %w", err)
+	}
+
+	a := agent.New(provider, tools.NewRegistry(), cfg.Agent.SystemPrompt, cfg.Agent.MaxIterations, logger)
+
+	if f.prompt != "" {
+		return runOnce(ctx, a, f.prompt)
+	}
+	return runInteractive(ctx, a, os.Stdin, os.Stdout)
+}
+
+/*
+runServe wires the embedded HTTP server with all configured providers and the
+default tool registry, then blocks until ctx is cancelled.
+*/
+func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) error {
+	reg := tools.NewRegistry()
+	_ = reg.Register(builtin.NewShell())
+	_ = reg.Register(builtin.NewHTTP())
+	_ = reg.Register(builtin.NewFileRead(""))
+
+	embedders, err := buildEmbedders(cfg, f)
+	if err != nil {
+		logger.Warn("rag: embedders not initialized", "err", err)
+	}
+	ragSvc, err := rag.NewService(f.ragDir, embedders, logger)
+	if err != nil {
+		logger.Warn("rag: service not started", "err", err)
+		ragSvc = nil
+	}
+	if ragSvc != nil && !f.disableWeb {
+		ragSvc.WebSearch = web.NewDDGSearcher()
+		logger.Info("web grounding: enabled", "backend", "ddg")
+	}
+
+	srv, err := server.New(server.Options{
+		Addr:             f.addr,
+		Config:           cfg,
+		Tools:            reg,
+		Logger:           logger,
+		RAG:              ragSvc,
+		DisableRAG:       f.disableRAG,
+		WebSearchEnabled: !f.disableWeb,
+	})
+	if err != nil {
+		return fmt.Errorf("build server: %w", err)
+	}
+	return srv.ListenAndServe(ctx)
+}
+
+/*
+runIngest is the offline path: it builds the requested embedder, opens the
+RAG store, and ingests every .md under --source into --collection. The
+binary exits when ingest completes.
+*/
+func runIngest(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) error {
+	if f.collection == "" || f.source == "" {
+		return errors.New("--ingest requires --collection and --source")
+	}
+	embedder, err := buildSingleEmbedder(cfg, f)
+	if err != nil {
+		return fmt.Errorf("build embedder: %w", err)
+	}
+	embedders := map[string]llm.Embedder{embedder.Identity(): embedder}
+	svc, err := rag.NewService(f.ragDir, embedders, logger)
+	if err != nil {
+		return fmt.Errorf("rag service: %w", err)
+	}
+	col, err := svc.Ingest(ctx, f.collection, f.source, embedder, rag.DefaultChunkOptions)
+	if err != nil {
+		return fmt.Errorf("ingest: %w", err)
+	}
+	logger.Info("ingest complete", "collection", col.Name, "chunks", len(col.Chunks), "embedder", col.EmbedderID, "dim", col.Dim)
+	return nil
+}
+
+/*
+buildEmbedders constructs every embedder for which the relevant provider is
+configured (and credentialed). Returns an empty map when no embedder can be
+built; the server treats RAG as a soft feature.
+*/
+func buildEmbedders(cfg *config.Config, f flags) (map[string]llm.Embedder, error) {
+	out := map[string]llm.Embedder{}
+	for name := range cfg.Providers {
+		f2 := f
+		f2.embedder = name
+		e, err := buildSingleEmbedder(cfg, f2)
+		if err != nil {
+			continue
+		}
+		out[e.Identity()] = e
+	}
+	if len(out) == 0 {
+		return out, errors.New("no embedders could be built from configured providers")
+	}
+	return out, nil
+}
+
+/* buildSingleEmbedder constructs one embedder by name (openai or ollama). */
+func buildSingleEmbedder(cfg *config.Config, f flags) (llm.Embedder, error) {
+	name := f.embedder
+	if name == "" {
+		name = "ollama"
+	}
+	pcfg, ok := cfg.Providers[name]
+	if !ok {
+		return nil, fmt.Errorf("provider %q has no config block", name)
+	}
+	switch name {
+	case "openai":
+		if pcfg.APIKey == "" {
+			return nil, fmt.Errorf("openai embed: missing api_key")
+		}
+		c, err := openai.New(openai.Config{APIKey: pcfg.APIKey, BaseURL: pcfg.BaseURL, Model: pcfg.Model})
+		if err != nil {
+			return nil, err
+		}
+		return openai.NewEmbedder(c, openai.EmbedConfig{Model: f.embedModel})
+	case "ollama":
+		c, err := ollama.New(ollama.Config{BaseURL: pcfg.BaseURL, Model: pcfg.Model})
+		if err != nil {
+			return nil, err
+		}
+		return ollama.NewEmbedder(c, ollama.EmbedConfig{Model: f.embedModel})
+	default:
+		return nil, fmt.Errorf("unknown embedder provider %q", name)
+	}
+}
+
+/* chooseProviderName picks the active provider name from the flag or the config default. */
+func chooseProviderName(cfg *config.Config, f flags) string {
+	if f.provider != "" {
+		return f.provider
+	}
+	return cfg.DefaultProvider
+}
+
+/*
+buildProvider resolves the active provider name, locates its config block,
+applies the --model override if set, and asks the llm registry to construct
+the concrete client.
+*/
+func buildProvider(cfg *config.Config, f flags) (llm.Provider, error) {
+	name := chooseProviderName(cfg, f)
+	if name == "" {
+		return nil, errors.New("no provider selected and no default in config")
+	}
+	pcfg, ok := cfg.Providers[name]
+	if !ok {
+		return nil, fmt.Errorf("provider %q has no config block", name)
+	}
+	if f.model != "" {
+		pcfg.Model = f.model
+	}
+
+	switch name {
+	case "openai":
+		return llm.New(name, openai.Config{APIKey: pcfg.APIKey, BaseURL: pcfg.BaseURL, Model: pcfg.Model})
+	case "anthropic":
+		return llm.New(name, anthropic.Config{APIKey: pcfg.APIKey, BaseURL: pcfg.BaseURL, Model: pcfg.Model})
+	case "ollama":
+		return llm.New(name, ollama.Config{BaseURL: pcfg.BaseURL, Model: pcfg.Model})
+	default:
+		return nil, fmt.Errorf("unknown provider %q (registered: %v)", name, llm.Names())
+	}
+}
+
+/* runOnce answers a single prompt and writes the result to stdout. */
+func runOnce(ctx context.Context, a *agent.Agent, prompt string) error {
+	out, err := a.Run(ctx, agent.NewSession(), prompt)
+	if err != nil {
+		return err
+	}
+	fmt.Println(out)
+	return nil
+}
+
+/*
+runInteractive reads one prompt per line from r and writes the assistant
+response to w. The session is reused so the conversation builds up across
+turns.
+*/
+func runInteractive(ctx context.Context, a *agent.Agent, r io.Reader, w io.Writer) error {
+	session := agent.NewSession()
+	scanner := bufio.NewScanner(r)
+	for {
+		fmt.Fprint(w, "> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		reply, err := a.Run(ctx, session, line)
+		if err != nil {
+			fmt.Fprintln(w, "error:", err)
+			continue
+		}
+		fmt.Fprintln(w, reply)
+	}
+	return scanner.Err()
+}

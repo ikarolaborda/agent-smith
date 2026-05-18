@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security disclosure
+    url: https://github.com/ikarolaborda/agent-smith/security/advisories/new
+    about: Please report security issues privately — see SECURITY.md.
+  - name: Question or discussion
+    url: https://github.com/ikarolaborda/agent-smith/discussions
+    about: For open-ended questions, use Discussions rather than Issues.

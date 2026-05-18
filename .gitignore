@@ -1,0 +1,43 @@
+# Build artifacts
+bin/
+*.test
+*.prof
+*.log
+coverage.out
+coverage.html
+
+# Top-level dist (does NOT match web/dist — see the rule below)
+/dist/
+
+# web/dist is referenced by `//go:embed all:dist` in web/embed.go, so the
+# directory must exist at compile time. We keep a placeholder index.html and
+# ignore every generated asset; `make build` regenerates the real bundle.
+web/dist/*
+!web/dist/index.html
+!web/dist/.gitkeep
+
+# Node dependencies
+node_modules/
+web/node_modules/
+
+# Local dotenv files
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+Thumbs.db
+
+# Local agent / tooling state (must NOT be committed)
+.agent/
+.serena/
+.claude/
+
+# RAG cached embeddings (re-ingested on first run)
+data/rag/collections/*.json
+!data/rag/collections/.gitkeep
