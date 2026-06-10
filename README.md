@@ -32,6 +32,15 @@ go build -o bin/agent ./cmd/agent
 
 Default web port: **`:9090`**. Override with `--addr :8765`.
 
+### Run a small local model (Josiefied-Qwen3.5-0.8B)
+
+```sh
+make josie                              # build the Ollama model + ingest all corpora
+make serve CONFIG=configs/josie.yaml    # web UI at http://127.0.0.1:9090
+```
+
+No code changes are needed to add a local model — see [`docs/josie.md`](docs/josie.md) for the Ollama and vLLM paths and caveats.
+
 ## Capabilities
 
 | Area | What you get |

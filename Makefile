@@ -6,7 +6,7 @@ NPM         ?= npm
 IMAGE       := agent-smith
 CONFIG      ?= configs/config.example.yaml
 
-.PHONY: build run test lint fmt tidy docker clean web web-install serve
+.PHONY: build run test lint fmt tidy docker clean web web-install serve ingest josie
 
 web-install:
 	cd web && $(NPM) install
@@ -28,6 +28,9 @@ ingest: build
 	  echo "ingesting $$c..."; \
 	  ./bin/$(BINARY) --config $(CONFIG) --ingest --collection $$c --source docs/$$c --embedder ollama --embed-model nomic-embed-text || exit 1; \
 	done
+
+josie:
+	./scripts/setup-josie.sh
 
 test:
 	$(GO) test $(PKG)

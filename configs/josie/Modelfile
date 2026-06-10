@@ -1,0 +1,29 @@
+# Ollama Modelfile for Josiefied-Qwen3.5-0.8B-gabliterated-v1.
+#
+# The base model is not on the Ollama registry yet, so we pull the community
+# GGUF conversion straight from Hugging Face. Ollama downloads and caches the
+# blob the first time `ollama create` runs against this file.
+#
+# Build it with a FLAT tag (no slashes). agent-smith's OpenAI-compatible HTTP
+# layer splits the request model id on "/" to recover the provider, so an
+# Ollama tag containing "/" (e.g. the raw hf.co/... id) would be misrouted in
+# --serve mode. Keep the tag as `josie-qwen3.5`:
+#
+#   ollama create josie-qwen3.5 -f configs/josie/Modelfile
+#
+# Swap Q4_K_M for another quant (Q8_0 is higher quality, Q3_K_M is smaller)
+# from mradermacher/Josiefied-Qwen3.5-0.8B-gabliterated-v1-GGUF if you prefer.
+FROM hf.co/mradermacher/Josiefied-Qwen3.5-0.8B-gabliterated-v1-GGUF:Q4_K_M
+
+# Leave the chat template to the GGUF metadata (Qwen ChatML). We only set
+# generation params and stop tokens. A 0.9B model drifts at high temperature,
+# so keep it low; agent-smith overrides temperature per request via config.
+PARAMETER temperature 0.3
+PARAMETER top_p 0.9
+PARAMETER num_ctx 8192
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
+
+# Default persona for direct `ollama run` testing. In agent-smith this is
+# overridden by agent.system_prompt from the YAML config on every request.
+SYSTEM """You are a concise, accurate senior software engineer. Prefer correct, idiomatic, well-tested code and say plainly when you are unsure."""
