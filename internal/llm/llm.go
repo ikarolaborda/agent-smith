@@ -32,11 +32,25 @@ populated on tool messages that carry tool-execution results back to the
 model.
 */
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
+	Role       Role        `json:"role"`
+	Content    string      `json:"content,omitempty"`
+	Images     []ImagePart `json:"images,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Name       string      `json:"name,omitempty"`
+}
+
+/*
+ImagePart is an inline image attached to a (typically user) message. Data is
+the raw image bytes encoded as standard base64 with no data: URL prefix, so
+each provider adapter can re-wrap it in its own format (OpenAI data URL,
+Anthropic base64 source block, Ollama images array). MimeType is the image
+media type, e.g. "image/png". Only models advertising vision support will do
+anything useful with these.
+*/
+type ImagePart struct {
+	MimeType string `json:"mime_type"`
+	Data     string `json:"data"`
 }
 
 /*

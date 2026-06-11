@@ -1,8 +1,53 @@
+import { useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import type { Message } from '../types';
 import { ToolCallCard } from './ToolCallCard';
+
+/*
+ * CodeBlock wraps a fenced code block with a copy button (Claude/ChatGPT style).
+ * The copied text is read from the rendered <pre>'s textContent, which yields the
+ * plain source without rehype-highlight's nested <span> markup. Inline code is
+ * never wrapped because only block code is emitted inside a <pre>.
+ */
+function CodeBlock({ node: _node, ...props }: { node?: unknown } & React.ComponentPropsWithoutRef<'pre'>) {
+  const ref = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    const text = ref.current?.textContent ?? '';
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* Fallback for browsers/contexts without the async clipboard API. */
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+      } catch {
+        /* give up silently; nothing else we can safely do */
+      }
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <div className="code-block">
+      <button type="button" className="code-copy" onClick={copy} aria-label="Copy code to clipboard">
+        <i className={copied ? 'bi bi-check2' : 'bi bi-clipboard'} /> {copied ? 'Copied' : 'Copy'}
+      </button>
+      <pre ref={ref} {...props} />
+    </div>
+  );
+}
 
 /*
  * detect: false stops rehype-highlight from guessing a language for unlabeled
@@ -26,6 +71,7 @@ const markdownComponents: Parameters<typeof ReactMarkdown>[0]['components'] = {
       <table {...props} />
     </div>
   ),
+  pre: CodeBlock,
 };
 
 interface Props {
@@ -55,6 +101,13 @@ export function MessageBubble({ message, onRemember, onCorrect }: Props) {
           <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={markdownComponents}>
             {message.content + (showCursor ? ' ' : '')}
           </ReactMarkdown>
+        )}
+        {message.images && message.images.length > 0 && (
+          <div className="bubble-attachments">
+            {message.images.map((img, i) => (
+              <img key={i} src={img.url} alt={`attachment ${i + 1}`} className="bubble-image" />
+            ))}
+          </div>
         )}
         {showCursor && !message.content && <div className="streaming-cursor" />}
         {message.tool_calls?.map((tc) => (

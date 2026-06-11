@@ -16,6 +16,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/tools"
+	"github.com/ikarolaborda/agent-smith/pkg/prompt"
 )
 
 /*
@@ -137,25 +138,25 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 }
 
 /*
-composeMessages prepends the system prompt (if any) to the session history.
-When RAG is configured, the latest user message is used as a retrieval query
-and the resulting "## Relevant documentation" block is appended to the
-system content. Tool-result-only turns produce no augmentation.
+composeMessages prepends the system message to the session history. The system
+content joins the configured system prompt, the always-on coding-paradigm
+directive (prefer OOP; see pkg/prompt), and — when RAG is configured and the
+latest user message yields a retrieval hit — a "## Relevant documentation"
+block. The directive makes the system content non-empty on every request.
 */
 func (a *Agent) composeMessages(ctx context.Context, session *Session) []llm.Message {
 	msgs := session.Messages()
-	system := a.SystemPrompt
+	var aug string
 	if a.RAG != nil {
 		if q := latestUserMessage(msgs); q != "" {
-			if aug := a.RAG.Augment(ctx, q, a.ProfileID, a.WebSearch); aug != "" {
-				if system != "" {
-					system = system + "\n\n" + aug
-				} else {
-					system = aug
-				}
-			}
+			aug = a.RAG.Augment(ctx, q, a.ProfileID, a.WebSearch)
 		}
 	}
+	/*
+		The coding-paradigm directive is appended on every request so it reaches
+		all models and providers regardless of the configured system prompt.
+	*/
+	system := prompt.JoinSections(a.SystemPrompt, prompt.CodingParadigmDirective, aug)
 	if system == "" {
 		return msgs
 	}

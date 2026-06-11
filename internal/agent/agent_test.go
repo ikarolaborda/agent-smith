@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ikarolaborda/agent-smith/internal/agent"
@@ -48,6 +49,40 @@ func TestAgent_RunReturnsAssistantContentWhenNoToolCalls(t *testing.T) {
 	}
 	if got != "hello back" {
 		t.Fatalf("got %q want %q", got, "hello back")
+	}
+}
+
+/* capturingProvider records the last ChatRequest so tests can inspect the composed messages. */
+type capturingProvider struct {
+	last llm.ChatRequest
+}
+
+func (c *capturingProvider) Name() string { return "cap" }
+
+func (c *capturingProvider) Chat(_ context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+	c.last = req
+	return &llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: "ok"}}, nil
+}
+
+func (c *capturingProvider) ChatStream(_ context.Context, _ llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	ch := make(chan llm.StreamChunk)
+	close(ch)
+	return ch, nil
+}
+
+func TestAgent_AlwaysAppliesCodingParadigmDirective(t *testing.T) {
+	/* Even with no configured system prompt, every request must carry the OOP directive. */
+	p := &capturingProvider{}
+	a := agent.New(p, tools.NewRegistry(), "", 3, nil)
+	if _, err := a.Run(context.Background(), agent.NewSession(), "write me a parser"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.last.Messages) == 0 || p.last.Messages[0].Role != llm.RoleSystem {
+		t.Fatalf("expected a leading system message, got %+v", p.last.Messages)
+	}
+	sys := p.last.Messages[0].Content
+	if !strings.Contains(sys, "object-oriented") || !strings.Contains(strings.ToLower(sys), "procedural") {
+		t.Fatalf("system message missing OOP directive: %q", sys)
 	}
 }
 

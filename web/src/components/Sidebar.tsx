@@ -1,5 +1,6 @@
 import { Button, ListGroup } from 'react-bootstrap';
 import type { Conversation } from '../types';
+import { LogoMark } from './LogoMark';
 
 interface Props {
   conversations: Conversation[];
@@ -37,8 +38,9 @@ export function Sidebar({ conversations, activeId, onSelect, onNew, onDelete }: 
           </ListGroup.Item>
         ))}
       </ListGroup>
-      <div className="px-3 py-2 small text-secondary border-top" style={{ borderColor: '#111827' }}>
-        agent-smith
+      <div className="sidebar-brand px-3 py-2 small text-secondary border-top" style={{ borderColor: '#111827' }}>
+        <LogoMark size={20} className="sidebar-brand-mark" />
+        <span>agent-smith</span>
       </div>
     </aside>
   );

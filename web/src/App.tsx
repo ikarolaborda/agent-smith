@@ -12,9 +12,10 @@ import {
   saveConversations,
 } from './store';
 import { streamChatCompletion } from './sse';
+import type { WireContentPart, WireMessage } from './sse';
 import { getOrCreateProfileId } from './profile';
 import { correction, remember } from './memory';
-import type { Conversation, Message, ModelsResponse, ProvidersResponse, ToolCall } from './types';
+import type { Conversation, ImageAttachment, Message, ModelsResponse, ProvidersResponse, ToolCall } from './types';
 
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
@@ -122,7 +123,7 @@ export function App() {
     setConversations((prev) => prev.map((c) => (c.id === id ? fn(c) : c)));
   }
 
-  async function handleSend(text: string) {
+  async function handleSend(text: string, images: ImageAttachment[] = []) {
     if (text.startsWith('/remember ')) {
       const body = text.slice('/remember '.length).trim();
       if (!body) {
@@ -139,7 +140,12 @@ export function App() {
     }
 
     const conv = ensureActive();
-    const userMsg: Message = { id: makeMessageId(), role: 'user', content: text };
+    const userMsg: Message = {
+      id: makeMessageId(),
+      role: 'user',
+      content: text,
+      images: images.length > 0 ? images : undefined,
+    };
     const assistantMsg: Message = { id: makeMessageId(), role: 'assistant', content: '', streaming: true };
 
     updateConversation(conv.id, (c) => ({
@@ -149,7 +155,15 @@ export function App() {
       updatedAt: Date.now(),
     }));
 
-    const wireMessages = [...conv.messages, userMsg].map((m) => ({ role: m.role, content: m.content }));
+    const wireMessages: WireMessage[] = [...conv.messages, userMsg].map((m) => {
+      if (m.images && m.images.length > 0) {
+        const parts: WireContentPart[] = [];
+        if (m.content) parts.push({ type: 'text', text: m.content });
+        for (const img of m.images) parts.push({ type: 'image_url', image_url: { url: img.url } });
+        return { role: m.role, content: parts };
+      }
+      return { role: m.role, content: m.content };
+    });
     const ctl = new AbortController();
     abortRef.current = ctl;
     setIsStreaming(true);
@@ -293,6 +307,8 @@ export function App() {
   }
 
   const noProviders = models.length === 0;
+  const selectedModelId = active?.model ?? (models[0]?.id ?? '');
+  const supportsVision = !!models.find((m) => m.id === selectedModelId)?.supports_vision;
 
   return (
     <div className="app-shell">
@@ -351,7 +367,7 @@ export function App() {
             />
           ))}
         </div>
-        <Composer onSend={handleSend} onStop={handleStop} isStreaming={isStreaming} disabled={noProviders} />
+        <Composer onSend={handleSend} onStop={handleStop} isStreaming={isStreaming} disabled={noProviders} supportsVision={supportsVision} />
         {toast && (
           <div className="toast-message" role="status" aria-live="polite">
             {toast}

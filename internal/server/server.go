@@ -63,16 +63,16 @@ already-constructed provider, so concurrent streams do not share mutable
 state.
 */
 type Server struct {
-	addr           string
-	cfg            *config.Config
-	tools          *tools.Registry
-	logger         *slog.Logger
-	providers      map[string]llm.Provider
-	models         []modelEntry
-	mux            *http.ServeMux
-	allowedOrigins map[string]struct{}
-	readTimeout    time.Duration
-	writeTimeout   time.Duration
+	addr             string
+	cfg              *config.Config
+	tools            *tools.Registry
+	logger           *slog.Logger
+	providers        map[string]llm.Provider
+	models           []modelEntry
+	mux              *http.ServeMux
+	allowedOrigins   map[string]struct{}
+	readTimeout      time.Duration
+	writeTimeout     time.Duration
 	rag              *rag.Service
 	disableRAG       bool
 	webSearchEnabled bool
@@ -85,6 +85,9 @@ type Server struct {
 	modelsMu       sync.Mutex
 	dynamicModels  []modelEntry
 	dynamicExpires time.Time
+
+	/* visionCache memoizes Ollama model name -> vision support so /api/show is queried at most once per model. */
+	visionCache sync.Map
 }
 
 /* modelsCacheTTL controls how often /v1/models re-queries Ollama for installed models. */
@@ -104,6 +107,12 @@ type modelEntry struct {
 		row. The UI uses it to filter the chat-model dropdown.
 	*/
 	Kind string `json:"kind,omitempty"`
+	/*
+		SupportsVision is true when the model accepts image input. For Ollama
+		it comes from /api/show capabilities; for cloud providers it is a
+		conservative per-model heuristic. The UI uses it to gate image paste.
+	*/
+	SupportsVision bool `json:"supports_vision,omitempty"`
 }
 
 /*
@@ -151,12 +160,13 @@ func New(opts Options) (*Server, error) {
 				model = cfg.Model
 			}
 			s.models = append(s.models, modelEntry{
-				ID:       name + "/" + model,
-				Object:   "model",
-				Created:  created,
-				OwnedBy:  name,
-				Provider: name,
-				Model:    model,
+				ID:             name + "/" + model,
+				Object:         "model",
+				Created:        created,
+				OwnedBy:        name,
+				Provider:       name,
+				Model:          model,
+				SupportsVision: cloudModelSupportsVision(name, model),
 			})
 		}
 	} else {
@@ -168,12 +178,13 @@ func New(opts Options) (*Server, error) {
 			}
 			s.providers[name] = prov
 			s.models = append(s.models, modelEntry{
-				ID:       name + "/" + p.Model,
-				Object:   "model",
-				Created:  created,
-				OwnedBy:  name,
-				Provider: name,
-				Model:    p.Model,
+				ID:             name + "/" + p.Model,
+				Object:         "model",
+				Created:        created,
+				OwnedBy:        name,
+				Provider:       name,
+				Model:          p.Model,
+				SupportsVision: cloudModelSupportsVision(name, p.Model),
 			})
 			logger.Info("provider ready", "provider", name, "model", p.Model)
 		}
@@ -211,6 +222,10 @@ func (s *Server) refreshOllamaModels(ctx context.Context) {
 		s.logger.Warn("ollama: ListModels failed; keeping previous cache", "err", err)
 		return
 	}
+	capLister, _ := prov.(interface {
+		Capabilities(ctx context.Context, model string) ([]string, error)
+	})
+
 	created := time.Now().Unix()
 	var rows []modelEntry
 	for _, m := range models {
@@ -218,14 +233,19 @@ func (s *Server) refreshOllamaModels(ctx context.Context) {
 		if m.Embedding {
 			kind = "embedding"
 		}
+		vision := false
+		if kind == "chat" && capLister != nil {
+			vision = s.ollamaModelVision(ctx, capLister, m.Name)
+		}
 		rows = append(rows, modelEntry{
-			ID:       "ollama/" + m.Name,
-			Object:   "model",
-			Created:  created,
-			OwnedBy:  "ollama",
-			Provider: "ollama",
-			Model:    m.Name,
-			Kind:     kind,
+			ID:             "ollama/" + m.Name,
+			Object:         "model",
+			Created:        created,
+			OwnedBy:        "ollama",
+			Provider:       "ollama",
+			Model:          m.Name,
+			Kind:           kind,
+			SupportsVision: vision,
 		})
 	}
 	s.modelsMu.Lock()
@@ -233,6 +253,59 @@ func (s *Server) refreshOllamaModels(ctx context.Context) {
 	s.dynamicExpires = time.Now().Add(modelsCacheTTL)
 	s.modelsMu.Unlock()
 	s.logger.Info("ollama: dynamic models refreshed", "count", len(rows))
+}
+
+/*
+ollamaModelVision reports whether an Ollama model advertises the "vision"
+capability, memoizing the result so /api/show is queried at most once per
+model. A failed lookup returns false and is not cached, so a transiently
+unavailable daemon does not pin a model to "no vision" permanently.
+*/
+func (s *Server) ollamaModelVision(ctx context.Context, capLister interface {
+	Capabilities(ctx context.Context, model string) ([]string, error)
+}, model string) bool {
+	if v, ok := s.visionCache.Load(model); ok {
+		return v.(bool)
+	}
+	showCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	caps, err := capLister.Capabilities(showCtx, model)
+	if err != nil {
+		s.logger.Debug("ollama: capability probe failed", "model", model, "err", err)
+		return false
+	}
+	vision := false
+	for _, c := range caps {
+		if strings.EqualFold(c, "vision") {
+			vision = true
+			break
+		}
+	}
+	s.visionCache.Store(model, vision)
+	return vision
+}
+
+/*
+cloudModelSupportsVision is a conservative per-model heuristic for the cloud
+providers, which expose no capability endpoint. All current Anthropic Claude
+chat models accept images; for OpenAI, the multimodal families are matched by
+substring.
+*/
+func cloudModelSupportsVision(provider, model string) bool {
+	m := strings.ToLower(model)
+	switch provider {
+	case "anthropic":
+		return strings.Contains(m, "claude")
+	case "openai":
+		for _, marker := range []string{"gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-5", "o1", "o3", "o4", "chatgpt-4o"} {
+			if strings.Contains(m, marker) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 /*
@@ -420,4 +493,3 @@ func (s *Server) splitModelID(modelID string) (provider, model string) {
 	}
 	return s.cfg.DefaultProvider, modelID
 }
-

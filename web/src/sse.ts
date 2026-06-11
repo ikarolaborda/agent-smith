@@ -7,7 +7,20 @@
  *   - terminator `data: [DONE]`
  */
 
-import type { Message } from './types';
+import type { Role } from './types';
+
+/*
+ * A wire message sent to /v1/chat/completions. content is either a plain
+ * string or the OpenAI multimodal parts array (text + image_url) used to
+ * carry pasted images.
+ */
+export type WireContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+export interface WireMessage {
+  role: Role;
+  content: string | WireContentPart[];
+}
 
 export interface OpenAIDelta {
   role?: string;
@@ -43,7 +56,7 @@ export interface StreamCallbacks {
 }
 
 export async function streamChatCompletion(
-  body: { model: string; messages: Pick<Message, 'role' | 'content'>[]; stream: true; profile_id?: string; web_search?: boolean },
+  body: { model: string; messages: WireMessage[]; stream: true; profile_id?: string; web_search?: boolean },
   cbs: StreamCallbacks,
   signal: AbortSignal,
 ): Promise<void> {

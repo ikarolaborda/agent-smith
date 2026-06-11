@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,16 +15,129 @@ import (
 
 /* chatCompletionRequest is the OpenAI-shape request body accepted by /v1/chat/completions. */
 type chatCompletionRequest struct {
-	Model     string        `json:"model"`
-	Messages  []llm.Message `json:"messages"`
-	Stream    bool          `json:"stream"`
-	ProfileID string        `json:"profile_id,omitempty"`
+	Model     string           `json:"model"`
+	Messages  []inboundMessage `json:"messages"`
+	Stream    bool             `json:"stream"`
+	ProfileID string           `json:"profile_id,omitempty"`
 	/*
 		WebSearch overrides the provider-default web-grounding flag for
 		this request. A nil pointer means "use the provider default";
 		non-nil means the caller has chosen.
 	*/
 	WebSearch *bool `json:"web_search,omitempty"`
+}
+
+/*
+inboundMessage decodes one OpenAI-shape request message. Content is left raw so
+UnmarshalJSON can accept both the plain-string form and the multimodal parts
+array ([{type:"text",...},{type:"image_url",image_url:{url:"data:..."}}]) used
+for image input. It flattens to a canonical llm.Message via toMessage.
+*/
+type inboundMessage struct {
+	Role       llm.Role        `json:"role"`
+	Content    json.RawMessage `json:"content"`
+	ToolCalls  []llm.ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
+}
+
+type inboundImageURL struct {
+	URL string `json:"url"`
+}
+
+/* UnmarshalJSON accepts image_url as either {"url":...} (OpenAI) or a bare string (Ollama /v1). */
+func (u *inboundImageURL) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		u.URL = s
+		return nil
+	}
+	var obj struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return err
+	}
+	u.URL = obj.URL
+	return nil
+}
+
+type inboundContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text"`
+	ImageURL inboundImageURL `json:"image_url"`
+}
+
+/*
+toMessage flattens an inbound message to the canonical llm.Message. String
+content maps straight to Content; an array of parts concatenates text parts
+into Content and decodes image_url data URLs into Images. Non-data image URLs
+are rejected because this build only forwards inline pasted images.
+*/
+func (im inboundMessage) toMessage() (llm.Message, error) {
+	msg := llm.Message{
+		Role:       im.Role,
+		ToolCalls:  im.ToolCalls,
+		ToolCallID: im.ToolCallID,
+		Name:       im.Name,
+	}
+	if len(im.Content) == 0 || string(im.Content) == "null" {
+		return msg, nil
+	}
+
+	var s string
+	if json.Unmarshal(im.Content, &s) == nil {
+		msg.Content = s
+		return msg, nil
+	}
+
+	var parts []inboundContentPart
+	if err := json.Unmarshal(im.Content, &parts); err != nil {
+		return msg, fmt.Errorf("invalid message content: must be a string or an array of content parts")
+	}
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			msg.Content += p.Text
+
+		case "image_url":
+			mime, data, err := parseDataURL(p.ImageURL.URL)
+			if err != nil {
+				return msg, err
+			}
+			msg.Images = append(msg.Images, llm.ImagePart{MimeType: mime, Data: data})
+		}
+	}
+	return msg, nil
+}
+
+/*
+parseDataURL splits a "data:<mime>;base64,<payload>" URL into its media type
+and base64 payload, validating that the payload decodes. It returns an error
+for non-data URLs (e.g. remote http links), which this build does not fetch.
+*/
+func parseDataURL(u string) (mime string, data string, err error) {
+	if !strings.HasPrefix(u, "data:") {
+		return "", "", fmt.Errorf("image_url must be a base64 data URL")
+	}
+	rest := strings.TrimPrefix(u, "data:")
+	comma := strings.IndexByte(rest, ',')
+	if comma < 0 {
+		return "", "", fmt.Errorf("malformed data URL")
+	}
+	meta, payload := rest[:comma], rest[comma+1:]
+	if !strings.Contains(meta, ";base64") {
+		return "", "", fmt.Errorf("data URL must be base64-encoded")
+	}
+	mime = strings.TrimSuffix(meta, ";base64")
+	mime = strings.SplitN(mime, ";", 2)[0]
+	if mime == "" {
+		mime = "image/png"
+	}
+	if _, derr := base64.StdEncoding.DecodeString(payload); derr != nil {
+		return "", "", fmt.Errorf("data URL payload is not valid base64")
+	}
+	return mime, payload, nil
 }
 
 /* errorEnvelope mimics the OpenAI error envelope. */
@@ -105,6 +219,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	/* Flatten OpenAI-shape messages (string or multimodal parts) to canonical messages before headers are written. */
+	messages := make([]llm.Message, 0, len(req.Messages))
+	for _, im := range req.Messages {
+		m, cErr := im.toMessage()
+		if cErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", cErr.Error())
+			return
+		}
+		messages = append(messages, m)
+	}
+
 	provName, modelID := s.splitModelID(req.Model)
 	if provName == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "no provider available and no default configured")
@@ -147,7 +272,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Agent.RunStream contract intact.
 	*/
 	session := agent.NewSession()
-	history, lastUser, sErr := splitHistory(req.Messages)
+	history, lastUser, sErr := splitHistory(messages)
 	if sErr != nil {
 		enc.writeOpenAIDelta(completionID, displayModel, createdAt, map[string]any{
 			"role":    "assistant",
@@ -215,7 +340,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	if _, runErr := a.RunStream(r.Context(), session, lastUser, sink); runErr != nil {
+	if _, runErr := a.RunStreamMessage(r.Context(), session, lastUser, sink); runErr != nil {
 		_ = enc.writeNamedEvent("error", map[string]any{"message": runErr.Error()})
 	}
 	enc.writeDone()
@@ -226,15 +351,15 @@ splitHistory returns all messages except the trailing user message, and the
 trailing user message itself. It enforces "last message must be from user"
 because the agent loop appends a single user input per Run.
 */
-func splitHistory(messages []llm.Message) ([]llm.Message, string, error) {
+func splitHistory(messages []llm.Message) ([]llm.Message, llm.Message, error) {
 	if len(messages) == 0 {
-		return nil, "", errors.New("no messages")
+		return nil, llm.Message{}, errors.New("no messages")
 	}
 	last := messages[len(messages)-1]
 	if last.Role != llm.RoleUser {
-		return nil, "", fmt.Errorf("last message must have role=user, got %q", last.Role)
+		return nil, llm.Message{}, fmt.Errorf("last message must have role=user, got %q", last.Role)
 	}
-	return messages[:len(messages)-1], last.Content, nil
+	return messages[:len(messages)-1], last, nil
 }
 
 /* writeJSON serializes v as JSON to w, setting the content-type. */

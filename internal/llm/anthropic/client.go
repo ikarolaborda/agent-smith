@@ -81,15 +81,22 @@ func (c *Client) Name() string { return providerName }
 
 /* wire types */
 
+type wireImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
 type wireBlock struct {
-	Type       string          `json:"type"`
-	Text       string          `json:"text,omitempty"`
-	ID         string          `json:"id,omitempty"`
-	Name       string          `json:"name,omitempty"`
-	Input      json.RawMessage `json:"input,omitempty"`
-	ToolUseID  string          `json:"tool_use_id,omitempty"`
-	Content    string          `json:"content,omitempty"`
-	IsError    bool            `json:"is_error,omitempty"`
+	Type      string           `json:"type"`
+	Text      string           `json:"text,omitempty"`
+	ID        string           `json:"id,omitempty"`
+	Name      string           `json:"name,omitempty"`
+	Input     json.RawMessage  `json:"input,omitempty"`
+	ToolUseID string           `json:"tool_use_id,omitempty"`
+	Content   string           `json:"content,omitempty"`
+	Source    *wireImageSource `json:"source,omitempty"`
+	IsError   bool             `json:"is_error,omitempty"`
 }
 
 type wireMessage struct {
@@ -194,6 +201,17 @@ func (c *Client) buildRequest(req llm.ChatRequest, stream bool) wireRequest {
 			current = &wireMessage{Role: role}
 			if m.Content != "" {
 				current.Content = append(current.Content, wireBlock{Type: "text", Text: m.Content})
+			}
+			/* Anthropic carries images as base64 source blocks alongside text. */
+			for _, img := range m.Images {
+				mime := img.MimeType
+				if mime == "" {
+					mime = "image/png"
+				}
+				current.Content = append(current.Content, wireBlock{
+					Type:   "image",
+					Source: &wireImageSource{Type: "base64", MediaType: mime, Data: img.Data},
+				})
 			}
 			for _, tc := range m.ToolCalls {
 				input := tc.Arguments

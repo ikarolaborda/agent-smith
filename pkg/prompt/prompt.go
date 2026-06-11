@@ -9,6 +9,14 @@ package prompt
 import "strings"
 
 /*
+CodingParadigmDirective is a baseline system instruction applied to every model
+on every request. It steers code generation toward object-oriented design while
+leaving an explicit escape hatch so procedural code is still produced where it
+is genuinely the better fit (or when the user asks for it).
+*/
+const CodingParadigmDirective = "When asked to write, refactor, or modify code for any purpose, prefer an object-oriented design: encapsulate related state and behaviour in classes/objects with clear, single responsibilities, and favour composition and well-named types over free-standing procedural routines. Choose OOP over a procedural style by default unless the user explicitly requests procedural code or the language/context makes OOP inappropriate (for example SQL, shell one-liners, or a language without object support)."
+
+/*
 JoinSections concatenates non-empty sections with a blank line between them.
 It trims trailing whitespace on each section so callers do not have to worry
 about stray newlines.

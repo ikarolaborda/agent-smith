@@ -13,10 +13,19 @@ export interface ToolResult {
   is_error: boolean;
 }
 
+/*
+ * ImageAttachment holds a pasted image as a base64 data URL ("data:<mime>;base64,...")
+ * so it can be both previewed (<img src>) and sent to the backend unchanged.
+ */
+export interface ImageAttachment {
+  url: string;
+}
+
 export interface Message {
   id: string;
   role: Role;
   content: string;
+  images?: ImageAttachment[];
   tool_calls?: ToolCall[];
   tool_results?: ToolResult[];
   streaming?: boolean;
@@ -43,5 +52,5 @@ export interface ProvidersResponse {
 }
 
 export interface ModelsResponse {
-  data: { id: string; provider: string; model: string; kind?: string }[];
+  data: { id: string; provider: string; model: string; kind?: string; supports_vision?: boolean }[];
 }

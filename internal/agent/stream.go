@@ -73,6 +73,15 @@ calls). On context cancellation it returns ctx.Err(); on sink error it
 returns that error and stops the loop.
 */
 func (a *Agent) RunStream(ctx context.Context, session *Session, userInput string, sink StreamSink) (string, error) {
+	return a.RunStreamMessage(ctx, session, llm.Message{Role: llm.RoleUser, Content: userInput}, sink)
+}
+
+/*
+RunStreamMessage is RunStream for a fully-formed user message. It exists so
+callers can attach images (or other multimodal parts) to the turn; RunStream
+is the text-only convenience wrapper.
+*/
+func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm.Message, sink StreamSink) (string, error) {
 	if a == nil || a.Provider == nil {
 		return "", errors.New("agent: not configured")
 	}
@@ -83,7 +92,10 @@ func (a *Agent) RunStream(ctx context.Context, session *Session, userInput strin
 		return "", errors.New("agent: nil sink")
 	}
 
-	session.Append(llm.Message{Role: llm.RoleUser, Content: userInput})
+	if user.Role == "" {
+		user.Role = llm.RoleUser
+	}
+	session.Append(user)
 
 	for i := 1; i <= a.MaxIters; i++ {
 		req := llm.ChatRequest{

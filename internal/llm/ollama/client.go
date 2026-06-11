@@ -85,6 +85,7 @@ type wireMessage struct {
 	Role      string         `json:"role"`
 	Content   string         `json:"content,omitempty"`
 	Name      string         `json:"name,omitempty"`
+	Images    []string       `json:"images,omitempty"`
 	ToolCalls []wireToolCall `json:"tool_calls,omitempty"`
 }
 
@@ -142,6 +143,10 @@ func (c *Client) buildRequest(req llm.ChatRequest, stream bool) wireRequest {
 			Role:    string(m.Role),
 			Content: m.Content,
 			Name:    m.Name,
+		}
+		/* Ollama's /api/chat carries images as a per-message base64 array. */
+		for _, img := range m.Images {
+			wm.Images = append(wm.Images, img.Data)
 		}
 		for _, tc := range m.ToolCalls {
 			args := tc.Arguments

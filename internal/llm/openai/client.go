@@ -113,13 +113,27 @@ type wireMessage struct {
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
 
+/*
+wireOutMessage is the request-side message. Content is an interface because the
+OpenAI chat API accepts either a plain string or an array of typed parts (text
++ image_url) for multimodal input; the response-side wireMessage keeps Content
+as a plain string.
+*/
+type wireOutMessage struct {
+	Role       string         `json:"role"`
+	Content    any            `json:"content,omitempty"`
+	Name       string         `json:"name,omitempty"`
+	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
 type wireRequest struct {
-	Model       string        `json:"model"`
-	Messages    []wireMessage `json:"messages"`
-	Tools       []wireTool    `json:"tools,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	MaxTokens   *int          `json:"max_tokens,omitempty"`
-	Stream      bool          `json:"stream,omitempty"`
+	Model       string           `json:"model"`
+	Messages    []wireOutMessage `json:"messages"`
+	Tools       []wireTool       `json:"tools,omitempty"`
+	Temperature *float64         `json:"temperature,omitempty"`
+	MaxTokens   *int             `json:"max_tokens,omitempty"`
+	Stream      bool             `json:"stream,omitempty"`
 }
 
 type wireUsage struct {
@@ -161,13 +175,31 @@ func (c *Client) buildRequest(req llm.ChatRequest, stream bool) wireRequest {
 		Stream:      stream,
 	}
 
-	out.Messages = make([]wireMessage, 0, len(req.Messages))
+	out.Messages = make([]wireOutMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {
-		wm := wireMessage{
+		wm := wireOutMessage{
 			Role:       string(m.Role),
 			Content:    m.Content,
 			Name:       m.Name,
 			ToolCallID: m.ToolCallID,
+		}
+		/*
+			With images present, OpenAI requires content as an array of parts:
+			a text part (when there is text) followed by image_url parts whose
+			URL is a base64 data URL. Without images we keep the plain string.
+		*/
+		if len(m.Images) > 0 {
+			parts := make([]any, 0, len(m.Images)+1)
+			if m.Content != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": m.Content})
+			}
+			for _, img := range m.Images {
+				parts = append(parts, map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": dataURL(img)},
+				})
+			}
+			wm.Content = parts
 		}
 		for _, tc := range m.ToolCalls {
 			wm.ToolCalls = append(wm.ToolCalls, wireToolCall{
@@ -193,6 +225,15 @@ func (c *Client) buildRequest(req llm.ChatRequest, stream bool) wireRequest {
 		})
 	}
 	return out
+}
+
+/* dataURL re-wraps a canonical ImagePart as the base64 data URL OpenAI expects. */
+func dataURL(img llm.ImagePart) string {
+	mime := img.MimeType
+	if mime == "" {
+		mime = "image/png"
+	}
+	return "data:" + mime + ";base64," + img.Data
 }
 
 /* doRequest issues a POST and returns the raw response body or an error envelope. */
