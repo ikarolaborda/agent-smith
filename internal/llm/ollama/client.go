@@ -111,6 +111,13 @@ type wireRequest struct {
 	Tools    []wireTool    `json:"tools,omitempty"`
 	Stream   bool          `json:"stream"`
 	Options  *wireOptions  `json:"options,omitempty"`
+	/*
+		Think is Ollama's top-level reasoning toggle. It is a pointer so the
+		field is omitted entirely (leaving the model default) unless a caller
+		sets ChatRequest.Think; setting it false makes reasoning models answer
+		directly instead of spending the token budget on a thinking span.
+	*/
+	Think *bool `json:"think,omitempty"`
 }
 
 type wireResponse struct {
@@ -129,6 +136,7 @@ func (c *Client) buildRequest(req llm.ChatRequest, stream bool) wireRequest {
 	out := wireRequest{
 		Model:  model,
 		Stream: stream,
+		Think:  req.Think,
 	}
 
 	if req.Temperature != nil || req.MaxTokens != nil {

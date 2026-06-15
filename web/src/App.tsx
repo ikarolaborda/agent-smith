@@ -12,6 +12,7 @@ import {
   saveConversations,
 } from './store';
 import { streamChatCompletion } from './sse';
+import { generateTitle } from './title';
 import type { WireContentPart, WireMessage } from './sse';
 import { getOrCreateProfileId } from './profile';
 import { correction, remember } from './memory';
@@ -140,6 +141,7 @@ export function App() {
     }
 
     const conv = ensureActive();
+    const isFirstMessage = conv.messages.length === 0;
     const userMsg: Message = {
       id: makeMessageId(),
       role: 'user',
@@ -150,10 +152,27 @@ export function App() {
 
     updateConversation(conv.id, (c) => ({
       ...c,
-      title: c.messages.length === 0 ? deriveTitle([userMsg]) : c.title,
+      title: isFirstMessage ? deriveTitle([userMsg]) : c.title,
       messages: [...c.messages, userMsg, assistantMsg],
       updatedAt: Date.now(),
     }));
+
+    /*
+     * On the first message, deriveTitle above gives an instant placeholder
+     * (the truncated prompt). In the background, ask the model to distill a
+     * concise title and patch it in when it arrives. Best-effort: generateTitle
+     * resolves to null on any failure, in which case the placeholder stays.
+     */
+    if (isFirstMessage && text.trim()) {
+      const placeholder = deriveTitle([userMsg]);
+      generateTitle(conv.model, text).then((distilled) => {
+        if (!distilled) return;
+        updateConversation(conv.id, (c) =>
+          /* Only replace the auto-placeholder, never a title the user edited. */
+          c.title === placeholder ? { ...c, title: distilled } : c,
+        );
+      });
+    }
 
     const wireMessages: WireMessage[] = [...conv.messages, userMsg].map((m) => {
       if (m.images && m.images.length > 0) {

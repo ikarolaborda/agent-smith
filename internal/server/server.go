@@ -368,6 +368,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/v1/models", s.handleModels)
 	s.mux.HandleFunc("/v1/providers", s.handleProviders)
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
+	s.mux.HandleFunc("/v1/title", s.handleTitle)
 	s.mux.HandleFunc("/v1/rag/collections", s.handleRAGCollections)
 	s.mux.HandleFunc("/v1/rag/search", s.handleRAGSearch)
 	s.mux.HandleFunc("/v1/rag/remember", s.handleRAGRemember)

@@ -78,9 +78,12 @@ type ToolDefinition struct {
 }
 
 /*
-ChatRequest is the canonical request payload sent to a Provider. Temperature
-and MaxTokens are pointers so callers can distinguish "leave default" from
-"set to zero".
+ChatRequest is the canonical request payload sent to a Provider. Temperature,
+MaxTokens, and Think are pointers so callers can distinguish "leave default"
+from an explicit value. Think toggles a reasoning model's chain-of-thought:
+some providers (Ollama) expose this directly, and a nil value leaves the
+provider/model default untouched. Providers that have no notion of reasoning
+control simply ignore it.
 */
 type ChatRequest struct {
 	Model       string           `json:"model"`
@@ -88,6 +91,7 @@ type ChatRequest struct {
 	Tools       []ToolDefinition `json:"tools,omitempty"`
 	Temperature *float64         `json:"temperature,omitempty"`
 	MaxTokens   *int             `json:"max_tokens,omitempty"`
+	Think       *bool            `json:"think,omitempty"`
 	Stream      bool             `json:"stream,omitempty"`
 }
 
