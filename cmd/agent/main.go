@@ -23,6 +23,7 @@ import (
 
 	"github.com/ikarolaborda/agent-smith/internal/agent"
 	"github.com/ikarolaborda/agent-smith/internal/config"
+	"github.com/ikarolaborda/agent-smith/internal/context7"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/llm/anthropic"
 	"github.com/ikarolaborda/agent-smith/internal/llm/ollama"
@@ -52,6 +53,7 @@ type flags struct {
 	ragDir      string
 	disableRAG  bool
 	disableWeb  bool
+	disableC7   bool
 }
 
 func main() {
@@ -80,6 +82,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.ragDir, "rag-dir", "data/rag/collections", "directory holding RAG collection JSON files")
 	flag.BoolVar(&f.disableRAG, "no-rag", false, "disable RAG augmentation (still loads collections for /v1/rag endpoints)")
 	flag.BoolVar(&f.disableWeb, "no-web-search", false, "operator kill switch for the web-grounding gate (overrides all per-request flags)")
+	flag.BoolVar(&f.disableC7, "no-context7", false, "operator kill switch for Context7 documentation augmentation (otherwise on when CONTEXT7_API_KEY is set)")
 	flag.Parse()
 	return f
 }
@@ -145,6 +148,21 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 	if ragSvc != nil && !f.disableWeb {
 		ragSvc.WebSearch = web.NewDDGSearcher()
 		logger.Info("web grounding: enabled", "backend", "ddg")
+	}
+	/*
+		Context7 documentation augmentation is always-on when an API key is
+		present (and not killed by --no-context7), so every model — local ones
+		included — transparently gets current library docs. The key lives in the
+		environment (loaded from .env adjacent to the config); CONTEXT7_BASE_URL
+		overrides the endpoint root if the API path ever changes.
+	*/
+	if ragSvc != nil && !f.disableC7 {
+		if key := os.Getenv("CONTEXT7_API_KEY"); key != "" {
+			ragSvc.Context7 = context7.New(key, os.Getenv("CONTEXT7_BASE_URL"))
+			logger.Info("context7 augmentation: enabled")
+		} else {
+			logger.Info("context7 augmentation: disabled", "reason", "CONTEXT7_API_KEY not set")
+		}
 	}
 
 	srv, err := server.New(server.Options{
