@@ -67,11 +67,17 @@ func Load(path string) (*Config, error) {
 	}
 
 	/*
-		Load .env from the config file's directory. godotenv.Load does not
-		overwrite variables that are already set, which preserves the rule
-		"real env > .env".
+		Load .env from the config file's directory, then from the current
+		working directory (project root). godotenv.Load does not overwrite
+		variables that are already set, so the precedence is
+		"real env > config-dir .env > project-root .env", and loading the same
+		file twice (when the config sits at the root) is a harmless no-op. The
+		root fallback is what lets a project-root .env — the conventional
+		location — supply keys like CONTEXT7_API_KEY when --config points at
+		configs/.
 	*/
 	_ = godotenv.Load(filepath.Join(filepath.Dir(path), ".env"))
+	_ = godotenv.Load(".env")
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
