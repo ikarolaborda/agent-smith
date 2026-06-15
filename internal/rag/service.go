@@ -247,6 +247,16 @@ func (s *Service) Search(ctx context.Context, query string, opts SearchOpts) ([]
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
+	/*
+		Nothing to search against: with no loaded collections, return cleanly
+		instead of forcing an embedder choice. This keeps a fresh install (no
+		ingested docs) from logging a spurious "ambiguous embedder" error on
+		every chat turn when multiple embedder providers happen to be
+		credentialed.
+	*/
+	if len(s.Index.Names()) == 0 {
+		return nil, nil
+	}
 	filter := opts.Filter
 	threshold := s.Threshold
 	if len(filter) == 0 {
@@ -655,8 +665,19 @@ func renderHit(h SearchResult) string {
 
 /*
 pickEmbedder resolves the embedder to use for a query. Preference order:
-explicit opts.EmbedderID, the identity of the first targeted collection,
-the only registered embedder if there is exactly one, otherwise error.
+
+ 1. explicit opts.EmbedderID
+ 2. the embedder of a targeted (topic-routed) collection
+ 3. the corpus embedder — the embedder that actually built the loaded
+    collections; a query must be embedded by the same model as the data it is
+    compared against, so when the loaded corpus uses exactly one registered
+    embedder that is the unambiguous correct choice even if more embedders are
+    *configured* (e.g. both OpenAI and Ollama keys are present)
+ 4. the only registered embedder, if there is exactly one
+
+It errors only when none of the above resolve: no embedders at all, or a corpus
+that genuinely mixes several registered embedders with no topic match to
+disambiguate.
 */
 func (s *Service) pickEmbedder(id string, filter []string) (llm.Embedder, error) {
 	if id != "" {
@@ -675,6 +696,24 @@ func (s *Service) pickEmbedder(id string, filter []string) (llm.Embedder, error)
 			return e, nil
 		}
 	}
+
+	/*
+		Derive the embedder from the loaded corpus. Among the embedder ids that
+		actually built the collections, keep those we have a registered embedder
+		for; if exactly one matches, the query must use it (matching embedding
+		space). This is what lets RAG search work when several providers are
+		credentialed but only one was used for ingest.
+	*/
+	var corpusMatch []llm.Embedder
+	for _, eid := range s.Index.EmbedderIDs() {
+		if e, ok := s.Embedders[eid]; ok {
+			corpusMatch = append(corpusMatch, e)
+		}
+	}
+	if len(corpusMatch) == 1 {
+		return corpusMatch[0], nil
+	}
+
 	if len(s.Embedders) == 1 {
 		for _, e := range s.Embedders {
 			return e, nil

@@ -51,6 +51,30 @@ func (i *Index) Names() []string {
 	return out
 }
 
+/*
+EmbedderIDs returns the sorted, distinct embedder identities across all loaded
+collections. It is the corpus's source of truth for which embedding model a
+query must use: a query vector can only be compared against chunks embedded by
+the same model (see Index.Search, which filters on EmbedderID), so the embedder
+that built the corpus is the one that must embed the query.
+*/
+func (i *Index) EmbedderIDs() []string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	seen := map[string]struct{}{}
+	for _, c := range i.collections {
+		if c.EmbedderID != "" {
+			seen[c.EmbedderID] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
 /* Get returns a snapshot of one collection or nil if absent. */
 func (i *Index) Get(name string) *Collection {
 	i.mu.RLock()
