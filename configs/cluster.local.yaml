@@ -90,3 +90,15 @@ runtime:
     rpc_port: 50052
     gpu_layers: 99
     tensor_split: "0.73,0.27"   # ~64:24 unified-memory split (coordinator:worker)
+    # Performance flags (verified against current llama.cpp via Context7):
+    #   -fa on        flash attention (faster attention; REQUIRED for quantized KV cache)
+    #   -ctk/-ctv q8_0  quantize the K/V cache to 8-bit — ~halves KV memory vs the f16
+    #                   default, which is what lets a 72B Q4 hold 32k context across the
+    #                   64GB+24GB split. Drop to f16 if you see quality loss and have headroom.
+    extra_args:
+      - "-fa"
+      - "on"
+      - "-ctk"
+      - "q8_0"
+      - "-ctv"
+      - "q8_0"
