@@ -70,6 +70,30 @@ func TestRestartBackoff(t *testing.T) {
 	}
 }
 
+/*
+A child that dies before its TCP endpoint opens must fail Start PROMPTLY (via the
+terminal dead flag), not block the full readiness timeout. Regression guard for
+the 90s-per-Start stall a present-but-crashing backend caused.
+*/
+func TestStartFailsFastWhenChildDiesBeforeReady(t *testing.T) {
+	sup := newSupervisor(spawnSpec{
+		name:         "crasher",
+		path:         "/bin/sh",
+		args:         []string{"-c", "exit 1"},
+		readyAddr:    "127.0.0.2:1",
+		readyTimeout: 60 * time.Second,
+	}, "never", 0, discardLogger(), NewCollector())
+
+	start := time.Now()
+	err := sup.Start(context.Background())
+	if err == nil {
+		t.Fatal("Start should fail when the child exits before readiness")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Start took %v; expected prompt fail-fast on terminal child death, not the full readiness timeout", elapsed)
+	}
+}
+
 /* R2: Stop terminates the supervised process promptly (not after its natural run). */
 func TestSupervisorStopKillsProcess(t *testing.T) {
 	sup := newSupervisor(spawnSpec{

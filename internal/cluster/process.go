@@ -33,6 +33,15 @@ type spawnSpec struct {
 	readyAddr string
 	/* readyTimeout bounds how long Start waits for readiness. */
 	readyTimeout time.Duration
+	/*
+		readyProbe, when set, is polled after the TCP port opens until it returns
+		true — an application-level readiness gate. A runtime that binds its port
+		early but loads its model lazily (llama-server returns 503 until the
+		weights are in memory) is not actually ready when the socket accepts, so
+		TCP-open alone is a false-positive. Backends that have no distinct loading
+		phase can leave this nil and rely on readyAddr.
+	*/
+	readyProbe func(context.Context) bool
 }
 
 /*
@@ -52,6 +61,12 @@ type supervisor struct {
 	started  bool
 	restarts int
 	lastErr  error
+	/*
+		dead is set when the watcher gives up restarting after an unexpected
+		exit. The readiness wait checks it so a process that crashes during load
+		(e.g. a worker OOM) fails fast instead of blocking until readyTimeout.
+	*/
+	dead bool
 }
 
 func newSupervisor(spec spawnSpec, policy string, maxRestarts int, logger *slog.Logger, m *Collector) *supervisor {
@@ -79,12 +94,54 @@ func (s *supervisor) Start(ctx context.Context) error {
 	go s.watch()
 
 	if s.spec.readyAddr != "" {
-		if err := waitForTCP(ctx, s.spec.readyAddr, s.readyTimeout()); err != nil {
+		if err := s.waitForTCPReady(ctx); err != nil {
 			_ = s.Stop(context.Background())
 			return fmt.Errorf("%s: endpoint %s not ready: %w", s.spec.name, s.spec.readyAddr, err)
 		}
 	}
+	if s.spec.readyProbe != nil {
+		if err := s.waitForReady(ctx); err != nil {
+			_ = s.Stop(context.Background())
+			return fmt.Errorf("%s: not ready: %w", s.spec.name, err)
+		}
+	}
 	return nil
+}
+
+/*
+waitForReady polls the application-level readiness probe until it succeeds, the
+process dies terminally, the context is cancelled, or the timeout elapses. It
+logs once per 30s so a multi-minute model load is visible rather than looking
+hung.
+*/
+func (s *supervisor) waitForReady(ctx context.Context) error {
+	timeout := s.readyTimeout()
+	deadline := time.Now().Add(timeout)
+	lastLog := time.Now()
+	s.logger.Info("cluster: waiting for backend to load model and become ready", "backend", s.spec.name, "timeout", timeout)
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		s.mu.Lock()
+		dead := s.dead
+		s.mu.Unlock()
+		if dead {
+			return fmt.Errorf("process exited before becoming ready")
+		}
+		if s.spec.readyProbe(ctx) {
+			s.logger.Info("cluster: backend ready", "backend", s.spec.name)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("not ready after %s", timeout)
+		}
+		if time.Since(lastLog) >= 30*time.Second {
+			s.logger.Info("cluster: still loading model", "backend", s.spec.name, "elapsed", time.Since(deadline.Add(-timeout)).Truncate(time.Second))
+			lastLog = time.Now()
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func (s *supervisor) readyTimeout() time.Duration {
@@ -154,6 +211,9 @@ func (s *supervisor) watch() {
 
 	s.logger.Warn("cluster: backend process exited", "backend", s.spec.name, "err", err, "restart", shouldRestart, "restarts", restarts)
 	if !shouldRestart {
+		s.mu.Lock()
+		s.dead = true
+		s.mu.Unlock()
 		return
 	}
 	if s.metrics != nil {
@@ -258,14 +318,27 @@ func pipeLines(logger *slog.Logger, name string, r io.Reader) {
 	}
 }
 
-/* waitForTCP polls a host:port until it accepts a connection or times out. */
-func waitForTCP(ctx context.Context, addr string, timeout time.Duration) error {
+/*
+waitForTCPReady polls the ready address until it accepts a connection, the
+process dies terminally, the context is cancelled, or the timeout elapses.
+Bailing on terminal death (the dead flag) keeps Start from blocking the full
+readiness timeout when the child crashes on launch — e.g. a backend whose binary
+is present but exits immediately because a dependency is missing.
+*/
+func (s *supervisor) waitForTCPReady(ctx context.Context) error {
+	timeout := s.readyTimeout()
 	deadline := time.Now().Add(timeout)
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		s.mu.Lock()
+		dead := s.dead
+		s.mu.Unlock()
+		if dead {
+			return fmt.Errorf("process exited before %s opened", s.spec.readyAddr)
+		}
+		conn, err := net.DialTimeout("tcp", s.spec.readyAddr, 2*time.Second)
 		if err == nil {
 			_ = conn.Close()
 			return nil

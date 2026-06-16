@@ -39,20 +39,30 @@ If you ever rebuild, re-ship `rpc-server` so both sides stay byte-identical.
 
 ## 3. Get the model (COORDINATOR — it holds the .gguf; the worker only needs the binary)
 ```sh
+# The huihui-ai repo (huihui-ai/Qwen2.5-72B-Instruct-abliterated) ships
+# SAFETENSORS only — no GGUF. Pull the GGUF from mradermacher's quant of those
+# exact weights (cardData base_model = huihui-ai/Qwen2.5-72B-Instruct-abliterated),
+# a single 47.4GB Q4_K_M file (fits 64+24=88GB cluster, not a single 24GB node).
+pipx install "huggingface_hub[cli]"     # gives `hf`
 mkdir -p /Users/shared/models
-# Q4_K_M (~44GB) fits the 64+24=88GB cluster, not a single 24GB node.
-# Use your normal Hugging Face download flow for:
-#   huihui-ai/Qwen2.5-72B-Instruct-abliterated  (a Q4_K_M GGUF)
-# Save to the path in configs/cluster.local.yaml:
-#   /Users/shared/models/Qwen2.5-72B-Instruct-abliterated-Q4_K_M.gguf
+hf download mradermacher/Qwen2.5-72B-Instruct-abliterated-GGUF \
+  Qwen2.5-72B-Instruct-abliterated.Q4_K_M.gguf \
+  --local-dir /Users/shared/models
+# Lands at the path in configs/cluster.local.yaml:
+#   /Users/shared/models/Qwen2.5-72B-Instruct-abliterated.Q4_K_M.gguf
 ```
 
 ## 4. Start the worker (WORKER, m5p)
 ```sh
-# Bind to the Thunderbolt-bridge IP only (RPC is unauthenticated — private link).
-# (over SSH from the coordinator, or in a Terminal on the worker)
-~/bin/rpc-server -H 169.254.29.19 -p 50052
-# leave running; it exposes this Mac's Metal device to the coordinator.
+# Use the helper — it binds rpc-server to the worker's CURRENT Thunderbolt
+# bridge0 IP (link-local 169.254.x rotates on reboot, so never hardcode it).
+# Over SSH from the coordinator, or in a Terminal on the worker:
+ssh ikaros-macbook-pro-m5p.local 'cd ~/path/to/agent-smith && scripts/start-worker-rpc.sh'
+#   or, if the repo isn't on the worker, copy the one-liner it runs:
+#   IP=$(ipconfig getifaddr bridge0); ~/bin/rpc-server -H "$IP" -p 50052
+# Leave it running; it exposes this Mac's Metal device. The coordinator
+# AUTO-DISCOVERS this address (resolves the worker hostname + probes :50052),
+# so no IP is pinned on either side and a reboot needs no config edit.
 ```
 
 ## 5. Launch agent-smith clustered (COORDINATOR)
@@ -65,9 +75,14 @@ echo 'CONTEXT7_API_KEY=...' >> .env     # if not already set
 agent-smith launches, on the coordinator:
 ```
 llama-server --model /Users/shared/models/…Q4_K_M.gguf --host 127.0.0.1 --port 8082 \
-  -ngl 99 --ctx-size 32768 --rpc ikaros-macbook-pro-m5p.local:50052 \
-  --tensor-split 0.73,0.27 -fa on -ctk q8_0 -ctv q8_0
+  -ngl 99 --ctx-size 16384 --rpc 169.254.x.y:50052 \
+  --tensor-split 0.85,0.15 -fa on -ctk q8_0 -ctv q8_0
 ```
+The `--rpc` target is the live IP agent-smith auto-discovered from the worker
+hostname (logged as `cluster: resolved rpc host configured=… selected=…`); if the
+worker's rpc-server is down it logs `rpc host … not reachable … refusing to launch
+single-node` and falls back to local rather than risk OOMing the coordinator with
+a single-node 72B.
 Set `cluster.mode: llama_cpp_rpc` to pin this backend (default `auto` tries
 exo→mlx→llama→local; with only llama.cpp built it lands here).
 
@@ -91,11 +106,22 @@ Macs (`Activity Monitor` or `sudo memory_pressure` / `vm_stat`):
 3. Run a short sanity suite: one long-context prompt, one RAG-grounded cybersecurity query, one multi-turn exchange — confirm no truncation, KV corruption, or retrieval regression.
 4. Capture, separately: prompt-eval tok/s, generation tok/s, first-token latency.
 
-## Fallback ladder (if it OOMs or thrashes)
-Change ONE knob at a time, cheapest first:
-1. Lower `models[].context_tokens`: 32768 → 24576 → 16384 (KV is the main pressure).
-2. Only then shift `tensor_split` toward the coordinator to protect the 24GB worker: `0.73,0.27` → `0.75,0.25` → `0.76,0.24`.
-3. As a last resort, drop `-fa on`/`-ctk/-ctv q8_0` only if you switch to a smaller ctx with f16 KV (do not run quantized KV without `-fa on`).
+## Worker kernel panic (observed) and the safe starting profile
+The 24GB worker once **kernel-panicked** (`watchdog timeout: no checkins from
+watchdogd in 90s` → reboot) while loading its `0.27` share at `32768` ctx — the
+system went unresponsive under memory/GPU over-commit. The config now ships a
+conservative default: `tensor_split 0.85,0.15`, `context_tokens 16384`. The
+coordinator's 64GB carries the bulk; the worker takes only a slice it can hold
+after macOS overhead. **Tune UP from here, one knob at a time, only after a clean
+warm load + sustained generation while watching the worker's memory_pressure.**
+
+## Tuning ladder (raise capability) / fallback ladder (if it OOMs or thrashes)
+From the safe profile, raise ONE knob at a time and watch BOTH Macs' memory:
+1. Raise `models[].context_tokens`: 16384 → 24576 → 32768 (KV is the main pressure).
+2. Then raise the worker share: `tensor_split` 0.85,0.15 → 0.82,0.18 → 0.78,0.22.
+If it OOMs/thrashes/panics, go back down the same ladder (lower ctx first, then
+shift `tensor_split` back toward the coordinator). Never run quantized KV
+(`-ctk/-ctv q8_0`) without `-fa on`.
 
 ## Performance & quality notes
 - **KV cache q8_0 + `-fa on`** is the lever that fits 32k context for a 72B Q4

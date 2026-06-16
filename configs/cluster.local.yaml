@@ -9,7 +9,10 @@
 # This file is machine-specific — consider adding it to .gitignore.
 
 cluster:
-  mode: auto
+  # Pin llama_cpp_rpc: `auto` tries exo first, and exo isn't installed — it
+  # "starts" then exits and the scheduler commits to it instead of falling
+  # through, so requests hang. Only llama.cpp RPC is built here.
+  mode: llama_cpp_rpc
   coordinator: m5max
   transport_preference:
     - thunderbolt_tcp
@@ -20,7 +23,11 @@ cluster:
   allowlist:
     - ikaros-macbook-pro-m5m.local
     - ikaros-macbook-pro-m5p.local
+    # link-local 169.254.x is EPHEMERAL — it rotates on reboot. rpc_hosts uses the
+    # .local hostname (auto-resolves), so these IPs are just belt-and-suspenders.
+    # Worker bridge0 as of 2026-06-16 18:15 = 169.254.213.127 (was .29.19; drifted).
     - 169.254.197.136
+    - 169.254.213.127
     - 169.254.29.19
   nodes:
     - id: m5max
@@ -52,12 +59,17 @@ models:
   # always-on engineering directive), NOT by fine-tuning these frozen weights.
   - id: qwen2.5-72b-abliterated
     format: gguf_or_mlx
-    path: /Users/shared/models/Qwen2.5-72B-Instruct-abliterated-Q4_K_M.gguf
+    path: /Users/shared/models/Qwen2.5-72B-Instruct-abliterated.Q4_K_M.gguf
     served_name: qwen2.5-72b-instruct-abliterated
     # Qwen2.5-72B is 32768-native (up to 131072 with YaRN). Larger window = more
     # retrieved RAG/CVE/code evidence fits per request -> better grounding, less
     # hallucination. Costs KV memory across the cluster; lower if you hit limits.
-    context_tokens: 32768
+    # Conservative starting profile: the 24GB worker kernel-panicked (watchdog
+    # timeout) loading its 0.27 share at 32768 ctx — memory/GPU over-commit. Start
+    # small and safe, then tune UP only while watching the worker's memory_pressure
+    # (see the runbook ladder): ctx 16384 -> 24576 -> 32768, worker share 0.15 ->
+    # 0.18 -> 0.22, one knob at a time, after a clean warm load + sustained gen.
+    context_tokens: 16384
     preferred_backends:
       - exo
       - llama_cpp_rpc
@@ -89,11 +101,20 @@ runtime:
     # install / sudo is needed.
     server: /Users/ikarolaborda/llama.cpp/build/bin/llama-server
     port: 8082
+    # Stable HOSTNAME, never an ephemeral link-local IP. agent-smith auto-discovers
+    # the live address at launch: it resolves this name to its candidate IPs and
+    # probes the RPC port, picking the one that is actually listening (the worker is
+    # multi-homed and rpc-server binds one interface; link-local IPs rotate on
+    # reboot). Start the worker with scripts/start-worker-rpc.sh so it binds its
+    # current bridge0 IP — no hardcoded address on either side.
     rpc_hosts:
       - ikaros-macbook-pro-m5p.local:50052
     rpc_port: 50052
     gpu_layers: 99
-    tensor_split: "0.73,0.27"   # ~64:24 unified-memory split (coordinator:worker)
+    tensor_split: "0.85,0.15"   # conservative: protect the 24GB worker (it panicked
+                                # at 0.27). The coordinator's 64GB carries the bulk;
+                                # the worker takes only a slice it can hold after
+                                # macOS overhead. Raise toward 0.22 only once stable.
     # Performance flags (verified against current llama.cpp via Context7):
     #   -fa on        flash attention (faster attention; REQUIRED for quantized KV cache)
     #   -ctk/-ctv q8_0  quantize the K/V cache to 8-bit — ~halves KV memory vs the f16

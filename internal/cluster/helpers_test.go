@@ -88,5 +88,15 @@ func testConfig() *ClusterConfig {
 		}},
 	}
 	cfg.Normalize()
+	/*
+		Point every external runtime at a guaranteed-absent path so Probe reports
+		not-installed regardless of what is on the test host's PATH (a real `exo`
+		appeared here and made selection tests launch it and block on its
+		readiness gate). These tests exercise selection/fallback logic, not real
+		runtimes.
+	*/
+	cfg.Runtime.Exo.Binary = "/nonexistent/agent-smith-test-exo"
+	cfg.Runtime.MLX.Python = "/nonexistent/agent-smith-test-python"
+	cfg.Runtime.Llama.Server = "/nonexistent/agent-smith-test-llama-server"
 	return cfg
 }

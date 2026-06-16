@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 /* llamaBackend orchestrates llama-server + remote rpc-server hosts. */
@@ -70,7 +71,10 @@ func (b *llamaBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		return fmt.Errorf("llama_cpp_rpc: %q not found: %w", b.cfg.Llama.Server, err)
 	}
 
-	rpcHosts := b.resolveRPCHosts(cfg.Workers)
+	rpcHosts, err := b.resolveRPCHosts(ctx, cfg.Workers)
+	if err != nil {
+		return fmt.Errorf("llama_cpp_rpc: %w", err)
+	}
 	for _, h := range rpcHosts {
 		host := h
 		if i := strings.LastIndex(h, ":"); i >= 0 {
@@ -102,26 +106,59 @@ func (b *llamaBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	args = append(args, b.cfg.Llama.ExtraArgs...)
 
 	b.logger.Info("cluster: launching llama-server", "rpc_hosts", rpcHosts, "tensor_split", b.cfg.Llama.TensorSplit, "gpu_layers", b.cfg.Llama.GPULayers)
+	/*
+		Gate readiness on the HTTP endpoint answering 2xx, not just the TCP port
+		opening: a 72B Q4 split over RPC binds the port in seconds but loads for
+		minutes, during which llama-server returns 503. readyTimeout is generous
+		(startup_timeout_seconds, default 600s) so the scheduler waits for the
+		load instead of falsely declaring the backend unhealthy and degrading to
+		the single-node fallback.
+	*/
+	readyTimeout := time.Duration(b.cfg.Llama.StartupTimeoutSeconds) * time.Second
 	b.sup = newSupervisor(spawnSpec{
-		name:      BackendLlamaRPC,
-		path:      b.cfg.Llama.Server,
-		args:      args,
-		readyAddr: fmt.Sprintf("127.0.0.1:%d", b.cfg.Llama.Port),
+		name:         BackendLlamaRPC,
+		path:         b.cfg.Llama.Server,
+		args:         args,
+		readyAddr:    fmt.Sprintf("127.0.0.1:%d", b.cfg.Llama.Port),
+		readyTimeout: readyTimeout,
+		readyProbe: func(c context.Context) bool {
+			ok, _ := b.probeEndpoint(c)
+			return ok
+		},
 	}, cfg.Runtime.ProcessRestart, cfg.Runtime.MaxRestartAttempts, b.logger, b.metrics)
 	return b.sup.Start(ctx)
 }
 
-/* resolveRPCHosts uses the explicit list, else derives host:RPCPort per worker. */
-func (b *llamaBackend) resolveRPCHosts(workers []Node) []string {
-	if len(b.cfg.Llama.RPCHosts) > 0 {
-		return b.cfg.Llama.RPCHosts
-	}
-	out := make([]string, 0, len(workers))
-	for _, w := range workers {
-		if w.Host == "" {
-			continue
+/*
+resolveRPCHosts takes the configured targets (explicit rpc_hosts, else derived
+host:RPCPort per worker — both keep STABLE hostnames, never ephemeral IPs) and
+auto-discovers each one's live address via resolveRPCAddr (resolve + probe). If a
+configured worker cannot be reached on the private network it returns an error
+rather than dropping it: launching llama-server without that --rpc target would
+silently run the 72B single-node and risk OOMing the coordinator, the exact
+failure clustering exists to avoid. The scheduler then falls back to the local
+runtime instead.
+*/
+func (b *llamaBackend) resolveRPCHosts(ctx context.Context, workers []Node) ([]string, error) {
+	configured := b.cfg.Llama.RPCHosts
+	if len(configured) == 0 {
+		for _, w := range workers {
+			if w.Host == "" {
+				continue
+			}
+			configured = append(configured, net.JoinHostPort(w.Host, strconv.Itoa(b.cfg.Llama.RPCPort)))
 		}
-		out = append(out, net.JoinHostPort(w.Host, strconv.Itoa(b.cfg.Llama.RPCPort)))
 	}
-	return out
+	out := make([]string, 0, len(configured))
+	for _, hp := range configured {
+		resolved, ok := resolveRPCAddr(ctx, hp, b.cfg.PrivateClusterOnly, 0)
+		if !ok {
+			return nil, fmt.Errorf("rpc host %q not reachable on the private network (rpc-server down or wrong interface); refusing to launch single-node", hp)
+		}
+		if resolved != hp {
+			b.logger.Info("cluster: resolved rpc host", "configured", hp, "selected", resolved)
+		}
+		out = append(out, resolved)
+	}
+	return out, nil
 }

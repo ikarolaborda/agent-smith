@@ -173,6 +173,15 @@ type LlamaRuntime struct {
 	CacheDir string `yaml:"cache_dir"`
 	/* ExtraArgs are appended to the llama-server invocation. */
 	ExtraArgs []string `yaml:"extra_args"`
+	/*
+		StartupTimeoutSeconds bounds how long the backend waits for llama-server
+		to finish loading the model and answer its HTTP endpoint before it is
+		declared unhealthy. llama-server binds its TCP port within seconds but
+		returns 503 "loading model" for the whole load, which for a 72B Q4 split
+		over Thunderbolt RPC is minutes — so a short gate falsely fails it and the
+		scheduler degrades to the single-node fallback. Default 600s in Normalize.
+	*/
+	StartupTimeoutSeconds int `yaml:"startup_timeout_seconds"`
 }
 
 /* ClusterConfig is the top-level shape parsed from the cluster YAML file. */
@@ -248,6 +257,9 @@ func (c *ClusterConfig) Normalize() {
 	}
 	if c.Runtime.Llama.GPULayers == 0 {
 		c.Runtime.Llama.GPULayers = 99
+	}
+	if c.Runtime.Llama.StartupTimeoutSeconds == 0 {
+		c.Runtime.Llama.StartupTimeoutSeconds = 600
 	}
 	for i := range c.Models {
 		if c.Models[i].ServedName == "" {
