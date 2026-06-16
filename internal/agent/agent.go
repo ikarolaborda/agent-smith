@@ -159,7 +159,7 @@ func (a *Agent) composeMessages(ctx context.Context, session *Session) []llm.Mes
 		security posture reach all models and providers — including the clustered
 		Qwen — regardless of the configured system prompt.
 	*/
-	system := prompt.JoinSections(a.SystemPrompt, prompt.CodingParadigmDirective, prompt.EngineeringDirective, aug)
+	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, aug)
 	if system == "" {
 		return msgs
 	}

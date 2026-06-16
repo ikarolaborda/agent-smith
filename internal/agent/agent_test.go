@@ -109,6 +109,28 @@ func TestAgent_AlwaysAppliesEngineeringDirective(t *testing.T) {
 	}
 }
 
+/*
+The default persona (informal cybersecurity software architect) must reach every
+request so the voice is consistent across all models and languages. Guards the
+PersonaDirective against accidental drop in a message-composition refactor.
+*/
+func TestAgent_AlwaysAppliesPersona(t *testing.T) {
+	p := &capturingProvider{}
+	a := agent.New(p, tools.NewRegistry(), "", 3, nil)
+	if _, err := a.Run(context.Background(), agent.NewSession(), "hey"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.last.Messages) == 0 || p.last.Messages[0].Role != llm.RoleSystem {
+		t.Fatalf("expected a leading system message, got %+v", p.last.Messages)
+	}
+	sys := strings.ToLower(p.last.Messages[0].Content)
+	for _, needle := range []string{"software architect", "cybersecurity", "swearing is allowed", "reply in the user's language"} {
+		if !strings.Contains(sys, strings.ToLower(needle)) {
+			t.Fatalf("system message missing persona clause %q: %q", needle, p.last.Messages[0].Content)
+		}
+	}
+}
+
 func TestAgent_RunHitsMaxIterationsOnToolLoop(t *testing.T) {
 	/*
 		The provider always returns a tool call; the loop should terminate
