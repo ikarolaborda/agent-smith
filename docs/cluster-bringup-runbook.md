@@ -13,24 +13,29 @@ llama.cpp perf flags (`-fa on`, `-ctk/-ctv q8_0`). `bin/agent` built.
 Steps below are operator-run (build + 44GB model + worker are not reachable from
 the coordinator's tooling).
 
-## 1. Toolchain (BOTH Macs)
+## 1–2. Build ONCE on the coordinator, ship the worker binary (DONE)
+The worker has no Homebrew/cmake, so build a self-contained static binary on the
+coordinator and copy it — this also guarantees RPC version parity (the worker
+runs the *identical* binary, verified by matching SHA256). No build tools on the
+worker.
 ```sh
-brew install cmake          # coordinator is missing it; worker likely too
-xcode-select --install 2>/dev/null || true   # Metal toolchain
-```
+# Coordinator (M5 Max) — already executed this session:
+git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/llama.cpp && cd ~/llama.cpp
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_RPC=ON -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON \
+  -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF
+cmake --build build --config Release -j --target llama-server rpc-server
+otool -L build/bin/rpc-server     # acceptance gate: only /System + /usr/lib deps (verified PASS)
 
-## 2. Build llama.cpp with RPC + Metal (BOTH Macs)
-```sh
-git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
-cmake -B build -DGGML_RPC=ON -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j
-# Build the SAME llama.cpp revision with the SAME flags on both Macs — a
-# coordinator/worker mismatch can cause RPC protocol or kernel errors.
-# verify:
-ls build/bin/llama-server build/bin/rpc-server
-# put them on PATH (or set runtime.llama_cpp.server to the full path):
-sudo cp build/bin/llama-server build/bin/rpc-server /usr/local/bin/
+# Ship rpc-server to the worker (M5 Pro) — already executed:
+ssh ikaros-macbook-pro-m5p.local 'mkdir -p ~/bin'
+scp build/bin/rpc-server ikaros-macbook-pro-m5p.local:~/bin/rpc-server
+ssh ikaros-macbook-pro-m5p.local 'chmod +x ~/bin/rpc-server; shasum -a 256 ~/bin/rpc-server'
+# Worker SHA256 must equal the coordinator's = parity by identity (verified match).
 ```
+`configs/cluster.local.yaml` already points `runtime.llama_cpp.server` at
+`~/llama.cpp/build/bin/llama-server` (absolute path, no sudo/PATH install).
+If you ever rebuild, re-ship `rpc-server` so both sides stay byte-identical.
 
 ## 3. Get the model (COORDINATOR — it holds the .gguf; the worker only needs the binary)
 ```sh
@@ -45,7 +50,8 @@ mkdir -p /Users/shared/models
 ## 4. Start the worker (WORKER, m5p)
 ```sh
 # Bind to the Thunderbolt-bridge IP only (RPC is unauthenticated — private link).
-rpc-server -H 169.254.29.19 -p 50052
+# (over SSH from the coordinator, or in a Terminal on the worker)
+~/bin/rpc-server -H 169.254.29.19 -p 50052
 # leave running; it exposes this Mac's Metal device to the coordinator.
 ```
 

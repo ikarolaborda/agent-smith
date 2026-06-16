@@ -83,7 +83,11 @@ runtime:
     port: 52415
 
   llama_cpp:
-    server: llama-server        # build llama.cpp with -DGGML_RPC=ON -DGGML_METAL=ON
+    # Built static (system-only deps) at this path on the coordinator; the same
+    # rpc-server binary was scp'd to the worker (~/bin/rpc-server) — identical
+    # sha256 guarantees ggml RPC version parity. Use an absolute path so no PATH
+    # install / sudo is needed.
+    server: /Users/ikarolaborda/llama.cpp/build/bin/llama-server
     port: 8082
     rpc_hosts:
       - ikaros-macbook-pro-m5p.local:50052
