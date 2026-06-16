@@ -227,7 +227,7 @@ The Go binary embeds `web/dist` via `go:embed`. After editing anything under `we
 
 Named for Agent Smith of *The Matrix* (1999). The visual identity — narrow, opaque, slightly-trapezoidal lenses with a single thin streak of Matrix-green at the bottom — lives under `docs/brand/`.
 
-> *"It is inevitable."* — Mr. Smith
+> *"The Best Thing About Being Me… There's So Many 'Me's"* — Agent Smith
 
 ## License
 
