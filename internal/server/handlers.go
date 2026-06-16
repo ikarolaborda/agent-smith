@@ -299,7 +299,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	session := agent.NewSession()
 	history, lastUser, sErr := splitHistory(messages)
 	if sErr != nil {
-		enc.writeOpenAIDelta(completionID, displayModel, createdAt, map[string]any{
+		_ = enc.writeOpenAIDelta(completionID, displayModel, createdAt, map[string]any{
 			"role":    "assistant",
 			"content": "request rejected: " + sErr.Error(),
 		}, "stop")

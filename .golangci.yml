@@ -19,6 +19,12 @@ linters-settings:
     rules:
       - name: exported
         disabled: false
+        arguments:
+          # Keep doc-comment enforcement on exported symbols, but don't fight
+          # descriptive cluster.Cluster* names with the stutter sub-check —
+          # cluster.Manager already exists, so a clean de-stutter rename isn't
+          # possible without colliding the interface with the struct.
+          - disableStutteringCheck
       - name: package-comments
         disabled: false
 
