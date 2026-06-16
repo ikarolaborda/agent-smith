@@ -14,7 +14,6 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 )
@@ -94,19 +93,26 @@ func (m *Manager) probeNode(ctx context.Context, n, coord Node, allowed map[stri
 		return false, "private_cluster_only: host is not a private interface"
 	}
 	/*
-		Defense in depth: even a private-looking name must not resolve to a
-		public IP under private_cluster_only (guards against a hijacked or
-		misconfigured .local / search-domain entry pointing off-network).
+		Do NOT reject the node just because its name ALSO resolves to a public
+		address: a multi-homed worker legitimately has a global IPv6 alongside its
+		private Thunderbolt/LAN addresses. The security property — only ever DIAL a
+		private address under private_cluster_only — is enforced per-candidate by
+		resolveRPCAddr (filterPrivateCandidates drops public, then fails closed), so
+		a hijacked name resolving to ONLY public addresses still yields no reachable
+		candidate. This replaces the old blanket hostResolvesPublic short-circuit.
 	*/
-	if m.cfg.Runtime.PrivateClusterOnly && hostResolvesPublic(n.Host) {
-		return false, "private_cluster_only: host resolves to a public IP"
-	}
+	/*
+		Probe via resolveRPCAddr, not a raw hostname dial: the worker is
+		multi-homed and its rpc-server binds one interface, so dialing the .local
+		name can land on a non-listening address and falsely report unreachable.
+		resolveRPCAddr resolves the candidates and probes each, matching exactly
+		what the llama backend uses to pick the live address at launch — so the
+		badge's reachability and the actual --rpc target stay consistent.
+	*/
 	ports := []int{m.cfg.Runtime.Llama.RPCPort, m.cfg.Runtime.Exo.Port}
 	for _, p := range ports {
-		addr := net.JoinHostPort(n.Host, strconv.Itoa(p))
-		conn, err := net.DialTimeout("tcp", addr, 1500*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
+		hp := net.JoinHostPort(n.Host, strconv.Itoa(p))
+		if addr, ok := resolveRPCAddr(ctx, hp, m.cfg.Runtime.PrivateClusterOnly, nodeProbeTimeout); ok {
 			return true, "tcp " + addr
 		}
 	}

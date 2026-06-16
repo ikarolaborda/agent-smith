@@ -28,6 +28,8 @@ type Provider struct {
 	metrics *Collector
 	/* defaultModel is the model id used when a request carries no model. */
 	defaultModel string
+	/* stopRefresh cancels the background node-health refresh started in New. */
+	stopRefresh context.CancelFunc
 }
 
 /*
@@ -55,6 +57,13 @@ func New(ctx context.Context, cfg *ClusterConfig, localProvider llm.Provider, lo
 	if len(cfg.Models) > 0 {
 		defaultModel = cfg.Models[0].ID
 	}
+	/*
+		Refresh node reachability in the background so the UI status badge reflects
+		a worker that dropped/rebooted, not just the startup snapshot. Detached from
+		the request ctx (which may be short-lived) and stopped in Close.
+	*/
+	refreshCtx, cancel := context.WithCancel(context.Background())
+	go mgr.healthRefreshLoop(refreshCtx, nodeHealthRefreshInterval)
 	return &Provider{
 		cfg:          cfg,
 		mgr:          mgr,
@@ -62,6 +71,7 @@ func New(ctx context.Context, cfg *ClusterConfig, localProvider llm.Provider, lo
 		logger:       logger,
 		metrics:      metrics,
 		defaultModel: defaultModel,
+		stopRefresh:  cancel,
 	}, nil
 }
 
@@ -74,8 +84,13 @@ func (p *Provider) Manager() *Manager { return p.mgr }
 /* Metrics exposes the shared metrics collector. */
 func (p *Provider) Metrics() *Collector { return p.metrics }
 
-/* Close stops every started backend. */
-func (p *Provider) Close(ctx context.Context) error { return p.mgr.StopAll(ctx) }
+/* Close stops the background refresh and every started backend. */
+func (p *Provider) Close(ctx context.Context) error {
+	if p.stopRefresh != nil {
+		p.stopRefresh()
+	}
+	return p.mgr.StopAll(ctx)
+}
 
 /*
 resolveModel maps the request's model field onto a configured ModelConfig. The

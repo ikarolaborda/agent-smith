@@ -3,6 +3,7 @@ import { Sidebar } from './components/Sidebar';
 import { MessageBubble } from './components/MessageBubble';
 import { Composer } from './components/Composer';
 import { ProviderSelector } from './components/ProviderSelector';
+import { ClusterBadge } from './components/ClusterBadge';
 import { CorrectionDialog } from './components/CorrectionDialog';
 import {
   deriveTitle,
@@ -356,6 +357,7 @@ export function App() {
             />
             <span>Ground with web</span>
           </label>
+          <ClusterBadge />
         </header>
         {transientError && (
           <div className="alert alert-warning mb-0 rounded-0" role="alert">

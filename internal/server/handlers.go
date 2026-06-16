@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/agent"
+	"github.com/ikarolaborda/agent-smith/internal/cluster"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 )
 
@@ -152,6 +154,29 @@ type errorEnvelope struct {
 /* handleHealth answers GET /healthz with a tiny JSON document. */
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+/*
+handleClusterStatus answers GET /v1/cluster with the cluster control-plane view
+(mode, the backend that served the most recent request, per-node reachability,
+and the served model) so the web UI can show whether chat is running clustered.
+When no cluster provider is registered it returns {enabled:false}, which the UI
+treats as single-node and renders nothing.
+*/
+func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	if p, ok := s.providers["cluster"]; ok {
+		if cs, ok := p.(interface {
+			Status(context.Context) *cluster.ClusterStatus
+		}); ok {
+			writeJSON(w, http.StatusOK, cs.Status(r.Context()))
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
 }
 
 /*

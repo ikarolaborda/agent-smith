@@ -411,6 +411,66 @@ body {
   cursor: not-allowed;
 }
 
+.cluster-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+  border: 1px solid transparent;
+}
+
+.cluster-badge__icon {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.cluster-badge__nodes {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.cluster-badge__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.cluster-badge__dot.is-up {
+  background: #16a34a;
+}
+
+.cluster-badge__dot.is-down {
+  background: #dc2626;
+}
+
+/* active = a distributed backend served the last request (the real win). */
+.cluster-badge--active {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+
+/* ready = cluster configured/healthy but no request served on it yet. */
+.cluster-badge--ready {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-color: #bfdbfe;
+}
+
+/* fallback = the last request ran single-node on the local provider. */
+.cluster-badge--fallback {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
+}
+
 @keyframes blink {
   0%, 50% { opacity: 1; }
   50.01%, 100% { opacity: 0; }

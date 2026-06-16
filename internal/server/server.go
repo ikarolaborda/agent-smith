@@ -365,6 +365,7 @@ func (s *Server) Handler() http.Handler { return s.withCORS(s.mux) }
 /* registerRoutes wires the supported paths onto the internal mux. */
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
+	s.mux.HandleFunc("/v1/cluster", s.handleClusterStatus)
 	s.mux.HandleFunc("/v1/models", s.handleModels)
 	s.mux.HandleFunc("/v1/providers", s.handleProviders)
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
