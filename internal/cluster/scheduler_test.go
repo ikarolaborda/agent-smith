@@ -50,6 +50,33 @@ func TestScheduler(t *testing.T) {
 		}
 	})
 
+	t.Run("it_prefers_single_node_when_the_model_fits_the_coordinator_alone", func(t *testing.T) {
+		cfg := testConfig()
+		mgr := NewManager(cfg, nil, discardLogger(), nil)
+		s := newScheduler(cfg, mgr, discardLogger())
+		/* Coordinator 64 GB, reserve 20 -> safe budget 44 GB. */
+		fits := cfg.Models[0]
+		fits.MinMemoryGB = 34
+		/* A 34 GB model fits the coordinator alone, so distributed backends are
+		   skipped (single-node-first) — never tensor-split onto the fragile worker. */
+		if s.memoryFits(BackendLlamaRPC, fits) {
+			t.Error("llama_cpp_rpc must be skipped for a model that fits the coordinator alone")
+		}
+		if s.memoryFits(BackendExo, fits) {
+			t.Error("exo must be skipped for a model that fits the coordinator alone")
+		}
+		/* Local single-node still fits it. */
+		if !s.memoryFits(BackendLocal, fits) {
+			t.Error("local should host a 34 GB model on a 64 GB coordinator")
+		}
+		/* force_distribute is the explicit opt-out: distributed becomes eligible again. */
+		forced := fits
+		forced.ForceDistribute = true
+		if !s.memoryFits(BackendLlamaRPC, forced) {
+			t.Error("force_distribute must re-enable distributed placement")
+		}
+	})
+
 	t.Run("it_falls_back_to_local_when_no_cluster_backend_is_installed", func(t *testing.T) {
 		cfg := testConfig()
 		/* exo/mlx/llama binaries are absent in the test env -> Probe Installed=false. */

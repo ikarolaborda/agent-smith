@@ -68,6 +68,38 @@ func TestChat_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestChat_SendsNumCtx(t *testing.T) {
+	var seen struct {
+		Options *struct {
+			NumCtx *int `json:"num_ctx"`
+		} `json:"options"`
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &seen)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"message":{"role":"assistant","content":"ok"},"done":true}`)
+	}))
+	defer srv.Close()
+
+	c, _ := ollama.New(ollama.Config{BaseURL: srv.URL, Model: "moe"})
+	ctxTokens := 32768
+	_, err := c.Chat(context.Background(), llm.ChatRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		NumCtx:   &ctxTokens,
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if seen.Options == nil || seen.Options.NumCtx == nil {
+		t.Fatal("num_ctx not sent on the wire")
+	}
+	if *seen.Options.NumCtx != 32768 {
+		t.Fatalf("num_ctx = %d, want 32768", *seen.Options.NumCtx)
+	}
+}
+
 func TestChatStream_NDJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		flusher, _ := w.(http.Flusher)

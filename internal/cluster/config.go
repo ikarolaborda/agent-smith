@@ -68,6 +68,19 @@ type ClusterTopology struct {
 	TransportPreference []string `yaml:"transport_preference"`
 	Nodes               []Node   `yaml:"nodes"`
 	/*
+		CoordinatorReserveGB is the memory kept free on the coordinator (macOS,
+		KV cache growth, Metal compute buffers, headroom) when deciding whether a
+		model can run single-node. A model whose min_memory_gb_estimate fits the
+		coordinator MINUS this reserve runs single-node and is NOT tensor-split
+		onto a worker. Rationale: distributing a fit-capable model only adds a
+		fragile node to the critical path. The 24 GB worker kernel-panicked
+		(watchdogd 90 s timeout, jetsam memory-pressure death spiral) every time
+		it was given a model slice it could not hold; clustering it bought no
+		capacity the coordinator did not already have. Zero falls back to the
+		built-in default.
+	*/
+	CoordinatorReserveGB int `yaml:"coordinator_reserve_gb"`
+	/*
 		Allowlist is the set of hostnames/IPs the control plane is permitted to
 		talk to for inter-node traffic. Empty means "derive from nodes": only
 		the configured node hosts are allowed. A non-empty list is authoritative.
@@ -84,6 +97,13 @@ type ModelConfig struct {
 	PreferredBackends []string `yaml:"preferred_backends"`
 	MinMemoryGB       int      `yaml:"min_memory_gb_estimate"`
 	Notes             string   `yaml:"notes"`
+	/*
+		ForceDistribute opts a model out of the single-node-first guard: even when
+		it would fit the coordinator alone, the scheduler is allowed to tensor-split
+		it across the cluster. Unsafe on memory-tight workers — leave false unless
+		you have measured that every node holds its share without memory pressure.
+	*/
+	ForceDistribute bool `yaml:"force_distribute"`
 	/*
 		ServedName is the model id strings sent on the wire to the backend's
 		OpenAI endpoint. Defaults to ID when empty. Lets a config id like
@@ -169,6 +189,16 @@ type LlamaRuntime struct {
 	GPULayers int `yaml:"gpu_layers"`
 	/* TensorSplit maps to --tensor-split (proportional weights per device). */
 	TensorSplit string `yaml:"tensor_split"`
+	/*
+		Parallel maps to --parallel (n_parallel: concurrent decode slots). It
+		defaults to 1, NOT llama-server's auto value (which picks 4). Each slot
+		multiplies the FIXED per-device memory overhead: KV cache and the compute
+		graph buffer scale with n_parallel, so auto=4 inflated a memory-tight RPC
+		worker far beyond its weight share (a measured ~3.4GB slice ballooned to
+		~13GB wired and tripped the jetsam/watchdogd kernel panic). One slot is
+		correct for a single-user agent; raise it only with memory headroom to spare.
+	*/
+	Parallel int `yaml:"parallel"`
 	/* CacheDir, when set, is passed as the prompt/KV cache directory. */
 	CacheDir string `yaml:"cache_dir"`
 	/* ExtraArgs are appended to the llama-server invocation. */
@@ -216,6 +246,14 @@ func (c *ClusterConfig) Normalize() {
 	if c.Cluster.Mode == "" {
 		c.Cluster.Mode = "auto"
 	}
+	if c.Cluster.CoordinatorReserveGB == 0 {
+		/*
+			20 GB headroom on the coordinator: macOS baseline (~8 GB) + KV cache
+			growth at large context + Metal compute buffers + safety. A model
+			whose estimate fits coordinator_memory_gb - 20 runs single-node.
+		*/
+		c.Cluster.CoordinatorReserveGB = 20
+	}
 	if c.Runtime.BindHost == "" {
 		c.Runtime.BindHost = "127.0.0.1"
 	}
@@ -257,6 +295,11 @@ func (c *ClusterConfig) Normalize() {
 	}
 	if c.Runtime.Llama.GPULayers == 0 {
 		c.Runtime.Llama.GPULayers = 99
+	}
+	if c.Runtime.Llama.Parallel == 0 {
+		/* One decode slot: avoids the n_parallel KV/compute multiplier that
+		   kernel-panicked the memory-tight RPC worker. */
+		c.Runtime.Llama.Parallel = 1
 	}
 	if c.Runtime.Llama.StartupTimeoutSeconds == 0 {
 		c.Runtime.Llama.StartupTimeoutSeconds = 600

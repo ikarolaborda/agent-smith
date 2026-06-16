@@ -9,6 +9,15 @@
 # This file is machine-specific — consider adding it to .gitignore.
 
 cluster:
+  # Single-node-first guard (internal/cluster/scheduler.go memoryFits): a model
+  # whose min_memory_gb_estimate fits coordinator memory MINUS this reserve runs
+  # SINGLE-NODE and is never tensor-split onto a worker. The 24GB worker
+  # kernel-panicked (watchdogd 90s timeout / jetsam memory-pressure death spiral)
+  # every time it held a model slice; distributing a fit-capable model bought no
+  # capacity. 64GB - 20 = 44GB safe budget: the 34GB MoE stays single-node; only
+  # models bigger than 44GB use the worker. Set force_distribute on a model to
+  # override (unsafe).
+  coordinator_reserve_gb: 20
   # Pin llama_cpp_rpc: `auto` tries exo first, and exo isn't installed — it
   # "starts" then exits and the scheduler commits to it instead of falling
   # through, so requests hang. Only llama.cpp RPC is built here.
@@ -29,6 +38,10 @@ cluster:
     - 169.254.197.136
     - 169.254.213.127
     - 169.254.29.19
+    # Worker bridge0 drifted again 2026-06-16 19:38 -> 169.254.134.217.
+    - 169.254.134.217
+    # Rotated again after the panic-reboot 2026-06-16 19:50 -> 169.254.83.31 (current).
+    - 169.254.83.31
   nodes:
     - id: m5max
       host: Ikaros-MacBook-Pro-M5M.local
@@ -57,6 +70,35 @@ models:
   # exo: served_name must match the model id exo serves.
   # Knowledge/standards are enforced at RUNTIME (RAG corpora + Context7 +
   # always-on engineering directive), NOT by fine-tuning these frozen weights.
+  # PIVOT 2026-06-16: the dense 72B kernel-panicked the 24GB worker twice on the
+  # ACTIVE Metal compute (command buffers), not weight storage. Switched to a
+  # Mixture-of-Experts abliterated model — only a fraction of params fire per
+  # token, so peak worker compute is far below a dense 72B. models[0] is the
+  # cluster default (provider.go: defaultModel = Models[0].ID), so the MoE leads.
+  # Source = the model already pulled into ollama; llama-server on the coordinator
+  # loads its GGUF blob directly (valid GGUF magic). The worker rpc-server only
+  # receives tensor slices over RPC and needs no local copy of the file.
+  - id: huihui-moe-60b-abliterated
+    format: gguf
+    path: /Users/ikarolaborda/.ollama/models/blobs/sha256-42926e29079843daec9d66ee97cdbe7ef7bb27f6f9a09a3fe722229b4de14e32
+    # Single-node-first routes this model to the local Ollama backend, so the
+    # served_name must be the exact ollama tag (it is already pulled). The cluster
+    # sends num_ctx=context_tokens so Ollama serves the full 32k window.
+    served_name: huihui_ai/huihui-moe-abliterated:60b
+    # 32768 context for long-context cybersecurity work (fuzzing, full-CVE
+    # discussions). This is SINGLE-NODE-safe: measured RSS ~35.3GB at 32k on the
+    # coordinator (34GB weights + small GQA KV), well inside the 53GB Metal
+    # budget; the model's native context is 262144 so far more is possible. The
+    # cluster propagates this to the serving backend as num_ctx (provider.go
+    # applyContextWindow) so single-node Ollama actually serves the full window
+    # instead of its small default. No worker needed for context.
+    context_tokens: 32768
+    preferred_backends:
+      - llama_cpp_rpc
+      - local
+    min_memory_gb_estimate: 34
+    notes: "huihui_ai/huihui-moe-abliterated:60b via its ollama GGUF blob (~34GB). MoE keeps active compute low so the 24GB worker survives an RPC slice. Abliterated = refusal-removed; the always-on defensive-security directive is the safety boundary."
+
   - id: qwen2.5-72b-abliterated
     format: gguf_or_mlx
     path: /Users/shared/models/Qwen2.5-72B-Instruct-abliterated.Q4_K_M.gguf
@@ -69,7 +111,7 @@ models:
     # small and safe, then tune UP only while watching the worker's memory_pressure
     # (see the runbook ladder): ctx 16384 -> 24576 -> 32768, worker share 0.15 ->
     # 0.18 -> 0.22, one knob at a time, after a clean warm load + sustained gen.
-    context_tokens: 16384
+    context_tokens: 8192
     preferred_backends:
       - exo
       - llama_cpp_rpc
@@ -111,10 +153,23 @@ runtime:
       - ikaros-macbook-pro-m5p.local:50052
     rpc_port: 50052
     gpu_layers: 99
-    tensor_split: "0.85,0.15"   # conservative: protect the 24GB worker (it panicked
-                                # at 0.27). The coordinator's 64GB carries the bulk;
-                                # the worker takes only a slice it can hold after
-                                # macOS overhead. Raise toward 0.22 only once stable.
+    # n_parallel = decode slots. llama-server's auto value is 4, which MULTIPLIES
+    # the fixed per-device memory overhead (KV cache + compute graph buffer):
+    # measured, a 3.4GB worker weight slice (tensor_split 0.10) ballooned to ~13GB
+    # WIRED at parallel=4 vs ~2-4GB at parallel=1 -> the 4x default is what tripped
+    # the worker's jetsam/watchdogd kernel panic during load. 1 is correct for a
+    # single-user agent; raise only with memory headroom to spare.
+    parallel: 1
+    tensor_split: "0.85,0.15"   # KERNEL PANIC #3 (2026-06-16 19:47): 0.71,0.29 hard-
+                                # panicked the 24GB worker DURING WEIGHT LOAD (host went
+                                # fully unreachable on wifi+bridge). Lesson: tensor_split
+                                # forces RESIDENT weights onto the worker; ~10GB resident
+                                # + KV + Metal buffers exceeds its ~18GB Metal working-set
+                                # budget and trips the GPU watchdog -> panic. MoE cuts
+                                # ACTIVE compute, NOT weight residency, so the worker share
+                                # must stay small. 0.15 * 34GB ≈ 5GB resident = the proven-
+                                # safe dense-path slice. Raise only one notch (->0.18) after
+                                # a clean warm load + sustained gen, watching memory_pressure.
     # Performance flags (verified against current llama.cpp via Context7):
     #   -fa on        flash attention (faster attention; REQUIRED for quantized KV cache)
     #   -ctk/-ctv q8_0  quantize the K/V cache to 8-bit — ~halves KV memory vs the f16

@@ -93,6 +93,14 @@ type ChatRequest struct {
 	MaxTokens   *int             `json:"max_tokens,omitempty"`
 	Think       *bool            `json:"think,omitempty"`
 	Stream      bool             `json:"stream,omitempty"`
+	/*
+		NumCtx requests a context-window size for backends that accept one per
+		request (Ollama's num_ctx). A nil value leaves the provider/model default.
+		The cluster sets it from a model's context_tokens so a single-node model
+		actually serves the large window it was configured for, instead of
+		silently falling back to the runtime's small default.
+	*/
+	NumCtx *int `json:"num_ctx,omitempty"`
 }
 
 /* Usage reports token accounting for a completed (non-streaming) request. */

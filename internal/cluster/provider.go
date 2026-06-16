@@ -117,6 +117,26 @@ Chat is the non-streaming entrypoint. It runs ChatStream internally and
 accumulates the deltas, so non-streaming callers get the same routing, fallback,
 and metrics behavior as streaming ones.
 */
+/*
+applyContextWindow propagates a model's configured context_tokens to the request
+as NumCtx so a single-node backend (Ollama) serves the large window the model was
+configured for, rather than silently using the runtime's small default — the
+window matters for long-context work like vulnerability research. It logs the
+effective context so a silent downgrade is visible. Per-request NumCtx wins.
+*/
+func (p *Provider) applyContextWindow(req *llm.ChatRequest, model ModelConfig, backendName string) {
+	if model.ContextTokens <= 0 {
+		return
+	}
+	if req.NumCtx == nil {
+		ctx := model.ContextTokens
+		req.NumCtx = &ctx
+	}
+	p.logger.Info("cluster: effective context window",
+		"model", model.ID, "backend", backendName,
+		"context_tokens", *req.NumCtx, "single_node", backendName == BackendLocal)
+}
+
 func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
 	model, err := p.resolveModel(req)
 	if err != nil {
@@ -127,6 +147,7 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResp
 		return nil, err
 	}
 	req.Model = model.ServedName
+	p.applyContextWindow(&req, model, backend.Name())
 
 	/*
 		The streaming transport emits a cumulative snapshot of each in-progress
@@ -186,6 +207,7 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 		return nil, err
 	}
 	req.Model = model.ServedName
+	p.applyContextWindow(&req, model, backend.Name())
 
 	out := make(chan llm.StreamChunk, 16)
 	go func() {

@@ -103,6 +103,7 @@ type wireTool struct {
 type wireOptions struct {
 	Temperature *float64 `json:"temperature,omitempty"`
 	NumPredict  *int     `json:"num_predict,omitempty"`
+	NumCtx      *int     `json:"num_ctx,omitempty"`
 }
 
 type wireRequest struct {
@@ -139,10 +140,11 @@ func (c *Client) buildRequest(req llm.ChatRequest, stream bool) wireRequest {
 		Think:  req.Think,
 	}
 
-	if req.Temperature != nil || req.MaxTokens != nil {
+	if req.Temperature != nil || req.MaxTokens != nil || req.NumCtx != nil {
 		out.Options = &wireOptions{
 			Temperature: req.Temperature,
 			NumPredict:  req.MaxTokens,
+			NumCtx:      req.NumCtx,
 		}
 	}
 

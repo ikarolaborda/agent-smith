@@ -100,6 +100,9 @@ func (b *llamaBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	if b.cfg.Llama.TensorSplit != "" {
 		args = append(args, "--tensor-split", b.cfg.Llama.TensorSplit)
 	}
+	if b.cfg.Llama.Parallel > 0 {
+		args = append(args, "--parallel", strconv.Itoa(b.cfg.Llama.Parallel))
+	}
 	if b.cfg.Llama.CacheDir != "" {
 		args = append(args, "--slot-save-path", b.cfg.Llama.CacheDir)
 	}

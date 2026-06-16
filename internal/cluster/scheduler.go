@@ -144,5 +144,35 @@ func (s *scheduler) memoryFits(name string, model ModelConfig) bool {
 	if name == BackendLocal {
 		return s.cfg.CoordinatorNode().MemoryGB >= model.MinMemoryGB
 	}
+	/*
+		Single-node-first guard. A distributed backend tensor-splits the model
+		onto worker nodes; if the coordinator can host the whole model alone
+		within its safe budget there is no capacity reason to do that, and doing
+		so drags a memory-tight worker into the critical path. The 24 GB worker
+		kernel-panicked under exactly this over-commit (watchdogd 90 s timeout
+		from a jetsam memory-pressure death spiral), so a fit-capable model must
+		stay single-node and fall through to the local backend. force_distribute
+		is the explicit, unsafe opt-out.
+	*/
+	if !model.ForceDistribute && s.coordinatorCanHostAlone(model) {
+		s.logger.Info("cluster: model fits coordinator alone, preferring single-node over distributing to workers",
+			"backend", name, "model", model.ID, "min_memory_gb", model.MinMemoryGB,
+			"coordinator_safe_gb", s.coordinatorSafeMemoryGB())
+		return false
+	}
 	return s.mgr.totalClusterMemoryGB() >= model.MinMemoryGB
+}
+
+/*
+coordinatorSafeMemoryGB is the coordinator memory considered safely usable for a
+single model: total memory minus the configured reserve kept free for the OS, KV
+cache growth, and Metal compute buffers.
+*/
+func (s *scheduler) coordinatorSafeMemoryGB() int {
+	return s.cfg.CoordinatorNode().MemoryGB - s.cfg.Cluster.CoordinatorReserveGB
+}
+
+/* coordinatorCanHostAlone reports whether the model fits the coordinator's safe budget. */
+func (s *scheduler) coordinatorCanHostAlone(model ModelConfig) bool {
+	return s.coordinatorSafeMemoryGB() >= model.MinMemoryGB
 }
