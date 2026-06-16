@@ -46,9 +46,16 @@ No code changes are needed to add a local model — see [`docs/josie.md`](docs/j
 When a model is too big for a single machine, point the binary at a cluster config and it distributes the model across nodes, falling back to local single-node execution if the cluster is unavailable.
 
 ```sh
+make serve-cluster                                    # web UI, clustered (CLUSTER=configs/cluster.local.yaml)
+make serve-cluster CLUSTER=configs/cluster.example.yaml
+make run-cluster                                      # interactive CLI, clustered
+
+# or directly:
 ./bin/agent --cluster-config configs/cluster.example.yaml --serve
 ./bin/agent --cluster-config configs/cluster.example.yaml --prompt "..."
 ```
+
+Plain `make serve` / `make run` are single-node — they never pass `--cluster-config`, so the cluster control plane isn't wired and the picker won't list the `cluster/<id>` models. Use the `*-cluster` targets to actually engage the cluster.
 
 What the cluster layer does:
 
