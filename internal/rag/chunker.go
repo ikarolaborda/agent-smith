@@ -63,7 +63,7 @@ chunk; OverlapChars is the size of the trailing overlap copied into the next
 chunk so cross-boundary phrases remain retrievable.
 */
 type ChunkOptions struct {
-	MaxChars    int
+	MaxChars     int
 	OverlapChars int
 }
 

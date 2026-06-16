@@ -14,7 +14,7 @@ type stubStreamProvider struct {
 	chunks []llm.StreamChunk
 }
 
-func (s *stubStreamProvider) Name() string                                              { return "stub" }
+func (s *stubStreamProvider) Name() string { return "stub" }
 func (s *stubStreamProvider) Chat(context.Context, llm.ChatRequest) (*llm.ChatResponse, error) {
 	return &llm.ChatResponse{}, nil
 }
@@ -63,7 +63,7 @@ func TestRunStream_EmitsTextDeltasAndDone(t *testing.T) {
 /* blockingProvider produces a channel that only respects ctx for cancellation. */
 type blockingProvider struct{}
 
-func (blockingProvider) Name() string                                              { return "block" }
+func (blockingProvider) Name() string { return "block" }
 func (blockingProvider) Chat(context.Context, llm.ChatRequest) (*llm.ChatResponse, error) {
 	return &llm.ChatResponse{}, nil
 }

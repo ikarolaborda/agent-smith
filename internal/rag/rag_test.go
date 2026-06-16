@@ -56,11 +56,11 @@ func TestNormalizeMarkdown_NormalizesLineEndings(t *testing.T) {
 func TestTopicRouter_MatchesKeywords(t *testing.T) {
 	r := rag.DefaultTopicRouter()
 	cases := map[string][]string{
-		"how do I make a Laravel Form Request?": {"laravel"},
-		"explain PHP enums":                     {"php"},
-		"nestjs guard for roles":                {"nestjs"},
-		"tailwind flex gap responsive":          {"tailwind-css"},
-		"explain hexagonal architecture":        {"architectural-patterns"},
+		"how do I make a Laravel Form Request?":     {"laravel"},
+		"explain PHP enums":                         {"php"},
+		"nestjs guard for roles":                    {"nestjs"},
+		"tailwind flex gap responsive":              {"tailwind-css"},
+		"explain hexagonal architecture":            {"architectural-patterns"},
 		"how do I use native:install in NativePHP?": {"native-php"},
 		"goroutine vs sync.Mutex in Go":             {"cs-fundamentals"},
 		"PHP fibers vs pcntl_fork":                  {"cs-fundamentals"},

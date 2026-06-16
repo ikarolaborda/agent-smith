@@ -13,9 +13,9 @@ type fakeTool struct {
 	name string
 }
 
-func (f fakeTool) Name() string                                                  { return f.name }
-func (f fakeTool) Description() string                                           { return "fake" }
-func (f fakeTool) Schema() json.RawMessage                                       { return json.RawMessage(`{}`) }
+func (f fakeTool) Name() string                                                 { return f.name }
+func (f fakeTool) Description() string                                          { return "fake" }
+func (f fakeTool) Schema() json.RawMessage                                      { return json.RawMessage(`{}`) }
 func (f fakeTool) Execute(_ context.Context, _ json.RawMessage) (string, error) { return "ok", nil }
 
 func TestRegistry_RegisterAndGet(t *testing.T) {
