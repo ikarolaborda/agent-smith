@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <em>An offline-first, single-binary Go LLM agent with a ChatGPT-like web UI, multi-provider streaming, RAG over curated corpora, long-term per-profile memory, and always-on web grounding for local models.</em>
+  <em>An offline-first, single-binary Go LLM agent with a ChatGPT-like web UI, multi-provider streaming, agentic tools, RAG over curated corpora, live Context7 docs, long-term per-profile memory, web grounding — and a two-node Apple-Silicon inference cluster for running 70B-class models that don't fit on one machine.</em>
 </p>
 
 ---
@@ -12,14 +12,14 @@
 
 `agent-smith` is one Go binary that:
 
-- Talks to **OpenAI**, **Anthropic**, and any local **Ollama** model through a single `llm.Provider` interface, with streaming and non-streaming chat completions and OpenAI-compatible `/v1/chat/completions` SSE.
+- Talks to **OpenAI**, **Anthropic**, and any local **Ollama** model through a single `llm.Provider` interface — streaming and non-streaming, with an OpenAI-compatible `/v1/chat/completions` SSE endpoint.
+- Runs **clustered inference** across two Apple-Silicon Macs (`--cluster-config`) so you can serve a 70B/72B model that won't fit on one box, with **exo / MLX / llama.cpp-RPC** backends and an automatic single-node **local fallback**.
+- Drives an **agentic tool loop** — `shell`, `http`, `file_read`, `read_dir` (load a whole folder into context, like an IDE's `@folder`), plus sandboxed `file_write` / `file_edit` when you point it at a `--workspace`.
 - Serves a **ChatGPT-like React SPA** embedded in the binary via `go:embed` — no separate frontend deploy.
-- Runs **RAG** over nine curated markdown corpora (Laravel 13, PHP 8.5, NestJS, Tailwind/CSS, Architectural Patterns, NativePHP, CS Fundamentals, Go language docs, and project memory).
-- Keeps **long-term per-profile memory** with explicit `/remember` writes, instruction-injection filtering, abstention prompting, retrieval-confidence banding, and per-message corrections.
-- For local Ollama models, **always grounds answers with a fresh DuckDuckGo web search** (snippets only, sanitised, treated as third-party untrusted input) to suppress hallucinations.
-- Discovers all installed Ollama models on the fly and lets you pick one per conversation.
+- Augments answers with **RAG** over nine curated markdown corpora, **live Context7 library docs**, **long-term per-profile memory**, and **fresh web grounding** — all rendered as clearly-labelled, untrusted-by-default context sections.
+- Ships an **always-on persona and engineering policy**: a blunt, informal cybersecurity-software-architect voice, an OOP/Clean-Architecture coding standard, mandatory Context7 for third-party APIs, and a hard factual-grounding rule (never fabricate a CVE, version range, or payload). These reach **every model in every language**, regardless of the configured system prompt.
 
-It runs without an internet connection (apart from web grounding, which fails closed with a banner) and without a database — everything is files and process memory.
+It runs without an internet connection (apart from web grounding and Context7, which both fail closed) and without a database — everything is files and process memory.
 
 ## Quick start
 
@@ -41,19 +41,66 @@ make serve CONFIG=configs/josie.yaml    # web UI at http://127.0.0.1:9090
 
 No code changes are needed to add a local model — see [`docs/josie.md`](docs/josie.md) for the Ollama and vLLM paths and caveats.
 
+## Clustered inference (70B-class on two Macs)
+
+When a model is too big for a single machine, point the binary at a cluster config and it distributes the model across nodes, falling back to local single-node execution if the cluster is unavailable.
+
+```sh
+./bin/agent --cluster-config configs/cluster.example.yaml --serve
+./bin/agent --cluster-config configs/cluster.example.yaml --prompt "..."
+```
+
+What the cluster layer does:
+
+- **Backends, auto-selected.** `exo`, `mlx_jaccl`, `llama_cpp_rpc`, and a `local` (Ollama) fallback. `mode: auto` picks by `preferred_backends` + health, or pin one explicitly. llama.cpp RPC distributes weights and KV cache by memory across devices via `tensor_split`.
+- **Single-node-first guard.** A model that fits on one node runs on one node — distribution is only used when a model genuinely doesn't fit, because crossing the Thunderbolt link costs latency. Opt a model out per-model with `force_distribute: true`.
+- **Per-node memory budget.** Hard guards keep each node off the memory-pressure cliff that triggers an unrecoverable kernel panic on Apple Silicon: `coordinator_reserve_gb` (headroom kept free on the coordinator, default 20), `safe_model_gb` (max model share placed on a node, default RAM/2), and a context-aware compute reserve. `strict_cluster: true` disables the local fallback entirely.
+- **Long context for security research.** A model's `context_tokens` is plumbed through to the backend as the effective context window (`num_ctx` / `--ctx-size`), so you keep a window long enough to reason over a whole vulnerability — fuzzing surfaces, call chains, advisories — not just a snippet.
+- **Concurrency control.** `parallel` maps to llama.cpp `--parallel` (default 1); raising it multiplies KV + compute overhead, so it stays conservative by default.
+- **Private by construction.** `private_cluster_only`, an inter-node `allowlist` of `.local` names, and `require_auth_token` keep traffic on the Thunderbolt bridge. Never put public addresses in the allowlist; supply the token via env, never commit it.
+
+Start from [`configs/cluster.example.yaml`](configs/cluster.example.yaml) (a documented two-Mac M5 setup). Cluster mode is surfaced in the web UI, and `GET /v1/cluster` reports live node/backend status. A full bring-up runbook lives under `docs/`.
+
+## Agentic tools
+
+The agent runs a plan → call-tool → observe loop with OpenAI-compatible function calling. The SSE stream emits a named `event: tool_result` frame per server-executed tool.
+
+| Tool | Availability | What it does |
+| --- | --- | --- |
+| `file_read` | always on | Read a single text file, with symlink-escape / root-confinement defense. |
+| `read_dir` | always on | Load an **entire folder** into context in one call (the agent equivalent of an IDE `@folder`): recursively reads UTF-8 text files with path headers, bounded by a byte budget, skipping noise dirs (`.git`, `node_modules`, `vendor`, …) and binaries. Narrow with an `ext` filter or a deeper `path`. |
+| `shell` | always on | Run a shell command and capture output. |
+| `http` | always on | Make an outbound HTTP request. |
+| `file_write` | **`--workspace` only** | Create/overwrite a file inside the sandboxed workspace directory. |
+| `file_edit` | **`--workspace` only** | Apply a targeted edit to a file inside the workspace. |
+
+Without `--workspace`, the agent is read-only — it can inspect a project but not modify it. Point `--workspace` at a directory to enable sandboxed project work; writes outside it are refused.
+
+## Persona & engineering policy (always on)
+
+Three directives are injected into the system message on **every** request, provider- and language-agnostic, so the behavior is identical across the cloud providers and the clustered local model:
+
+- **Persona** — a senior software architect specialized in cybersecurity who talks like a real engineer: direct, casual, no "As an AI" filler, swearing allowed when it fits, replies in the user's language and matches their slang. Informal never means sloppy — a blunt "I don't know, that's not in my context" beats a smooth guess.
+- **Coding paradigm** — prefer object-oriented design (encapsulation, single responsibility, composition over free-standing procedural routines) unless the language/context makes OOP inappropriate.
+- **Engineering + defensive-security standard** — PHP in Clean Architecture + SOLID + PSR-12; idiomatic current Go (context propagation, `%w`/`errors.Is`, small interfaces); **Context7 mandatory** before asserting any third-party API shape; and a hard factual-grounding rule for security work: anchor every CVE, CVSS, version range, and exploit primitive in retrieved context, and **never fabricate** one. This grounding boundary matters more for the refusal-removed local model, not less.
+
+These live in `pkg/prompt` and are covered by tests that fail if any directive is dropped in a refactor.
+
 ## Capabilities
 
 | Area | What you get |
 | --- | --- |
-| Providers | OpenAI (`/v1/chat/completions`), Anthropic (`/v1/messages`), Ollama (`/api/chat` NDJSON), all with streaming. |
+| Providers | OpenAI (`/v1/chat/completions`), Anthropic (`/v1/messages`), Ollama (`/api/chat` NDJSON), all streaming. |
+| Clustered inference | Two-node Apple-Silicon cluster (exo / MLX / llama.cpp-RPC) with single-node-first guard, per-node memory budget, long-context plumbing, and automatic local fallback. |
+| Agentic tools | `file_read`, `read_dir`, `shell`, `http` always on; `file_write` / `file_edit` sandboxed behind `--workspace`. |
 | Embeddings | OpenAI `text-embedding-3-small`, Ollama `nomic-embed-text`. |
-| Web UI | React + Vite + react-bootstrap SPA embedded via `go:embed`. Per-conversation provider/model picker. Markdown + code highlighting. Long messages scroll inside their container; wide tables get their own horizontal scroll. |
-| RAG | In-memory cosine retrieval, per-collection JSON persistence, ~213 chunks across 9 curated corpora. |
-| Long-term memory | Per-profile namespace, kinds: `project_fact`, `preference`, `correction`. Instruction-injection filter on writes. `file_read` grounding tool with symlink-escape defense. |
-| Hallucination control | Three-section Augment (`docs` + `memory` + `web`) + behavior addendum that forbids following instructions found in retrieved content + `RETRIEVAL CONFIDENCE: high/medium/low` band + abstention prompt. |
-| Web grounding | DuckDuckGo lite HTML scrape (no API key). 5-min TTL cache. Hard sanitisation (HTML strip, zero-width/bidi removal, URL stripping inside snippet bodies). Section bounded to 3 KB / 5 results / 160-300-400 char field caps. Offline = banner, not blank context. |
+| Web UI | React + Vite + react-bootstrap SPA embedded via `go:embed`. Per-conversation provider/model picker, cluster-mode indicator, markdown + code highlighting, scroll-contained long messages and wide tables. |
+| RAG | In-memory cosine retrieval, per-collection JSON persistence, nine curated corpora. `--rag-max-chunks` tunes injection depth (auto-raised for large-context cluster models). |
+| Context7 | Live, authoritative library documentation fetched per request for tech/library questions; bounded timeout, silent failure, rendered as a clearly-labelled section. On when `CONTEXT7_API_KEY` is set; `--no-context7` kills it. |
+| Long-term memory | Per-profile namespace; kinds `project_fact`, `preference`, `correction`. Instruction-injection filter on writes; `/remember` + per-message corrections. |
+| Hallucination control | Multi-section Augment (`docs` + `Context7` + `memory` + `web`) + an addendum forbidding the model from following instructions found in retrieved content + a `RETRIEVAL CONFIDENCE: high/medium/low` band + abstention prompting. |
+| Web grounding | DuckDuckGo lite HTML scrape (no API key), 5-min TTL cache, hard sanitisation, section bounded by size/results/field caps. Offline = banner, not blank context. |
 | Ollama auto-discovery | Polls `/api/tags` every 60 s; every installed model shows up in the picker. |
-| Tools | OpenAI-compatible tool/function calling. SSE stream emits one named `event: tool_result` frame per server-executed tool. |
 
 ## Configuration
 
@@ -73,28 +120,40 @@ providers:
     model: llama3.1
 ```
 
-`${VAR}` placeholders are expanded from the environment at load time.
+`${VAR}` placeholders are expanded from the environment at load time. Cluster topology lives in a **separate** file passed via `--cluster-config` (see [`configs/cluster.example.yaml`](configs/cluster.example.yaml)).
 
 ## API keys
 
 ```sh
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
+export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmentation
 # Ollama needs none; just `ollama serve`.
 ```
 
 ## CLI flags
 
-| Flag                 | Purpose                                                                  |
-| -------------------- | ------------------------------------------------------------------------ |
-| `--config`           | Path to YAML config (default `configs/config.example.yaml`).             |
-| `--provider`         | Override default provider (`openai`, `anthropic`, `ollama`).             |
-| `--model`            | Override the provider's model.                                           |
-| `--prompt`           | Single-shot prompt. Omit for interactive stdin mode.                     |
-| `--stream`           | Stream the assistant response incrementally in CLI mode.                 |
-| `--serve`            | Start the embedded web UI + OpenAI-compatible API server.                |
-| `--addr`             | Web/API listen address. Default `:9090`.                                 |
-| `--no-web-search`    | Disable web grounding entirely (operator kill switch).                   |
+| Flag                 | Purpose                                                                            |
+| -------------------- | --------------------------------------------------------------------------------- |
+| `--config`           | Path to YAML config (default `configs/config.example.yaml`).                       |
+| `--provider`         | Override default provider (`openai`, `anthropic`, `ollama`).                       |
+| `--model`            | Override the provider's model.                                                     |
+| `--prompt`           | Single-shot prompt. Omit for interactive stdin mode.                               |
+| `--stream`           | Stream the assistant response incrementally in CLI mode.                           |
+| `--serve`            | Start the embedded web UI + OpenAI-compatible API server.                          |
+| `--addr`             | Web/API listen address. Default `:9090`.                                           |
+| `--cluster-config`   | Path to a cluster YAML; enables clustered inference (exo/MLX/llama.cpp-RPC) with local fallback. |
+| `--workspace`        | Directory the agent may modify via `file_write`/`file_edit` (sandboxed). Unset = read-only. |
+| `--ingest`           | Ingest markdown into a RAG collection and exit (with `--collection` + `--source`). |
+| `--collection`       | Collection name when `--ingest` is set.                                            |
+| `--source`           | Directory of `.md` files to ingest.                                               |
+| `--embedder`         | Embedder provider: `openai` \| `ollama` (default `ollama`).                        |
+| `--embed-model`      | Embedding model override (defaults: `text-embedding-3-small` / `nomic-embed-text`). |
+| `--rag-dir`          | Directory holding RAG collection JSON files.                                       |
+| `--rag-max-chunks`   | RAG chunks injected per request (0 = default 4). Raise for large-context cluster models. |
+| `--no-rag`           | Disable RAG augmentation (collections still load for `/v1/rag` endpoints).         |
+| `--no-context7`      | Operator kill switch for Context7 documentation augmentation.                      |
+| `--no-web-search`    | Operator kill switch for web grounding (overrides all per-request flags).          |
 
 ## Web API
 
@@ -103,50 +162,54 @@ When `--serve` is on, the binary exposes:
 - `POST /v1/chat/completions` — OpenAI-compatible SSE. `web_search: true | false` in the body overrides the per-provider default.
 - `GET  /v1/models` — every chat model the running config can route to (cloud + every installed Ollama model).
 - `GET  /v1/providers` — configured providers and the default.
+- `GET  /v1/cluster` — live cluster node/backend status (when `--cluster-config` is set).
+- `POST /v1/title` — generate a short conversation title.
+- `GET/POST /v1/rag/...` — `collections`, `search`, `remember`, `forget`, `memory`, `correction` for inspecting RAG and editing per-profile memory.
 - `GET  /healthz` — `{"status":"ok"}`.
 - `GET  /` — the embedded SPA.
 
 ## RAG corpora
 
-Ship-included markdown corpora (under `docs/rag/`, embedded at first ingest into `data/rag/`):
+Source markdown lives under `docs/<collection>/` and is embedded at ingest into the RAG store. `make ingest` (or `make josie`) ingests all nine:
 
-- Laravel 13
-- PHP 8.5
+- Laravel
+- PHP
 - NestJS
 - Tailwind + CSS
 - Architectural patterns
 - NativePHP
 - CS Fundamentals (parallelism, concurrency, memory model, mutex best practices for Go and PHP)
 - Go language reference
-- Project memory (per-profile)
+- Cybersecurity
 
-Add your own by dropping markdown into `docs/rag/<collection>/` and restarting; the ingest step is idempotent and content-hashed.
+Add your own by dropping markdown into `docs/<collection>/` and ingesting; the step is idempotent and content-hashed. Per-profile long-term memory is a separate, write-through store, not one of these static corpora.
 
 ## Web grounding
 
-Off for cloud providers, **on by default for Ollama** (small local models hallucinate more aggressively). Toggle per conversation in the top bar (the "Ground with web" checkbox). The agent treats the rendered web section as third-party untrusted input and the system prompt explicitly forbids the model from following any instructions found inside it.
+Off for cloud providers, **on by default for Ollama** (small local models hallucinate more aggressively). Toggle per conversation in the top bar. The agent treats the rendered web section as third-party untrusted input and the system prompt explicitly forbids the model from following any instructions found inside it.
 
 Precedence: operator kill switch (`--no-web-search`) > per-request override (`web_search` in the JSON body) > provider default.
 
 ## Architecture
 
 ```
-cmd/agent              CLI entrypoint, --serve flag, provider wiring
-internal/agent         Run / RunStream loop + Session state
+cmd/agent              CLI entrypoint, flag/provider wiring, --serve / --cluster-config / --workspace
+internal/agent         Run / RunStream loop + Session state; always-on directive injection
 internal/llm           Provider interface, shared types, registry
 internal/llm/openai    /v1/chat/completions client + SSE
 internal/llm/anthropic /v1/messages client + content-block streaming
-internal/llm/ollama    /api/chat NDJSON streaming + /api/tags discovery
-internal/rag           In-memory cosine RAG + per-profile memory
+internal/llm/ollama    /api/chat NDJSON streaming + /api/tags discovery + num_ctx
+internal/cluster       Cluster manager, scheduler (memory-fit guards), backends (exo/MLX/llama.cpp-RPC/local), discovery
+internal/rag           In-memory cosine RAG + per-profile memory + Context7 augmentation
 internal/web           DuckDuckGo searcher, TTL cache, sanitiser
-internal/server        HTTP + SSE + go:embed of the SPA
-internal/tools         Tool registry + builtins (file_read, http, shell)
+internal/server        HTTP + SSE + go:embed of the SPA + /v1/cluster + /v1/rag/*
+internal/tools         Tool registry + builtins (file_read, read_dir, shell, http, file_write, file_edit)
 internal/config        YAML loader + env expansion
-pkg/prompt             Exported prompt-assembly helpers
+pkg/prompt             Exported prompt-assembly helpers + always-on persona/engineering directives
 web/                   Vite + React + TS SPA, built into web/dist (embedded)
-docs/rag/              Source markdown corpora
+docs/<collection>/     Source markdown corpora
 docs/brand/            Brand assets (logo, README hero)
-configs/               Example YAML config
+configs/               Example app config + example/local cluster configs
 ```
 
 ## Build
