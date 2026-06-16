@@ -460,7 +460,14 @@ func (s *Server) shouldWebSearch(provName string, requested *bool) bool {
 	if requested != nil {
 		return *requested
 	}
-	return provName == "ollama"
+	/*
+		Default web grounding ON for local-model providers. The cluster provider
+		runs local 70B/72B models (exo / MLX / llama.cpp) exactly like Ollama,
+		so it needs the same hallucination-suppressing grounding by default. The
+		operator kill switch (--no-web-search) and the per-request override both
+		still take precedence over this default.
+	*/
+	return provName == "ollama" || provName == "cluster"
 }
 
 /*

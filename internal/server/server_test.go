@@ -26,7 +26,7 @@ type fakeProvider struct {
 	chunks []llm.StreamChunk
 }
 
-func (f *fakeProvider) Name() string                                              { return "fake" }
+func (f *fakeProvider) Name() string { return "fake" }
 func (f *fakeProvider) Chat(context.Context, llm.ChatRequest) (*llm.ChatResponse, error) {
 	return &llm.ChatResponse{}, nil
 }
@@ -275,7 +275,7 @@ type slowProvider struct {
 	delay  time.Duration
 }
 
-func (s *slowProvider) Name() string                                              { return "slow" }
+func (s *slowProvider) Name() string { return "slow" }
 func (s *slowProvider) Chat(context.Context, llm.ChatRequest) (*llm.ChatResponse, error) {
 	return &llm.ChatResponse{}, nil
 }

@@ -86,6 +86,29 @@ func TestAgent_AlwaysAppliesCodingParadigmDirective(t *testing.T) {
 	}
 }
 
+/*
+The enforced engineering + defensive-security directive must reach every request
+regardless of the configured system prompt. This guards the only behavioral
+safety boundary for the (abliterated) clustered model against accidental removal
+in a future refactor of message composition.
+*/
+func TestAgent_AlwaysAppliesEngineeringDirective(t *testing.T) {
+	p := &capturingProvider{}
+	a := agent.New(p, tools.NewRegistry(), "", 3, nil)
+	if _, err := a.Run(context.Background(), agent.NewSession(), "review this code"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.last.Messages) == 0 || p.last.Messages[0].Role != llm.RoleSystem {
+		t.Fatalf("expected a leading system message, got %+v", p.last.Messages)
+	}
+	sys := strings.ToLower(p.last.Messages[0].Content)
+	for _, needle := range []string{"clean architecture", "context7 is mandatory", "grounding is the hard rule", "never fabricate a cve"} {
+		if !strings.Contains(sys, strings.ToLower(needle)) {
+			t.Fatalf("system message missing enforced directive clause %q: %q", needle, p.last.Messages[0].Content)
+		}
+	}
+}
+
 func TestAgent_RunHitsMaxIterationsOnToolLoop(t *testing.T) {
 	/*
 		The provider always returns a tool call; the loop should terminate

@@ -19,9 +19,9 @@ escape the root, write, or execute. Path traversal is blocked by checking
 that the cleaned absolute path remains a descendant of Root.
 */
 type FileRead struct {
-	Root        string
-	MaxBytes    int
-	MaxMatches  int
+	Root       string
+	MaxBytes   int
+	MaxMatches int
 }
 
 /* DefaultFileReadMaxBytes caps the body returned to the model. */

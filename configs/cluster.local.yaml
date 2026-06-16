@@ -1,0 +1,92 @@
+# agent-smith cluster config — YOUR two Macs (auto-detected 2026-06-16).
+# Coordinator: Ikaros-MacBook-Pro-M5M.local (M5 Max, 64GB)  bridge0 169.254.197.136
+# Worker:      ikaros-macbook-pro-m5p.local (M5 Pro, 24GB)  169.254.29.19
+#
+# Run from the coordinator (this Mac):
+#   go build -o bin/agent ./cmd/agent
+#   ./bin/agent --serve --cluster-config configs/cluster.local.yaml
+#
+# This file is machine-specific — consider adding it to .gitignore.
+
+cluster:
+  mode: auto
+  coordinator: m5max
+  transport_preference:
+    - thunderbolt_tcp
+    - ethernet
+    - local
+  # Both .local names resolve over the Thunderbolt bridge (link-local 169.254.x,
+  # which counts as private). IPs are listed too in case mDNS drops.
+  allowlist:
+    - ikaros-macbook-pro-m5m.local
+    - ikaros-macbook-pro-m5p.local
+    - 169.254.197.136
+    - 169.254.29.19
+  nodes:
+    - id: m5max
+      host: Ikaros-MacBook-Pro-M5M.local
+      role: coordinator
+      memory_gb: 64
+      gpu_cores: 40
+      priority: 100
+      backends:
+        - exo
+        - llama_cpp_rpc
+        - local
+    - id: m5pro
+      host: ikaros-macbook-pro-m5p.local
+      role: worker
+      memory_gb: 24
+      gpu_cores: 20
+      priority: 50
+      backends:
+        - exo
+        - llama_cpp_rpc
+
+models:
+  # huihui-ai/Qwen2.5-72B-Instruct-abliterated.
+  # llama.cpp RPC: path = a local .gguf on THIS (coordinator) Mac (Q4_K_M ~44GB
+  #   -> spans the 64GB+24GB cluster, does not fit the 24GB node alone).
+  # exo: served_name must match the model id exo serves.
+  # Knowledge/standards are enforced at RUNTIME (RAG corpora + Context7 +
+  # always-on engineering directive), NOT by fine-tuning these frozen weights.
+  - id: qwen2.5-72b-abliterated
+    format: gguf_or_mlx
+    path: /Users/shared/models/Qwen2.5-72B-Instruct-abliterated-Q4_K_M.gguf
+    served_name: qwen2.5-72b-instruct-abliterated
+    # Qwen2.5-72B is 32768-native (up to 131072 with YaRN). Larger window = more
+    # retrieved RAG/CVE/code evidence fits per request -> better grounding, less
+    # hallucination. Costs KV memory across the cluster; lower if you hit limits.
+    context_tokens: 32768
+    preferred_backends:
+      - exo
+      - llama_cpp_rpc
+      - local
+    min_memory_gb_estimate: 48
+    notes: "Qwen2.5-72B Q4 abliterated; the reason to cluster. Abliterated = refusal-removed, so the always-on defensive-security directive is the safety boundary."
+
+runtime:
+  bind_host: 127.0.0.1
+  api_port: 8080
+  private_cluster_only: true
+  require_auth_token: false
+  process_restart_policy: on_failure
+  max_restart_attempts: 3
+  stream_timeout_seconds: 900
+  strict_cluster: false        # keep false: falls back to local Ollama if the cluster backend isn't up
+  log_prompts: false
+
+  exo:
+    binary: exo
+    # If you run `exo` manually on this Mac, point here instead of letting agent-smith launch it:
+    # endpoint: http://127.0.0.1:52415
+    port: 52415
+
+  llama_cpp:
+    server: llama-server        # build llama.cpp with -DGGML_RPC=ON -DGGML_METAL=ON
+    port: 8082
+    rpc_hosts:
+      - ikaros-macbook-pro-m5p.local:50052
+    rpc_port: 50052
+    gpu_layers: 99
+    tensor_split: "0.73,0.27"   # ~64:24 unified-memory split (coordinator:worker)

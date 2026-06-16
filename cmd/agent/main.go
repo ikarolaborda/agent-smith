@@ -22,6 +22,7 @@ import (
 	"syscall"
 
 	"github.com/ikarolaborda/agent-smith/internal/agent"
+	"github.com/ikarolaborda/agent-smith/internal/cluster"
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/context7"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
@@ -38,22 +39,25 @@ import (
 
 /* flags groups the CLI flag values so we can pass them around as one value. */
 type flags struct {
-	configPath  string
-	provider    string
-	model       string
-	prompt      string
-	stream      bool
-	serve       bool
-	addr        string
-	ingest      bool
-	collection  string
-	source      string
-	embedder    string
-	embedModel  string
-	ragDir      string
-	disableRAG  bool
-	disableWeb  bool
-	disableC7   bool
+	configPath   string
+	provider     string
+	model        string
+	prompt       string
+	stream       bool
+	serve        bool
+	addr         string
+	ingest       bool
+	collection   string
+	source       string
+	embedder     string
+	embedModel   string
+	ragDir       string
+	disableRAG   bool
+	disableWeb   bool
+	disableC7    bool
+	clusterCfg   string
+	workspace    string
+	ragMaxChunks int
 }
 
 func main() {
@@ -83,6 +87,9 @@ func parseFlags() flags {
 	flag.BoolVar(&f.disableRAG, "no-rag", false, "disable RAG augmentation (still loads collections for /v1/rag endpoints)")
 	flag.BoolVar(&f.disableWeb, "no-web-search", false, "operator kill switch for the web-grounding gate (overrides all per-request flags)")
 	flag.BoolVar(&f.disableC7, "no-context7", false, "operator kill switch for Context7 documentation augmentation (otherwise on when CONTEXT7_API_KEY is set)")
+	flag.StringVar(&f.clusterCfg, "cluster-config", "", "path to a cluster YAML config; enables clusterized inference (exo/MLX/llama.cpp RPC) with local fallback")
+	flag.StringVar(&f.workspace, "workspace", "", "enable agentic project work: directory the agent may modify via file_write/file_edit (sandboxed). Unset = read-only.")
+	flag.IntVar(&f.ragMaxChunks, "rag-max-chunks", 0, "override how many RAG chunks are injected per request (0 = default 4). Raise for large-context cluster models to improve grounding.")
 	flag.Parse()
 	return f
 }
@@ -113,12 +120,22 @@ func run(f flags) error {
 		return runServe(ctx, cfg, f, logger)
 	}
 
-	provider, err := buildProvider(cfg, f)
-	if err != nil {
-		return fmt.Errorf("build provider: %w", err)
+	var provider llm.Provider
+	if f.clusterCfg != "" {
+		cp, err := buildClusterProvider(ctx, cfg, f, logger)
+		if err != nil {
+			return fmt.Errorf("build cluster provider: %w", err)
+		}
+		defer func() { _ = cp.Close(context.Background()) }()
+		provider = cp
+	} else {
+		provider, err = buildProvider(cfg, f)
+		if err != nil {
+			return fmt.Errorf("build provider: %w", err)
+		}
 	}
 
-	a := agent.New(provider, tools.NewRegistry(), cfg.Agent.SystemPrompt, cfg.Agent.MaxIterations, logger)
+	a := agent.New(provider, buildTools(f, logger), cfg.Agent.SystemPrompt, cfg.Agent.MaxIterations, logger)
 
 	if f.prompt != "" {
 		return runOnce(ctx, a, f.prompt)
@@ -127,14 +144,32 @@ func run(f flags) error {
 }
 
 /*
+buildTools assembles the shared tool registry used by both the CLI agent and
+the HTTP server, so terminal and web expose identical capabilities. Read-only
+grounding tools (shell, http, file_read) are always present; the mutating
+file_write/file_edit tools are registered ONLY when --workspace is set, keeping
+the default posture read-only. file_read is rooted at the workspace when one is
+configured so reads and writes share the same project scope.
+*/
+func buildTools(f flags, logger *slog.Logger) *tools.Registry {
+	reg := tools.NewRegistry()
+	_ = reg.Register(builtin.NewShell())
+	_ = reg.Register(builtin.NewHTTP())
+	_ = reg.Register(builtin.NewFileRead(f.workspace))
+	if f.workspace != "" {
+		_ = reg.Register(builtin.NewFileWrite(f.workspace))
+		_ = reg.Register(builtin.NewFileEdit(f.workspace))
+		logger.Info("workspace: agentic file mutation enabled", "root", f.workspace)
+	}
+	return reg
+}
+
+/*
 runServe wires the embedded HTTP server with all configured providers and the
 default tool registry, then blocks until ctx is cancelled.
 */
 func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) error {
-	reg := tools.NewRegistry()
-	_ = reg.Register(builtin.NewShell())
-	_ = reg.Register(builtin.NewHTTP())
-	_ = reg.Register(builtin.NewFileRead(""))
+	reg := buildTools(f, logger)
 
 	embedders, err := buildEmbedders(cfg, f)
 	if err != nil {
@@ -144,6 +179,32 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 	if err != nil {
 		logger.Warn("rag: service not started", "err", err)
 		ragSvc = nil
+	}
+	/*
+		A large-context cluster model grounds better with more retrieved chunks;
+		the threshold still gates relevance, so this widens evidence without
+		injecting noise. Left at the default for small single-node models.
+	*/
+	if ragSvc != nil && f.ragMaxChunks > 0 {
+		/*
+			Bound the override: beyond ~64 chunks weak ranking can bury salient
+			evidence among near-duplicates (dilution), which hurts grounding
+			rather than helping. Recommended range 8–16 for the 72B cluster.
+		*/
+		if f.ragMaxChunks > 64 {
+			f.ragMaxChunks = 64
+			logger.Warn("rag: --rag-max-chunks clamped to 64 (higher dilutes salience)")
+		}
+		ragSvc.MaxChunks = f.ragMaxChunks
+		/*
+			The byte cap would otherwise throttle the extra chunks, so scale it
+			with the chunk count (≈2KB/chunk) — only widening, never shrinking
+			the default.
+		*/
+		if want := f.ragMaxChunks * 2000; want > ragSvc.MaxBytes {
+			ragSvc.MaxBytes = want
+		}
+		logger.Info("rag: grounding widened", "max_chunks", ragSvc.MaxChunks, "max_bytes", ragSvc.MaxBytes)
 	}
 	if ragSvc != nil && !f.disableWeb {
 		ragSvc.WebSearch = web.NewDDGSearcher()
@@ -165,6 +226,22 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		}
 	}
 
+	/*
+		In cluster mode the server is wired with the single "cluster" provider:
+		every chat request is routed through the cluster control plane (exo /
+		MLX / llama.cpp RPC) with the local runner as fallback. Non-cluster
+		serve mode is unchanged and builds providers from config as before.
+	*/
+	var injected map[string]llm.Provider
+	if f.clusterCfg != "" {
+		cp, err := buildClusterProvider(ctx, cfg, f, logger)
+		if err != nil {
+			return fmt.Errorf("build cluster provider: %w", err)
+		}
+		defer func() { _ = cp.Close(context.Background()) }()
+		injected = map[string]llm.Provider{cp.Name(): cp}
+	}
+
 	srv, err := server.New(server.Options{
 		Addr:             f.addr,
 		Config:           cfg,
@@ -173,11 +250,31 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		RAG:              ragSvc,
 		DisableRAG:       f.disableRAG,
 		WebSearchEnabled: !f.disableWeb,
+		Providers:        injected,
 	})
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
 	return srv.ListenAndServe(ctx)
+}
+
+/*
+buildClusterProvider loads the cluster YAML and constructs the cluster provider.
+The local single-node fallback is the provider built from the existing config
+(best-effort: a missing credential leaves the fallback nil, which is only fatal
+when runtime.strict_cluster is set).
+*/
+func buildClusterProvider(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) (*cluster.Provider, error) {
+	ccfg, err := cluster.LoadClusterConfig(f.clusterCfg)
+	if err != nil {
+		return nil, err
+	}
+	local, err := buildProvider(cfg, f)
+	if err != nil {
+		logger.Warn("cluster: local fallback provider unavailable", "err", err)
+		local = nil
+	}
+	return cluster.New(ctx, ccfg, local, logger)
 }
 
 /*

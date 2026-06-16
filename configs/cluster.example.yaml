@@ -1,0 +1,103 @@
+# agent-smith cluster config — two Apple Silicon Macs over Thunderbolt 5.
+#
+# Node A (coordinator): MacBook Pro M5 Max, 40 GPU cores, 64 GB unified memory.
+# Node B (worker):      MacBook Pro M5 Pro, 20 GPU cores, 24 GB unified memory.
+#
+# Usage:
+#   ./bin/agent --cluster-config configs/cluster.example.yaml --prompt "..."
+#   ./bin/agent --cluster-config configs/cluster.example.yaml --serve
+#
+# The model is identified by id only; no model name is hard-coded in the agent.
+# Point models[].path at YOUR local quantized 70B/72B weights.
+
+cluster:
+  # auto: scheduler picks by preferred_backends + health.
+  # Pin a single backend with: exo | mlx_jaccl | llama_cpp_rpc | local
+  mode: auto
+  coordinator: m5max
+  transport_preference:
+    - thunderbolt_rdma
+    - thunderbolt_tcp
+    - ethernet
+    - local
+  # Inter-node allowlist. Empty -> derived from the node hosts below. Keep these
+  # on the private Thunderbolt bridge / .local names; never public addresses.
+  allowlist:
+    - m5max.local
+    - m5pro.local
+  nodes:
+    - id: m5max
+      host: m5max.local
+      role: coordinator
+      memory_gb: 64
+      gpu_cores: 40
+      priority: 100
+      backends:
+        - exo
+        - mlx_jaccl
+        - llama_cpp_rpc
+        - local
+    - id: m5pro
+      host: m5pro.local
+      role: worker
+      memory_gb: 24
+      gpu_cores: 20
+      priority: 50
+      backends:
+        - exo
+        - mlx_jaccl
+        - llama_cpp_rpc
+
+models:
+  - id: 70b-q4-default
+    format: gguf_or_mlx
+    # For llama.cpp RPC this must be a .gguf file on the coordinator.
+    # For MLX this is an MLX model directory or a HF id.
+    path: /Users/shared/models/70b-q4
+    # served_name is what gets sent on the wire to the backend's OpenAI endpoint.
+    # Defaults to id when omitted.
+    served_name: 70b-q4-default
+    context_tokens: 8192
+    preferred_backends:
+      - exo
+      - mlx_jaccl
+      - llama_cpp_rpc
+      - local
+    min_memory_gb_estimate: 48
+    notes: "70B/72B quantized model, defensive offline analysis."
+
+runtime:
+  bind_host: 127.0.0.1
+  api_port: 8080
+  private_cluster_only: true
+  require_auth_token: true
+  # auth_token: ${CLUSTER_AUTH_TOKEN}   # supply via .env; never commit a token
+  process_restart_policy: on_failure
+  max_restart_attempts: 3
+  stream_timeout_seconds: 900
+  # strict_cluster: true disables the local single-node fallback.
+  strict_cluster: false
+  # log_prompts: only enable for debugging; logs request + model output.
+  log_prompts: false
+
+  exo:
+    binary: exo
+    # endpoint: http://m5max.local:52415   # set to connect to an already-running exo
+    port: 52415
+
+  mlx:
+    python: python3
+    sidecar: scripts/mlx_sidecar.py
+    port: 8081
+    pipeline: false
+    fast_sync: true        # sets MLX_METAL_FAST_SYNCH=1 in the sidecar env
+
+  llama_cpp:
+    server: llama-server   # build llama.cpp with -DGGML_RPC=ON
+    port: 8082
+    # rpc_hosts derived from worker nodes (host:rpc_port) when left empty.
+    rpc_port: 50052
+    gpu_layers: 99
+    # tensor-split weights: ~64:24 unified memory -> roughly 0.73,0.27.
+    tensor_split: "0.73,0.27"
+    # cache_dir: /Users/shared/models/llama-cache

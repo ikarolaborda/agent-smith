@@ -153,10 +153,13 @@ func (a *Agent) composeMessages(ctx context.Context, session *Session) []llm.Mes
 		}
 	}
 	/*
-		The coding-paradigm directive is appended on every request so it reaches
-		all models and providers regardless of the configured system prompt.
+		The coding-paradigm and engineering directives are appended on every
+		request so the house standard (PHP clean architecture, idiomatic Go,
+		mandatory Context7 for third-party code) and the authorized-defensive
+		security posture reach all models and providers — including the clustered
+		Qwen — regardless of the configured system prompt.
 	*/
-	system := prompt.JoinSections(a.SystemPrompt, prompt.CodingParadigmDirective, aug)
+	system := prompt.JoinSections(a.SystemPrompt, prompt.CodingParadigmDirective, prompt.EngineeringDirective, aug)
 	if system == "" {
 		return msgs
 	}
