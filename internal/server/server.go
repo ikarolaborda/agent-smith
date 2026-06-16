@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -524,4 +525,54 @@ func (s *Server) splitModelID(modelID string) (provider, model string) {
 		return modelID[:idx], modelID[idx+1:]
 	}
 	return s.cfg.DefaultProvider, modelID
+}
+
+/*
+resolveProviderModel maps a request's model id to a registered provider. When the
+named provider exists it is used verbatim. When it does not — e.g. an existing
+conversation tagged "ollama/<model>" is continued after the server was restarted
+in cluster mode, where only the "cluster" provider is registered — the request is
+remapped to an available provider and the model id is cleared so that provider
+serves its own default model. This keeps continuing an existing chat from ever
+hard-failing across a provider/mode switch. ok is false only when no provider is
+registered at all.
+*/
+func (s *Server) resolveProviderModel(reqModel string) (provName, modelID string, ok bool) {
+	provName, modelID = s.splitModelID(reqModel)
+	if _, registered := s.providers[provName]; registered {
+		return provName, modelID, true
+	}
+	fallback, found := s.fallbackProvider()
+	if !found {
+		return "", "", false
+	}
+	s.logger.Warn("requested provider not registered; remapping to an available provider",
+		"requested", provName, "fallback", fallback)
+	return fallback, "", true
+}
+
+/*
+fallbackProvider returns a stable, registered provider to absorb a request whose
+named provider is unavailable: the cluster provider first (in cluster mode it is
+the single catch-all), then the configured default, then the lexicographically
+first registered provider so the choice is deterministic.
+*/
+func (s *Server) fallbackProvider() (string, bool) {
+	if _, ok := s.providers["cluster"]; ok {
+		return "cluster", true
+	}
+	if d := s.cfg.DefaultProvider; d != "" {
+		if _, ok := s.providers[d]; ok {
+			return d, true
+		}
+	}
+	names := make([]string, 0, len(s.providers))
+	for n := range s.providers {
+		names = append(names, n)
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+	sort.Strings(names)
+	return names[0], true
 }

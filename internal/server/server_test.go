@@ -128,6 +128,34 @@ func TestServer_ChatCompletions_RejectsEmptyMessages(t *testing.T) {
 	}
 }
 
+/*
+Continuing a chat created under a now-unregistered provider (e.g. an "ollama/..."
+conversation reopened after the server restarted in cluster mode, where only the
+cluster provider exists) must not hard-fail. The request must be remapped to an
+available provider and stream, instead of 400 "provider not available".
+*/
+func TestServer_ChatCompletions_RemapsUnavailableProvider(t *testing.T) {
+	provs := map[string]llm.Provider{
+		"fake": &fakeProvider{chunks: []llm.StreamChunk{{Delta: "ok"}, {Done: true}}},
+	}
+	ts := newTestServer(t, provs)
+	body := bytes.NewBufferString(`{"model":"ollama/huihui_ai/huihui-moe-abliterated:60b","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 after remapping unavailable provider, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("content-type: %q", got)
+	}
+	if !containsDelta(collectFrames(t, resp.Body), `"content":"ok"`) {
+		t.Fatalf("expected streamed content from the remapped provider")
+	}
+}
+
 func TestServer_ChatCompletions_StreamsContentDeltas(t *testing.T) {
 	provs := map[string]llm.Provider{
 		"fake": &fakeProvider{chunks: []llm.StreamChunk{

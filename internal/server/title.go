@@ -59,12 +59,12 @@ func (s *Server) handleTitle(w http.ResponseWriter, r *http.Request) {
 		prompt = string(runes[:titleInputCap])
 	}
 
-	provName, modelID := s.splitModelID(req.Model)
-	prov, ok := s.providers[provName]
+	provName, modelID, ok := s.resolveProviderModel(req.Model)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "no_provider", "no provider available for title generation")
 		return
 	}
+	prov := s.providers[provName]
 
 	/*
 		The timeout is generous because this is a background, best-effort call:

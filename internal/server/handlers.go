@@ -255,15 +255,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		messages = append(messages, m)
 	}
 
-	provName, modelID := s.splitModelID(req.Model)
-	if provName == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request", "no provider available and no default configured")
+	provName, modelID, ok := s.resolveProviderModel(req.Model)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "no_provider", "no chat provider is configured")
 		return
 	}
 
 	a, err := s.newAgent(provName)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeError(w, http.StatusInternalServerError, "provider_error", err.Error())
 		return
 	}
 	a.ProfileID = req.ProfileID
