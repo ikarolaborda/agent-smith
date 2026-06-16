@@ -53,6 +53,17 @@ type Node struct {
 	GPUCores int      `yaml:"gpu_cores"`
 	Priority int      `yaml:"priority"`
 	Backends []string `yaml:"backends"`
+	/*
+		SafeModelGB caps how much MODEL-RELATED memory (weight slice + KV slice +
+		compute-graph buffer) this node may hold when it participates in a
+		distributed split. It is a HARD safety limit enforced before launch, even
+		under force_distribute. On Apple Silicon the GPU's Metal working-set limit
+		(~75% of RAM) is far below total RAM, and the compute-graph buffer scales
+		with context — a memory-tight worker froze at 18.6/24 GB holding only a
+		0.10 weight slice at 32k ctx because the compute buffer overflowed. Zero
+		means "derive": half the node's memory_gb.
+	*/
+	SafeModelGB int `yaml:"safe_model_gb"`
 }
 
 /* ClusterTopology is the "cluster:" block. */

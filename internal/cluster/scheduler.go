@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 )
@@ -160,7 +162,94 @@ func (s *scheduler) memoryFits(name string, model ModelConfig) bool {
 			"coordinator_safe_gb", s.coordinatorSafeMemoryGB())
 		return false
 	}
-	return s.mgr.totalClusterMemoryGB() >= model.MinMemoryGB
+	if s.mgr.totalClusterMemoryGB() < model.MinMemoryGB {
+		return false
+	}
+	/*
+		Hard per-node safety budget. Distributing weights onto a worker also drags
+		a compute-graph buffer onto it that scales with CONTEXT, not the weight
+		share — a 24 GB worker froze at 18.6 GB holding only a 0.10 weight slice at
+		32k ctx. This refuses (falls back to local) when any worker's projected
+		peak exceeds its safe budget, so the worker participates only when it fits.
+		This applies EVEN under force_distribute: force_distribute waives the
+		single-node-first preference, never the safety limit.
+	*/
+	if !s.workersWithinSafeBudget(model) {
+		return false
+	}
+	return true
+}
+
+/*
+workersWithinSafeBudget reports whether every worker node's projected peak memory
+for this model stays inside its safe budget. Projected peak = weight slice +
+compute/KV reserve that scales with context. Logs and returns false on the first
+worker that would overflow.
+*/
+func (s *scheduler) workersWithinSafeBudget(model ModelConfig) bool {
+	share := s.workerTensorShare()
+	reserve := computeReserveGB(model.ContextTokens)
+	for _, w := range s.cfg.WorkerNodes() {
+		budget := s.nodeSafeModelGB(w)
+		projected := int(float64(model.MinMemoryGB)*share+0.5) + reserve
+		if projected > budget {
+			s.logger.Warn("cluster: worker slice exceeds its safe memory budget, refusing distributed launch (use a smaller context or single-node)",
+				"worker", w.ID, "projected_peak_gb", projected, "safe_budget_gb", budget,
+				"weight_share", share, "context_tokens", model.ContextTokens, "compute_reserve_gb", reserve)
+			return false
+		}
+	}
+	return true
+}
+
+/* nodeSafeModelGB is the node's hard cap on model-related memory; zero derives to half its RAM. */
+func (s *scheduler) nodeSafeModelGB(n Node) int {
+	if n.SafeModelGB > 0 {
+		return n.SafeModelGB
+	}
+	return n.MemoryGB / 2
+}
+
+/*
+workerTensorShare is the fraction of the model assigned to the worker (the last
+tensor_split value; the coordinator is device 0). Defaults to the worker's share
+of total cluster RAM when no split is configured.
+*/
+func (s *scheduler) workerTensorShare() float64 {
+	ts := strings.TrimSpace(s.cfg.Runtime.Llama.TensorSplit)
+	if ts != "" {
+		parts := strings.Split(ts, ",")
+		if v, err := strconv.ParseFloat(strings.TrimSpace(parts[len(parts)-1]), 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	total := s.mgr.totalClusterMemoryGB()
+	workerMem := 0
+	for _, w := range s.cfg.WorkerNodes() {
+		workerMem += w.MemoryGB
+	}
+	if total > 0 && workerMem > 0 {
+		return float64(workerMem) / float64(total)
+	}
+	return 0.5
+}
+
+/*
+computeReserveGB estimates the non-weight memory (KV slice + Metal compute-graph
+buffer) a worker must hold, which grows with context. Empirically ~16 GB at 32k
+on the M5 Pro, so ~ctx/2048 GB, floored at 2. Conservative on purpose: the
+compute buffer cannot be measured before load, and the failure mode is an
+unrecoverable freeze, so the guard budgets against the peak.
+*/
+func computeReserveGB(contextTokens int) int {
+	if contextTokens <= 0 {
+		contextTokens = 4096
+	}
+	reserve := contextTokens / 2048
+	if reserve < 2 {
+		reserve = 2
+	}
+	return reserve
 }
 
 /*

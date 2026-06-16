@@ -29,6 +29,9 @@ func TestScheduler(t *testing.T) {
 
 	t.Run("it_excludes_local_from_cluster_memory_but_fits_coordinator", func(t *testing.T) {
 		cfg := testConfig()
+		/* Neutralize the per-node safety budget here: this case tests aggregate
+		   cluster-memory placement; the budget guard is tested separately. */
+		cfg.Cluster.Nodes[1].SafeModelGB = 1000
 		mgr := NewManager(cfg, nil, discardLogger(), nil)
 		s := newScheduler(cfg, mgr, discardLogger())
 		/* 70B-Q4 needs 48 GB: fits the 64 GB coordinator for local. */
@@ -69,11 +72,35 @@ func TestScheduler(t *testing.T) {
 		if !s.memoryFits(BackendLocal, fits) {
 			t.Error("local should host a 34 GB model on a 64 GB coordinator")
 		}
-		/* force_distribute is the explicit opt-out: distributed becomes eligible again. */
+		/* force_distribute waives single-node-first; with the worker's safety
+		   budget neutralized, distributed becomes eligible again. */
+		cfg.Cluster.Nodes[1].SafeModelGB = 1000
 		forced := fits
 		forced.ForceDistribute = true
 		if !s.memoryFits(BackendLlamaRPC, forced) {
 			t.Error("force_distribute must re-enable distributed placement")
+		}
+	})
+
+	t.Run("it_refuses_distributed_when_worker_slice_exceeds_its_safe_budget", func(t *testing.T) {
+		cfg := testConfig()
+		mgr := NewManager(cfg, nil, discardLogger(), nil)
+		s := newScheduler(cfg, mgr, discardLogger())
+		/* 60 GB model exceeds the coordinator (so it is not single-node-first) and
+		   needs the worker — but the worker's share + compute reserve overflows its
+		   safe budget (24/2 = 12 GB), so distributed is refused even with
+		   force_distribute. This is the guard that prevents the worker freeze. */
+		big := cfg.Models[0]
+		big.MinMemoryGB = 60
+		big.ContextTokens = 32768
+		big.ForceDistribute = true
+		if s.memoryFits(BackendLlamaRPC, big) {
+			t.Error("must refuse distributed when the worker slice exceeds its safe budget")
+		}
+		/* Raising the worker's safe budget high enough re-admits it. */
+		cfg.Cluster.Nodes[1].SafeModelGB = 1000
+		if !s.memoryFits(BackendLlamaRPC, big) {
+			t.Error("a large enough worker safe budget should re-admit distributed")
 		}
 	})
 

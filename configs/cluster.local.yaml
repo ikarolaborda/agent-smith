@@ -57,6 +57,12 @@ cluster:
       host: ikaros-macbook-pro-m5p.local
       role: worker
       memory_gb: 24
+      # Hard cap on model-related memory (weight slice + KV + compute-graph buffer)
+      # this 24GB worker may hold in a distributed split. The Metal compute buffer
+      # scales with CONTEXT, so the scheduler refuses to engage the worker when
+      # share*model + ctx-reserve exceeds this (it froze at 18.6GB holding a 0.10
+      # slice at 32k ctx). Worker participates only at small ctx; else single-node.
+      safe_model_gb: 12
       gpu_cores: 20
       priority: 50
       backends:
