@@ -156,6 +156,7 @@ func buildTools(f flags, logger *slog.Logger) *tools.Registry {
 	_ = reg.Register(builtin.NewShell())
 	_ = reg.Register(builtin.NewHTTP())
 	_ = reg.Register(builtin.NewFileRead(f.workspace))
+	_ = reg.Register(builtin.NewReadDir(f.workspace))
 	if f.workspace != "" {
 		_ = reg.Register(builtin.NewFileWrite(f.workspace))
 		_ = reg.Register(builtin.NewFileEdit(f.workspace))
