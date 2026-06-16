@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/agent"
+	"github.com/ikarolaborda/agent-smith/internal/cluster"
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/llm/anthropic"
@@ -155,6 +156,28 @@ func New(opts Options) (*Server, error) {
 	if opts.Providers != nil {
 		for name, prov := range opts.Providers {
 			s.providers[name] = prov
+			/*
+				A provider that declares its own models (the cluster provider, whose
+				models live in the cluster YAML, not the app config) gets one picker
+				entry per declared model. Otherwise the app config supplies the single
+				model name. Without this the cluster provider yields a lone "cluster/"
+				entry with an empty model — there is no way to pick the clustered model
+				from the web UI, and chat silently falls through to the local backend.
+			*/
+			if lister, ok := prov.(interface{ ListModels() []cluster.ModelInfo }); ok {
+				for _, m := range lister.ListModels() {
+					s.models = append(s.models, modelEntry{
+						ID:       name + "/" + m.ID,
+						Object:   "model",
+						Created:  created,
+						OwnedBy:  name,
+						Provider: name,
+						Model:    m.ID,
+						Kind:     "chat",
+					})
+				}
+				continue
+			}
 			model := ""
 			if cfg, ok := opts.Config.Providers[name]; ok {
 				model = cfg.Model

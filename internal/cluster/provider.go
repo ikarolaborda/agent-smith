@@ -78,6 +78,38 @@ func New(ctx context.Context, cfg *ClusterConfig, localProvider llm.Provider, lo
 /* Name implements llm.Provider. */
 func (p *Provider) Name() string { return providerName }
 
+/*
+ModelInfo is the picker-facing view of one configured cluster model. ID is the
+config id the chat route sends back as the model (resolveModel maps it to the
+backend's served_name); ContextTokens is the effective window the cluster
+applies for that model. IsDefault marks the model served when a request carries
+no model id.
+*/
+type ModelInfo struct {
+	ID            string
+	ContextTokens int
+	IsDefault     bool
+}
+
+/*
+ListModels enumerates the models declared in the cluster config so the HTTP
+server can surface them in the model picker as "cluster/<id>" entries. Without
+this the server can only synthesize a single empty "cluster/" entry from the app
+config (which has no cluster provider block), leaving no way to select the
+clustered model from the web UI.
+*/
+func (p *Provider) ListModels() []ModelInfo {
+	out := make([]ModelInfo, 0, len(p.cfg.Models))
+	for _, m := range p.cfg.Models {
+		out = append(out, ModelInfo{
+			ID:            m.ID,
+			ContextTokens: m.ContextTokens,
+			IsDefault:     m.ID == p.defaultModel,
+		})
+	}
+	return out
+}
+
 /* Manager exposes the underlying manager for CLI/diagnostic use. */
 func (p *Provider) Manager() *Manager { return p.mgr }
 
