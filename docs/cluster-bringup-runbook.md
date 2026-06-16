@@ -24,6 +24,8 @@ xcode-select --install 2>/dev/null || true   # Metal toolchain
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
 cmake -B build -DGGML_RPC=ON -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j
+# Build the SAME llama.cpp revision with the SAME flags on both Macs — a
+# coordinator/worker mismatch can cause RPC protocol or kernel errors.
 # verify:
 ls build/bin/llama-server build/bin/rpc-server
 # put them on PATH (or set runtime.llama_cpp.server to the full path):
@@ -73,6 +75,21 @@ curl -s 127.0.0.1:8080/v1/models
 #   cluster: request complete ttft_ms=… tokens_per_sec=…
 # On the worker, rpc-server logs incoming offload activity.
 ```
+
+## Validation checkpoints (run once, observe both Macs)
+The 24GB worker is the tightest constraint — startup can succeed yet a later
+larger-batch prompt can still OOM. Validate in order, watching memory on BOTH
+Macs (`Activity Monitor` or `sudo memory_pressure` / `vm_stat`):
+1. `rpc-server` up on the worker bridge IP; coordinator can reach it (`nc -vz 169.254.29.19 50052`).
+2. Launch once with the 72B model; watch **resident memory on each Mac during load and after the first prompt**.
+3. Run a short sanity suite: one long-context prompt, one RAG-grounded cybersecurity query, one multi-turn exchange — confirm no truncation, KV corruption, or retrieval regression.
+4. Capture, separately: prompt-eval tok/s, generation tok/s, first-token latency.
+
+## Fallback ladder (if it OOMs or thrashes)
+Change ONE knob at a time, cheapest first:
+1. Lower `models[].context_tokens`: 32768 → 24576 → 16384 (KV is the main pressure).
+2. Only then shift `tensor_split` toward the coordinator to protect the 24GB worker: `0.73,0.27` → `0.75,0.25` → `0.76,0.24`.
+3. As a last resort, drop `-fa on`/`-ctk/-ctv q8_0` only if you switch to a smaller ctx with f16 KV (do not run quantized KV without `-fa on`).
 
 ## Performance & quality notes
 - **KV cache q8_0 + `-fa on`** is the lever that fits 32k context for a 72B Q4
