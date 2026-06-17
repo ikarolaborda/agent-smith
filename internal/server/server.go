@@ -28,6 +28,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
+	"github.com/ikarolaborda/agent-smith/internal/validate"
 	"github.com/ikarolaborda/agent-smith/internal/verify"
 )
 
@@ -73,6 +74,14 @@ type Options struct {
 		offline-first posture.
 	*/
 	VerifyCVE bool
+	/*
+		ValidateVuln enables the cross-provider validation layer: vulnerability-
+		research answers are critiqued by independent models (OpenAI via its API,
+		Anthropic via the Claude Code CLI / Max subscription) and a non-authoritative
+		advisory is appended. Default false; opt-in because it incurs egress, cost,
+		and drives the Max subscription programmatically.
+	*/
+	ValidateVuln bool
 }
 
 /*
@@ -102,11 +111,12 @@ type Server struct {
 	disableRAG       bool
 	webSearchEnabled bool
 	/*
-		cveVerifier is the shared NVD verification gate attached to each
-		per-request agent when configured (nil = feature off). It is shared so
-		its per-CVE cache persists across requests.
+		answerVerifier is the shared post-answer advisory layer (NVD CVE check
+		and/or cross-provider validation) attached to each per-request agent when
+		configured (nil = off). Shared so the NVD cache and reviewer clients
+		persist across requests.
 	*/
-	cveVerifier agent.Verifier
+	answerVerifier agent.Verifier
 
 	/*
 		modelsMu guards the dynamic Ollama model list. We preload it at
@@ -178,10 +188,7 @@ func New(opts Options) (*Server, error) {
 		disableRAG:       opts.DisableRAG,
 		webSearchEnabled: opts.WebSearchEnabled,
 	}
-	if opts.VerifyCVE {
-		s.cveVerifier = verify.NewNVDVerifier(verify.WithAPIKey(os.Getenv("NVD_API_KEY")))
-		logger.Info("cve verification: enabled", "source", "nvd", "api_key", os.Getenv("NVD_API_KEY") != "")
-	}
+	s.answerVerifier = BuildAnswerVerifier(opts.Config, opts.VerifyCVE, opts.ValidateVuln, logger)
 	for _, o := range opts.AllowedOrigins {
 		s.allowedOrigins[o] = struct{}{}
 	}
@@ -540,6 +547,53 @@ func (s *Server) shouldWebSearch(provName string, requested *bool) bool {
 }
 
 /*
+BuildAnswerVerifier composes the post-answer advisory layer from operator flags,
+shared by the HTTP server and the CLI so both wire identical behavior. It returns
+nil when nothing is enabled (zero behavior change). The NVD gate verifies cited
+CVEs against the primary source; the cross-provider validator critiques vuln-
+research answers with independent models (OpenAI via API, Anthropic via the Claude
+Code CLI / Max subscription). Reviewers self-omit when their backend is absent
+(no OPENAI_API_KEY, no claude binary), so the layer degrades gracefully.
+*/
+func BuildAnswerVerifier(cfg *config.Config, verifyCVE, validateVuln bool, logger *slog.Logger) agent.Verifier {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var verifiers []agent.Verifier
+
+	if verifyCVE {
+		verifiers = append(verifiers, verify.NewNVDVerifier(verify.WithAPIKey(os.Getenv("NVD_API_KEY"))))
+		logger.Info("cve verification: enabled", "source", "nvd", "api_key", os.Getenv("NVD_API_KEY") != "")
+	}
+
+	if validateVuln {
+		var reviewers []validate.Reviewer
+		var oa config.ProviderConfig
+		if cfg != nil {
+			oa = cfg.Providers["openai"]
+		}
+		if r := validate.NewOpenAIReviewer(oa.APIKey, oa.BaseURL, oa.Model); r != nil {
+			reviewers = append(reviewers, r)
+		}
+		if r := validate.NewClaudeCLIReviewer(""); r != nil {
+			reviewers = append(reviewers, r)
+		}
+		if v := validate.NewCrossProviderValidator(reviewers); v != nil {
+			verifiers = append(verifiers, v)
+			names := make([]string, 0, len(reviewers))
+			for _, r := range reviewers {
+				names = append(names, r.Name())
+			}
+			logger.Info("cross-provider validation: enabled", "reviewers", strings.Join(names, ","))
+		} else {
+			logger.Warn("cross-provider validation requested but no reviewer is available (need OPENAI_API_KEY and/or the claude CLI)")
+		}
+	}
+
+	return agent.NewMultiVerifier(verifiers...)
+}
+
+/*
 newAgent builds a fresh agent.Agent for one request using the provider already
 configured under name. Each request gets its own Agent + Session so concurrent
 streams cannot interfere.
@@ -559,7 +613,7 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 	if s.rag != nil && !s.disableRAG {
 		a.RAG = s.rag
 	}
-	a.Verifier = s.cveVerifier
+	a.Verifier = s.answerVerifier
 	return a, nil
 }
 

@@ -37,7 +37,6 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/server"
 	"github.com/ikarolaborda/agent-smith/internal/tools"
 	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
-	"github.com/ikarolaborda/agent-smith/internal/verify"
 	"github.com/ikarolaborda/agent-smith/internal/web"
 )
 
@@ -66,6 +65,7 @@ type flags struct {
 	datasetSrc   string
 	datasetOut   string
 	verifyCVE    bool
+	validateVuln bool
 }
 
 func main() {
@@ -102,6 +102,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.workspace, "workspace", "", "enable agentic project work: directory the agent may modify via file_write/file_edit (sandboxed). Unset = read-only.")
 	flag.IntVar(&f.ragMaxChunks, "rag-max-chunks", 0, "override how many RAG chunks are injected per request (0 = default 4). Raise for large-context cluster models to improve grounding.")
 	flag.BoolVar(&f.verifyCVE, "verify-cve", false, "verify CVE identifiers in answers against the NIST NVD primary source and append a non-destructive advisory note (network egress; reads NVD_API_KEY from env if set)")
+	flag.BoolVar(&f.validateVuln, "validate-vuln", false, "cross-validate vulnerability-research answers against independent models (OpenAI via API; Anthropic via the Claude Code CLI / Max subscription) and append a non-authoritative advisory (network egress; drives the Max subscription programmatically)")
 	flag.Parse()
 	return f
 }
@@ -152,10 +153,7 @@ func run(f flags) error {
 	}
 
 	a := agent.New(provider, buildTools(f, logger), cfg.Agent.SystemPrompt, cfg.Agent.MaxIterations, logger)
-	if f.verifyCVE {
-		a.Verifier = verify.NewNVDVerifier(verify.WithAPIKey(os.Getenv("NVD_API_KEY")))
-		logger.Info("cve verification: enabled", "source", "nvd", "api_key", os.Getenv("NVD_API_KEY") != "")
-	}
+	a.Verifier = server.BuildAnswerVerifier(cfg, f.verifyCVE, f.validateVuln, logger)
 
 	if f.prompt != "" {
 		return runOnce(ctx, a, f.prompt)
@@ -264,6 +262,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		DisableRAG:       f.disableRAG,
 		WebSearchEnabled: !f.disableWeb,
 		VerifyCVE:        f.verifyCVE,
+		ValidateVuln:     f.validateVuln,
 		Providers:        injected,
 	})
 	if err != nil {

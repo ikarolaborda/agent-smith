@@ -155,6 +155,33 @@ func TestAgent_AlwaysAppliesGroundingGuardrail(t *testing.T) {
 	}
 }
 
+/* fixedVerifier appends a fixed note (ignores input) for MultiVerifier tests. */
+type fixedVerifier struct{ note string }
+
+func (f fixedVerifier) Verify(context.Context, string) (string, error) { return f.note, nil }
+
+func TestMultiVerifier_JoinsNotesAndCollapses(t *testing.T) {
+	/* Zero -> nil, one -> identity, many -> joined. */
+	if agent.NewMultiVerifier() != nil {
+		t.Fatalf("no verifiers must yield nil")
+	}
+	if agent.NewMultiVerifier(nil, nil) != nil {
+		t.Fatalf("all-nil must yield nil")
+	}
+	one := fixedVerifier{note: "\n\n[a]"}
+	if got := agent.NewMultiVerifier(one); got != one {
+		t.Fatalf("single verifier must be returned as-is")
+	}
+	multi := agent.NewMultiVerifier(fixedVerifier{note: "\n\n[a]"}, fixedVerifier{note: ""}, fixedVerifier{note: "\n\n[b]"})
+	got, err := multi.Verify(context.Background(), "anything")
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got != "\n\n[a]\n\n[b]" {
+		t.Fatalf("must join non-empty notes in order: %q", got)
+	}
+}
+
 /* cveReplyProvider returns a fixed final answer that cites a CVE. */
 type cveReplyProvider struct{ reply string }
 

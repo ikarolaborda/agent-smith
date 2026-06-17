@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
@@ -73,6 +74,51 @@ error that blocks the answer).
 */
 type Verifier interface {
 	Verify(ctx context.Context, text string) (note string, err error)
+}
+
+/*
+MultiVerifier runs several Verifiers in order and concatenates their non-empty
+notes. It is the seam that composes independent advisory layers — e.g. the NVD
+primary-source CVE check and the cross-provider second-opinion validation — into
+the single Agent.Verifier slot. A failing verifier is skipped, never fatal.
+*/
+type MultiVerifier struct {
+	verifiers []Verifier
+}
+
+/*
+NewMultiVerifier composes the given verifiers, dropping nils. It returns nil when
+none remain and the sole verifier when exactly one remains, so callers never pay
+for an empty or single-element wrapper.
+*/
+func NewMultiVerifier(verifiers ...Verifier) Verifier {
+	live := make([]Verifier, 0, len(verifiers))
+	for _, v := range verifiers {
+		if v != nil {
+			live = append(live, v)
+		}
+	}
+	switch len(live) {
+	case 0:
+		return nil
+	case 1:
+		return live[0]
+	default:
+		return &MultiVerifier{verifiers: live}
+	}
+}
+
+/* Verify runs each composed verifier and joins their non-empty advisory notes. */
+func (m *MultiVerifier) Verify(ctx context.Context, text string) (string, error) {
+	var b strings.Builder
+	for _, v := range m.verifiers {
+		note, err := v.Verify(ctx, text)
+		if err != nil || note == "" {
+			continue
+		}
+		b.WriteString(note)
+	}
+	return b.String(), nil
 }
 
 /* ErrMaxIterations is returned when the agent loop exceeds MaxIters. */
