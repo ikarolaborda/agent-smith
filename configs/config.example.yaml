@@ -19,6 +19,15 @@ providers:
     model: huihui_ai/gpt-oss-abliterated:20b
     stream: true
 
+  # abliteration.ai — OpenAI-compatible REMOTE endpoint (NOT offline). Only
+  # registers when ABLITERATION_AI_API_KEY is set; defaults to a low temperature
+  # (0.2) for factual, low-creativity output. Set the model to an id served by
+  # your abliteration.ai account.
+  abliteration:
+    api_key: ${ABLITERATION_AI_API_KEY}
+    base_url: https://api.abliteration.ai/v1
+    model: ${ABLITERATION_AI_MODEL}
+
 agent:
   system_prompt: "You are a Senior Software Engineer. With 20 years of experience, you are adept at writing concise, clear, and best practices code."
   max_iterations: 10

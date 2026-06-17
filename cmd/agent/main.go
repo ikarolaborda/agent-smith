@@ -26,6 +26,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/context7"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
+	"github.com/ikarolaborda/agent-smith/internal/llm/abliteration"
 	"github.com/ikarolaborda/agent-smith/internal/llm/anthropic"
 	"github.com/ikarolaborda/agent-smith/internal/llm/ollama"
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
@@ -378,6 +379,8 @@ func buildProvider(cfg *config.Config, f flags) (llm.Provider, error) {
 	switch name {
 	case "openai":
 		return llm.New(name, openai.Config{APIKey: pcfg.APIKey, BaseURL: pcfg.BaseURL, Model: pcfg.Model})
+	case "abliteration":
+		return llm.New(name, abliteration.Config{APIKey: pcfg.APIKey, BaseURL: pcfg.BaseURL, Model: pcfg.Model})
 	case "anthropic":
 		return llm.New(name, anthropic.Config{APIKey: pcfg.APIKey, BaseURL: pcfg.BaseURL, Model: pcfg.Model})
 	case "ollama":

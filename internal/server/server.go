@@ -21,6 +21,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/cluster"
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
+	"github.com/ikarolaborda/agent-smith/internal/llm/abliteration"
 	"github.com/ikarolaborda/agent-smith/internal/llm/anthropic"
 	"github.com/ikarolaborda/agent-smith/internal/llm/ollama"
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
@@ -473,6 +474,11 @@ func buildProvider(name string, p config.ProviderConfig) (llm.Provider, error) {
 			return nil, fmt.Errorf("missing api_key for %s", name)
 		}
 		return llm.New(name, openai.Config{APIKey: p.APIKey, BaseURL: p.BaseURL, Model: p.Model})
+	case "abliteration":
+		if p.APIKey == "" {
+			return nil, fmt.Errorf("missing api_key for %s", name)
+		}
+		return llm.New(name, abliteration.Config{APIKey: p.APIKey, BaseURL: p.BaseURL, Model: p.Model})
 	case "anthropic":
 		if p.APIKey == "" {
 			return nil, fmt.Errorf("missing api_key for %s", name)
