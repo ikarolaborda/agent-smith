@@ -81,7 +81,7 @@ The agent runs a plan → call-tool → observe loop with OpenAI-compatible func
 | `file_write` | **`--workspace` only** | Create/overwrite a file inside the sandboxed workspace directory. |
 | `file_edit` | **`--workspace` only** | Apply a targeted edit to a file inside the workspace. |
 
-Without `--workspace`, the agent is read-only — it can inspect a project but not modify it. Point `--workspace` at a directory to enable sandboxed project work; writes outside it are refused.
+By default the agent is read-only — it can inspect a project but not modify it. Give it a folder to enable sandboxed project work (writes outside it are refused) either at launch with `--workspace <dir>`, or from the web UI with the top-bar **Open folder…** control, which opens a host folder at runtime (`POST /v1/workspace`) and lets you browse it. The folder is server-side because the agent runs on the host, so it takes a path rather than a browser directory handle.
 
 ## Persona & engineering policy (always on)
 

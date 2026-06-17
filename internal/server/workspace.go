@@ -110,11 +110,23 @@ func (s *Server) handleWorkspaceTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, walkErr error) error {
+	/*
+		Walk the real path: filepath.WalkDir lstats its argument and won't descend
+		when the root itself is a symlink (e.g. /tmp -> /private/tmp on macOS), so
+		a symlinked workspace would list nothing. Resolving the root keeps the tree
+		consistent with the file tools, which already operate through the symlink.
+		Relative paths are still reported against the displayed root.
+	*/
+	walkRoot := root
+	if real, err := filepath.EvalSymlinks(root); err == nil {
+		walkRoot = real
+	}
+
+	_ = filepath.WalkDir(walkRoot, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
-		if p == root {
+		if p == walkRoot {
 			return nil
 		}
 		if d.IsDir() && workspaceSkip[d.Name()] {
@@ -124,7 +136,7 @@ func (s *Server) handleWorkspaceTree(w http.ResponseWriter, r *http.Request) {
 			resp.Truncated = true
 			return filepath.SkipAll
 		}
-		rel, err := filepath.Rel(root, p)
+		rel, err := filepath.Rel(walkRoot, p)
 		if err != nil {
 			return nil
 		}

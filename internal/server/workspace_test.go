@@ -111,3 +111,28 @@ func TestWorkspace_TreeListsAndFiltersNoise(t *testing.T) {
 		t.Errorf("tree must skip node_modules: %s", body)
 	}
 }
+
+/*
+Opening a folder reached through a symlink (e.g. /tmp -> /private/tmp on macOS)
+must still list files: filepath.WalkDir won't descend a symlinked root, so the
+tree resolves the root first. Guards the residual that returned an empty tree.
+*/
+func TestWorkspace_TreeFollowsSymlinkedRoot(t *testing.T) {
+	ts := newTestServer(t, map[string]llm.Provider{"fake": &fakeProvider{}})
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "inside.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if resp, _ := postWorkspace(t, ts.URL, link); resp.StatusCode != http.StatusOK {
+		t.Fatalf("open symlinked folder failed: %d", resp.StatusCode)
+	}
+
+	resp, body := getJSON(t, ts.URL+"/v1/workspace/tree")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "inside.txt") {
+		t.Fatalf("symlinked workspace should list its files: %d %s", resp.StatusCode, body)
+	}
+}

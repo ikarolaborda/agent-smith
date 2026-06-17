@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Open a folder from the web UI**: a top-bar control opens a host folder at runtime (`GET`/`POST /v1/workspace`, plus a bounded `GET /v1/workspace/tree`) so the agent's sandboxed `file_write`/`file_edit` tools can create and modify files in it through chat — no longer only via the `--workspace` launch flag. The agent's tool registry is rebuilt per request from the active folder, so opening or closing one takes effect immediately.
+
+### Fixed
+- Workspace file tree now lists files when the opened folder is reached through a symlink (e.g. `/tmp` on macOS); the listing resolves the root before walking it.
+
 ## [0.2.0] — 2026-06-16
 
 Clustered inference, an agentic tool loop, live Context7 docs, and an always-on
