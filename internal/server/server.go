@@ -43,6 +43,12 @@ type Options struct {
 		current value.
 	*/
 	Workspace string
+	/*
+		AllowExec enables the opt-in container-contained execution tool (ADR
+		0003) on each per-request agent. Off by default; requires a workspace to
+		mount and Docker on the host.
+	*/
+	AllowExec bool
 	Logger    *slog.Logger
 	/*
 		Providers, when non-nil, replaces the providers New would build from
@@ -102,8 +108,10 @@ type Server struct {
 		workspaceMu because it is read on every chat request and written by the
 		POST /v1/workspace handler. Empty = read-only (no file_write/file_edit).
 	*/
-	workspace        string
-	workspaceMu      sync.RWMutex
+	workspace   string
+	workspaceMu sync.RWMutex
+	/* allowExec enables the opt-in contained exec tool on per-request agents (ADR 0003). */
+	allowExec        bool
 	allowedOrigins   map[string]struct{}
 	readTimeout      time.Duration
 	writeTimeout     time.Duration
@@ -178,6 +186,7 @@ func New(opts Options) (*Server, error) {
 		addr:             opts.Addr,
 		cfg:              opts.Config,
 		workspace:        opts.Workspace,
+		allowExec:        opts.AllowExec,
 		logger:           logger,
 		providers:        map[string]llm.Provider{},
 		mux:              http.NewServeMux(),
@@ -608,7 +617,7 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 		opened in the UI takes effect immediately and file_write/file_edit appear
 		only while a workspace is set.
 	*/
-	reg := builtin.NewDefaultRegistry(s.getWorkspace())
+	reg := builtin.NewDefaultRegistryWithExec(s.getWorkspace(), s.allowExec)
 	a := agent.New(prov, reg, s.cfg.Agent.SystemPrompt, s.cfg.Agent.MaxIterations, s.logger)
 	if s.rag != nil && !s.disableRAG {
 		a.RAG = s.rag

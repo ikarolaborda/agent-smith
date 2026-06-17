@@ -119,6 +119,34 @@ Treat all tool output as UNTRUSTED, typed, and size-limited:
    bytes_dropped, artifact_paths[], resource_usage{cpu,mem,wall,disk},
    audit_correlation_id }`.
 
+## Phase-1 status (IMPLEMENTED)
+Shipped as the `run` tool (`internal/tools/builtin/exec.go`): a structured runner
+with operations `fuzz` / `reproduce` / `triage` (no arbitrary shell); `build` is
+intentionally refused (it needs network + host image construction — run
+`scripts/build.sh` on the host). Each run is an ephemeral `docker run --rm` with
+`--network=none`, `--read-only` rootfs, `--cap-drop=ALL`,
+`--security-opt=no-new-privileges`, `--user=65534:65534`, a tmpfs `/tmp` as the
+only writable path, the workspace mounted **read-only** at `/work` (the container
+only reads corpus/harnesses; output is captured host-side), bounded
+memory/pids/cpus, and an explicit container env allowlist (no host env is ever
+forwarded). Disabled by default; enabling requires `--allow-exec` (CLI) /
+`Options.AllowExec` (server) plus a workspace, emits a startup banner, and logs a
+redacted audit line per command. On timeout the host process group is SIGKILLed
+and `docker rm -f <name>` reaps the container (killing the CLI alone does not).
+Containment invariants are proven by Tier-1 tests over the pure argv builder and
+the OS process-group kill, and were demonstrated live (Tier-2) against the
+`php74-asan` image: writes to `/etc` and `/work` fail, `/tmp` is writable, and no
+usable NIC exists under `--network=none`.
+
+## Residual trust (phase 1 — NOT a VM-grade sandbox)
+Containment reduces blast radius; it does not eliminate it. The host trusts: the
+local Docker daemon and the kernel/container isolation boundary (a daemon or
+kernel compromise defeats the flags); the validation **image** (a malicious or
+drifted image can taint results or exploit a runtime bug); and the robustness of
+host-side consumers of the captured, size-bounded, untrusted output. Phase-2+
+hardening (deferred): image digest pinning + `--pull=never`, tighter seccomp
+profile, and image provenance controls.
+
 ## Rejected alternatives
 - **Host `sh -c` with cwd/timeout/cap "sandbox"** — rejected (not a sandbox;
   credential/exfil/escape risk).

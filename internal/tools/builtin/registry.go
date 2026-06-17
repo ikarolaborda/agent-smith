@@ -14,6 +14,18 @@ read-only; both confine to workspace via insideRoot so the agent can neither
 escape the folder nor follow symlinks out of it.
 */
 func NewDefaultRegistry(workspace string) *tools.Registry {
+	return NewDefaultRegistryWithExec(workspace, false)
+}
+
+/*
+NewDefaultRegistryWithExec builds the standard tool set and, only when
+allowExec is true AND a workspace is configured, additionally registers the
+opt-in container-contained execution tool (ADR 0003). Exec needs a writable
+workspace to mount at /work, so without one it is silently omitted. Existing
+callers keep using NewDefaultRegistry (allowExec=false) and are unaffected,
+preserving the read-only-by-default posture.
+*/
+func NewDefaultRegistryWithExec(workspace string, allowExec bool) *tools.Registry {
 	reg := tools.NewRegistry()
 	_ = reg.Register(NewShell())
 	_ = reg.Register(NewHTTP())
@@ -22,6 +34,9 @@ func NewDefaultRegistry(workspace string) *tools.Registry {
 	if workspace != "" {
 		_ = reg.Register(NewFileWrite(workspace))
 		_ = reg.Register(NewFileEdit(workspace))
+		if allowExec {
+			_ = reg.Register(NewContainedExec(workspace, allowExec))
+		}
 	}
 	return reg
 }

@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,7 @@ type flags struct {
 	datasetOut   string
 	verifyCVE    bool
 	validateVuln bool
+	allowExec    bool
 }
 
 func main() {
@@ -103,6 +105,7 @@ func parseFlags() flags {
 	flag.IntVar(&f.ragMaxChunks, "rag-max-chunks", 0, "override how many RAG chunks are injected per request (0 = default 4). Raise for large-context cluster models to improve grounding.")
 	flag.BoolVar(&f.verifyCVE, "verify-cve", false, "verify CVE identifiers in answers against the NIST NVD primary source and append a non-destructive advisory note (network egress; reads NVD_API_KEY from env if set)")
 	flag.BoolVar(&f.validateVuln, "validate-vuln", false, "cross-validate vulnerability-research answers against independent models (OpenAI via API; Anthropic via the Claude Code CLI / Max subscription) and append a non-authoritative advisory (network egress; drives the Max subscription programmatically)")
+	flag.BoolVar(&f.allowExec, "allow-exec", false, "enable the OPT-IN container-contained execution tool (ADR 0003): the agent may run fixed apparatus operations (fuzz/reproduce/triage) inside an ephemeral, network-isolated, read-only Docker container mounting --workspace. OFF by default; requires --workspace and Docker. Each run is audited.")
 	flag.Parse()
 	return f
 }
@@ -170,7 +173,27 @@ func buildTools(f flags, logger *slog.Logger) *tools.Registry {
 	if f.workspace != "" {
 		logger.Info("workspace: agentic file mutation enabled", "root", f.workspace)
 	}
-	return builtin.NewDefaultRegistry(f.workspace)
+	logExecBanner(f, logger)
+	return builtin.NewDefaultRegistryWithExec(f.workspace, f.allowExec)
+}
+
+/*
+logExecBanner emits the high-visibility startup banner ADR 0003 requires when
+contained execution is enabled, and warns about the misconfigurations that make
+the gate a no-op (no workspace, or Docker absent).
+*/
+func logExecBanner(f flags, logger *slog.Logger) {
+	if !f.allowExec {
+		return
+	}
+	if f.workspace == "" {
+		logger.Warn("exec: --allow-exec set but no --workspace; the contained run tool is NOT registered")
+		return
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		logger.Warn("exec: --allow-exec set but docker not found on PATH; contained runs will fail", "err", err)
+	}
+	logger.Warn("exec: CONTAINED EXECUTION ENABLED — agent may run fuzz/reproduce/triage in an ephemeral, network-isolated, read-only Docker container", "workspace", f.workspace)
 }
 
 /*
@@ -181,6 +204,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 	if f.workspace != "" {
 		logger.Info("workspace: agentic file mutation enabled", "root", f.workspace)
 	}
+	logExecBanner(f, logger)
 
 	embedders, err := buildEmbedders(cfg, f)
 	if err != nil {
@@ -257,6 +281,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		Addr:             f.addr,
 		Config:           cfg,
 		Workspace:        f.workspace,
+		AllowExec:        f.allowExec,
 		Logger:           logger,
 		RAG:              ragSvc,
 		DisableRAG:       f.disableRAG,
