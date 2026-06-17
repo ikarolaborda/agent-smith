@@ -60,6 +60,76 @@ func TestRunStream_EmitsTextDeltasAndDone(t *testing.T) {
 	}
 }
 
+/* noteVerifier appends a fixed advisory whenever the answer mentions "CVE". */
+type noteVerifier struct{ calls int }
+
+func (n *noteVerifier) Verify(_ context.Context, text string) (string, error) {
+	n.calls++
+	if !containsCVE(text) {
+		return "", nil
+	}
+	return "\n\n[verify] checked", nil
+}
+
+func containsCVE(s string) bool {
+	for i := 0; i+3 <= len(s); i++ {
+		if s[i] == 'C' && s[i+1] == 'V' && s[i+2] == 'E' {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRunStream_AppendsVerificationAdvisoryBeforeDone(t *testing.T) {
+	p := &stubStreamProvider{chunks: []llm.StreamChunk{
+		{Delta: "patch CVE-2021-44228"},
+		{Done: true},
+	}}
+	a := agent.New(p, tools.NewRegistry(), "", 3, nil)
+	a.Verifier = &noteVerifier{}
+
+	var deltas []string
+	var doneContent string
+	var lastKind agent.StreamEventKind
+	sink := agent.SinkFunc(func(ev agent.StreamEvent) error {
+		switch ev.Kind {
+		case agent.StreamEventTextDelta:
+			deltas = append(deltas, ev.Delta)
+		case agent.StreamEventDone:
+			doneContent = ev.FinalContent
+		}
+		lastKind = ev.Kind
+		return nil
+	})
+
+	got, err := a.RunStream(context.Background(), agent.NewSession(), "hi", sink)
+	if err != nil {
+		t.Fatalf("RunStream: %v", err)
+	}
+	if lastKind != agent.StreamEventDone {
+		t.Fatalf("advisory delta must come before Done; last kind was %v", lastKind)
+	}
+	if len(deltas) == 0 || deltas[len(deltas)-1] != "\n\n[verify] checked" {
+		t.Fatalf("advisory must be emitted as the final text delta: %v", deltas)
+	}
+	want := "patch CVE-2021-44228\n\n[verify] checked"
+	if got != want || doneContent != want {
+		t.Fatalf("final content must include advisory once: return=%q done=%q", got, doneContent)
+	}
+}
+
+func TestRunStream_NilVerifierIsUnchanged(t *testing.T) {
+	p := &stubStreamProvider{chunks: []llm.StreamChunk{{Delta: "CVE-2021-44228 here"}, {Done: true}}}
+	a := agent.New(p, tools.NewRegistry(), "", 3, nil)
+	got, err := a.RunStream(context.Background(), agent.NewSession(), "hi", agent.SinkFunc(func(agent.StreamEvent) error { return nil }))
+	if err != nil {
+		t.Fatalf("RunStream: %v", err)
+	}
+	if got != "CVE-2021-44228 here" {
+		t.Fatalf("nil verifier must not alter output: %q", got)
+	}
+}
+
 /* blockingProvider produces a channel that only respects ctx for cancellation. */
 type blockingProvider struct{}
 

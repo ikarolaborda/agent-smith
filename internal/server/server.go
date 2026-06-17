@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
+	"github.com/ikarolaborda/agent-smith/internal/verify"
 )
 
 /* Options carries the configuration needed to build a Server. */
@@ -63,6 +65,14 @@ type Options struct {
 		flip either way.
 	*/
 	WebSearchEnabled bool
+	/*
+		VerifyCVE enables the NVD primary-source verification gate: the agent
+		appends a non-destructive advisory note when an answer cites a CVE. The
+		NVD apiKey is read from NVD_API_KEY in the environment when present
+		(optional; it raises NVD's rate limit). Default false preserves the
+		offline-first posture.
+	*/
+	VerifyCVE bool
 }
 
 /*
@@ -91,6 +101,12 @@ type Server struct {
 	rag              *rag.Service
 	disableRAG       bool
 	webSearchEnabled bool
+	/*
+		cveVerifier is the shared NVD verification gate attached to each
+		per-request agent when configured (nil = feature off). It is shared so
+		its per-CVE cache persists across requests.
+	*/
+	cveVerifier agent.Verifier
 
 	/*
 		modelsMu guards the dynamic Ollama model list. We preload it at
@@ -161,6 +177,10 @@ func New(opts Options) (*Server, error) {
 		rag:              opts.RAG,
 		disableRAG:       opts.DisableRAG,
 		webSearchEnabled: opts.WebSearchEnabled,
+	}
+	if opts.VerifyCVE {
+		s.cveVerifier = verify.NewNVDVerifier(verify.WithAPIKey(os.Getenv("NVD_API_KEY")))
+		logger.Info("cve verification: enabled", "source", "nvd", "api_key", os.Getenv("NVD_API_KEY") != "")
 	}
 	for _, o := range opts.AllowedOrigins {
 		s.allowedOrigins[o] = struct{}{}
@@ -539,6 +559,7 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 	if s.rag != nil && !s.disableRAG {
 		a.RAG = s.rag
 	}
+	a.Verifier = s.cveVerifier
 	return a, nil
 }
 

@@ -54,6 +54,25 @@ type Agent struct {
 		override via web_search.
 	*/
 	WebSearch bool
+	/*
+		Verifier, when non-nil, post-processes the final tool-free answer and
+		returns a non-destructive advisory note (e.g. a CVE check against the NVD
+		primary source) that is appended to the response. A nil Verifier disables
+		the gate entirely, so existing callers see no behavior change.
+	*/
+	Verifier Verifier
+}
+
+/*
+Verifier checks claims in a finished answer against a primary source and returns
+an advisory note to append (empty when there is nothing to flag). It is the
+system-enforced half of the anti-fabrication guardrail: independent of whatever
+the model asserts. Implementations must be non-destructive (annotate, never
+rewrite) and fail-soft (a lookup failure yields an empty or soft note, not an
+error that blocks the answer).
+*/
+type Verifier interface {
+	Verify(ctx context.Context, text string) (note string, err error)
 }
 
 /* ErrMaxIterations is returned when the agent loop exceeds MaxIters. */
@@ -121,7 +140,7 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 		session.Append(resp.Message)
 
 		if len(resp.Message.ToolCalls) == 0 {
-			return resp.Message.Content, nil
+			return resp.Message.Content + a.verifyNote(ctx, resp.Message.Content), nil
 		}
 
 		for _, call := range resp.Message.ToolCalls {
@@ -180,6 +199,25 @@ func latestUserMessage(msgs []llm.Message) string {
 		}
 	}
 	return ""
+}
+
+/*
+verifyNote runs the configured Verifier over the final answer and returns the
+advisory note to append. It is fail-soft: a nil Verifier, empty content, or a
+verifier error all yield an empty string so the answer is never blocked. The
+verifier is given the RAW model answer only (callers append the note to the
+returned value), so it never re-extracts claims from its own advisory.
+*/
+func (a *Agent) verifyNote(ctx context.Context, content string) string {
+	if a.Verifier == nil || content == "" {
+		return ""
+	}
+	note, err := a.Verifier.Verify(ctx, content)
+	if err != nil {
+		a.Logger.Warn("agent: answer verification failed", "err", err)
+		return ""
+	}
+	return note
 }
 
 /*

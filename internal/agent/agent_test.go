@@ -155,6 +155,42 @@ func TestAgent_AlwaysAppliesGroundingGuardrail(t *testing.T) {
 	}
 }
 
+/* cveReplyProvider returns a fixed final answer that cites a CVE. */
+type cveReplyProvider struct{ reply string }
+
+func (cveReplyProvider) Name() string { return "cvereply" }
+func (p cveReplyProvider) Chat(context.Context, llm.ChatRequest) (*llm.ChatResponse, error) {
+	return &llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: p.reply}}, nil
+}
+func (cveReplyProvider) ChatStream(context.Context, llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	ch := make(chan llm.StreamChunk)
+	close(ch)
+	return ch, nil
+}
+
+func TestAgent_RunAppendsVerificationNote(t *testing.T) {
+	a := agent.New(cveReplyProvider{reply: "patch CVE-2021-44228 now"}, tools.NewRegistry(), "", 3, nil)
+	a.Verifier = &noteVerifier{}
+	out, err := a.Run(context.Background(), agent.NewSession(), "any cves?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "patch CVE-2021-44228 now\n\n[verify] checked" {
+		t.Fatalf("Run must append the verification note once: %q", out)
+	}
+}
+
+func TestAgent_RunNilVerifierUnchanged(t *testing.T) {
+	a := agent.New(cveReplyProvider{reply: "CVE-2021-44228"}, tools.NewRegistry(), "", 3, nil)
+	out, err := a.Run(context.Background(), agent.NewSession(), "x")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "CVE-2021-44228" {
+		t.Fatalf("nil verifier must not alter output: %q", out)
+	}
+}
+
 func TestAgent_RunHitsMaxIterationsOnToolLoop(t *testing.T) {
 	/*
 		The provider always returns a tool call; the loop should terminate

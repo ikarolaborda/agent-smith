@@ -120,10 +120,23 @@ func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm
 		session.Append(assistant)
 
 		if len(assistant.ToolCalls) == 0 {
-			if err := sink.Emit(StreamEvent{Kind: StreamEventDone, Iteration: i, FinalContent: assistant.Content}); err != nil {
+			final := assistant.Content
+			/*
+				Run the verification gate once on the raw model answer, then emit
+				the advisory as one trailing text delta (so streaming clients see
+				it inline) and fold it into FinalContent. The note is appended,
+				never substituted — the model's own text is preserved verbatim.
+			*/
+			if note := a.verifyNote(ctx, assistant.Content); note != "" {
+				if err := sink.Emit(StreamEvent{Kind: StreamEventTextDelta, Iteration: i, Delta: note}); err != nil {
+					return "", err
+				}
+				final += note
+			}
+			if err := sink.Emit(StreamEvent{Kind: StreamEventDone, Iteration: i, FinalContent: final}); err != nil {
 				return "", err
 			}
-			return assistant.Content, nil
+			return final, nil
 		}
 
 		for _, call := range assistant.ToolCalls {
