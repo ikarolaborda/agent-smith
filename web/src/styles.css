@@ -411,6 +411,111 @@ body {
   cursor: not-allowed;
 }
 
+.workspace-bar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+}
+
+.workspace-open,
+.workspace-btn {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 0.8rem;
+  color: #374151;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.workspace-open:hover,
+.workspace-btn:hover {
+  background: #e5e7eb;
+}
+
+.workspace-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.workspace-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.workspace-btn--ghost:hover {
+  background: #f3f4f6;
+}
+
+.workspace-input {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 0.8rem;
+  min-width: 260px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+
+.workspace-dot {
+  color: #059669;
+  font-weight: 700;
+}
+
+.workspace-error {
+  color: #b91c1c;
+  font-size: 0.78rem;
+}
+
+.workspace-tree {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: 340px;
+  max-height: 320px;
+  overflow: auto;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+}
+
+.workspace-tree__dir {
+  color: #1d4ed8;
+  white-space: nowrap;
+}
+
+.workspace-tree__file {
+  color: #374151;
+  white-space: nowrap;
+}
+
+.workspace-tree__empty {
+  color: #9ca3af;
+  padding: 4px;
+}
+
 .cluster-badge {
   display: inline-flex;
   align-items: center;

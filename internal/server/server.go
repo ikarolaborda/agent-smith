@@ -25,15 +25,21 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm/ollama"
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
-	"github.com/ikarolaborda/agent-smith/internal/tools"
+	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
 )
 
 /* Options carries the configuration needed to build a Server. */
 type Options struct {
 	Addr   string
 	Config *config.Config
-	Tools  *tools.Registry
-	Logger *slog.Logger
+	/*
+		Workspace is the initial folder the agentic file_write/file_edit tools
+		may mutate (empty = read-only). It can be changed at runtime via
+		POST /v1/workspace; the agent's tools are rebuilt per request from the
+		current value.
+	*/
+	Workspace string
+	Logger    *slog.Logger
 	/*
 		Providers, when non-nil, replaces the providers New would build from
 		Config.Providers. Used by tests to inject fake provider clients;
@@ -65,13 +71,19 @@ already-constructed provider, so concurrent streams do not share mutable
 state.
 */
 type Server struct {
-	addr             string
-	cfg              *config.Config
-	tools            *tools.Registry
-	logger           *slog.Logger
-	providers        map[string]llm.Provider
-	models           []modelEntry
-	mux              *http.ServeMux
+	addr      string
+	cfg       *config.Config
+	logger    *slog.Logger
+	providers map[string]llm.Provider
+	models    []modelEntry
+	mux       *http.ServeMux
+	/*
+		workspace is the folder the agentic file tools are scoped to; guarded by
+		workspaceMu because it is read on every chat request and written by the
+		POST /v1/workspace handler. Empty = read-only (no file_write/file_edit).
+	*/
+	workspace        string
+	workspaceMu      sync.RWMutex
 	allowedOrigins   map[string]struct{}
 	readTimeout      time.Duration
 	writeTimeout     time.Duration
@@ -138,7 +150,7 @@ func New(opts Options) (*Server, error) {
 	s := &Server{
 		addr:             opts.Addr,
 		cfg:              opts.Config,
-		tools:            opts.Tools,
+		workspace:        opts.Workspace,
 		logger:           logger,
 		providers:        map[string]llm.Provider{},
 		mux:              http.NewServeMux(),
@@ -390,6 +402,8 @@ func (s *Server) Handler() http.Handler { return s.withCORS(s.mux) }
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/v1/cluster", s.handleClusterStatus)
+	s.mux.HandleFunc("/v1/workspace", s.handleWorkspace)
+	s.mux.HandleFunc("/v1/workspace/tree", s.handleWorkspaceTree)
 	s.mux.HandleFunc("/v1/models", s.handleModels)
 	s.mux.HandleFunc("/v1/providers", s.handleProviders)
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
@@ -505,15 +519,31 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 	if !ok {
 		return nil, fmt.Errorf("provider %q not available", name)
 	}
-	reg := s.tools
-	if reg == nil {
-		reg = tools.NewRegistry()
-	}
+	/*
+		Tools are rebuilt per request from the current workspace so a folder
+		opened in the UI takes effect immediately and file_write/file_edit appear
+		only while a workspace is set.
+	*/
+	reg := builtin.NewDefaultRegistry(s.getWorkspace())
 	a := agent.New(prov, reg, s.cfg.Agent.SystemPrompt, s.cfg.Agent.MaxIterations, s.logger)
 	if s.rag != nil && !s.disableRAG {
 		a.RAG = s.rag
 	}
 	return a, nil
+}
+
+/* getWorkspace returns the folder the agentic file tools are currently scoped to. */
+func (s *Server) getWorkspace() string {
+	s.workspaceMu.RLock()
+	defer s.workspaceMu.RUnlock()
+	return s.workspace
+}
+
+/* setWorkspace replaces the active workspace folder (empty = read-only). */
+func (s *Server) setWorkspace(dir string) {
+	s.workspaceMu.Lock()
+	s.workspace = dir
+	s.workspaceMu.Unlock()
 }
 
 /*

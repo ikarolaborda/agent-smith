@@ -144,25 +144,15 @@ func run(f flags) error {
 }
 
 /*
-buildTools assembles the shared tool registry used by both the CLI agent and
-the HTTP server, so terminal and web expose identical capabilities. Read-only
-grounding tools (shell, http, file_read) are always present; the mutating
-file_write/file_edit tools are registered ONLY when --workspace is set, keeping
-the default posture read-only. file_read is rooted at the workspace when one is
-configured so reads and writes share the same project scope.
+buildTools assembles the CLI agent's tool registry. It delegates to the shared
+builtin.NewDefaultRegistry so terminal and web expose identical capabilities, and
+logs when --workspace enables the mutating file tools.
 */
 func buildTools(f flags, logger *slog.Logger) *tools.Registry {
-	reg := tools.NewRegistry()
-	_ = reg.Register(builtin.NewShell())
-	_ = reg.Register(builtin.NewHTTP())
-	_ = reg.Register(builtin.NewFileRead(f.workspace))
-	_ = reg.Register(builtin.NewReadDir(f.workspace))
 	if f.workspace != "" {
-		_ = reg.Register(builtin.NewFileWrite(f.workspace))
-		_ = reg.Register(builtin.NewFileEdit(f.workspace))
 		logger.Info("workspace: agentic file mutation enabled", "root", f.workspace)
 	}
-	return reg
+	return builtin.NewDefaultRegistry(f.workspace)
 }
 
 /*
@@ -170,7 +160,9 @@ runServe wires the embedded HTTP server with all configured providers and the
 default tool registry, then blocks until ctx is cancelled.
 */
 func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) error {
-	reg := buildTools(f, logger)
+	if f.workspace != "" {
+		logger.Info("workspace: agentic file mutation enabled", "root", f.workspace)
+	}
 
 	embedders, err := buildEmbedders(cfg, f)
 	if err != nil {
@@ -246,7 +238,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 	srv, err := server.New(server.Options{
 		Addr:             f.addr,
 		Config:           cfg,
-		Tools:            reg,
+		Workspace:        f.workspace,
 		Logger:           logger,
 		RAG:              ragSvc,
 		DisableRAG:       f.disableRAG,

@@ -4,6 +4,7 @@ import { MessageBubble } from './components/MessageBubble';
 import { Composer } from './components/Composer';
 import { ProviderSelector } from './components/ProviderSelector';
 import { ClusterBadge } from './components/ClusterBadge';
+import { WorkspaceBar } from './components/WorkspaceBar';
 import { CorrectionDialog } from './components/CorrectionDialog';
 import {
   deriveTitle,
@@ -357,6 +358,7 @@ export function App() {
             />
             <span>Ground with web</span>
           </label>
+          <WorkspaceBar />
           <ClusterBadge />
         </header>
         {transientError && (
