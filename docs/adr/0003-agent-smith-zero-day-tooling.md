@@ -92,6 +92,33 @@ is offered, it is **break-glass**, container-confined, not the default path.
 - Findings remain **crash-only**; "0-day" is reserved for a reproduced,
   minimized, novelty-gated, supported-branch-relevant crash.
 
+## Phase-1 acceptance criteria (the next session MUST prove all)
+Host `sh -c` / cwd+timeout+rlimit execution is **prohibited** and is not an
+acceptable fallback. Execution runs ONLY inside an ephemeral OCI container or
+equivalent OS sandbox (nsjail/bwrap/gVisor — these are NOT interchangeable; pick
+one and document its capability), with tests that prove each invariant:
+- network is OFF by default (deny egress; prove a network call fails),
+- cannot write outside the workspace+tmp mounts (prove a write to `/` / `$HOME` fails),
+- rootfs is immutable except allowed mounts,
+- credentials are stripped (no SSH/Git/cloud tokens reachable; synthetic HOME),
+- the process tree is killed on timeout/cancel (no orphans),
+- stdout/stderr/disk/CPU/memory/runtime are bounded and truncation is reported,
+- the tool is DISABLED by default; enabling requires `--allow-exec` + an audit log line per command.
+
+## Non-goals (phase 1)
+No privilege-escalation testing, no persistence, no credential access, no
+unrestricted outbound network, no host-namespace sharing, no automatic
+disclosure/publication. The break-glass general shell (if offered at all) is
+exceptional, audited, and runs inside the SAME containment layer — it must not
+grow into the default path. The external fuzzing service (phase 4) is explicitly
+out of scope for phase 1.
+
+## Result-ingestion schema (define now, implement in phase 2)
+Treat all tool output as UNTRUSTED, typed, and size-limited:
+`{ exit_status, signal_or_timeout_reason, stdout_truncated, stderr_truncated,
+   bytes_dropped, artifact_paths[], resource_usage{cpu,mem,wall,disk},
+   audit_correlation_id }`.
+
 ## Rejected alternatives
 - **Host `sh -c` with cwd/timeout/cap "sandbox"** — rejected (not a sandbox;
   credential/exfil/escape risk).
