@@ -506,13 +506,17 @@ func (s *Server) shouldWebSearch(provName string, requested *bool) bool {
 		return *requested
 	}
 	/*
-		Default web grounding ON for local-model providers. The cluster provider
-		runs local 70B/72B models (exo / MLX / llama.cpp) exactly like Ollama,
-		so it needs the same hallucination-suppressing grounding by default. The
-		operator kill switch (--no-web-search) and the per-request override both
-		still take precedence over this default.
+		Default web grounding ON for the providers most prone to fabrication when
+		left ungrounded. The cluster provider runs local 70B/72B models (exo / MLX
+		/ llama.cpp) exactly like Ollama, so it needs the same hallucination-
+		suppressing grounding by default. The remote abliteration model is a
+		refusal-removed model that — as observed in this lab — confidently
+		fabricates CVE identifiers, CVSS scores, and version ranges when answered
+		from weights alone; defaulting grounding ON is the proven suppressor for
+		exactly that failure. The operator kill switch (--no-web-search) and the
+		per-request override both still take precedence over this default.
 	*/
-	return provName == "ollama" || provName == "cluster"
+	return provName == "ollama" || provName == "cluster" || provName == "abliteration"
 }
 
 /*

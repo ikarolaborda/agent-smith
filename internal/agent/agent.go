@@ -153,13 +153,16 @@ func (a *Agent) composeMessages(ctx context.Context, session *Session) []llm.Mes
 		}
 	}
 	/*
-		The coding-paradigm and engineering directives are appended on every
-		request so the house standard (PHP clean architecture, idiomatic Go,
-		mandatory Context7 for third-party code) and the authorized-defensive
-		security posture reach all models and providers — including the clustered
-		Qwen — regardless of the configured system prompt.
+		The coding-paradigm, engineering, and grounding-guardrail directives are
+		appended on every request so the house standard (PHP clean architecture,
+		idiomatic Go, mandatory Context7 for third-party code), the authorized-
+		defensive security posture, and the anti-fabrication guardrail (assert
+		CVE/CVSS/version specifics only from retrieved context; honor known
+		corrections) reach all models and providers — including the clustered Qwen
+		and the remote abliteration model — regardless of the configured system
+		prompt.
 	*/
-	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, aug)
+	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, aug)
 	if system == "" {
 		return msgs
 	}

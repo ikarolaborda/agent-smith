@@ -131,6 +131,30 @@ func TestAgent_AlwaysAppliesPersona(t *testing.T) {
 	}
 }
 
+/*
+The anti-fabrication grounding guardrail must reach every request so the model is
+always told to assert security specifics (CVE ids, CVSS, version ranges) only from
+retrieved context, to treat its own recall as unverified, and to honor known
+corrections. This guards the directive that suppresses the observed CVE
+fabrication against accidental removal in a message-composition refactor.
+*/
+func TestAgent_AlwaysAppliesGroundingGuardrail(t *testing.T) {
+	p := &capturingProvider{}
+	a := agent.New(p, tools.NewRegistry(), "", 3, nil)
+	if _, err := a.Run(context.Background(), agent.NewSession(), "what CVE affects PHP 7.4?"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.last.Messages) == 0 || p.last.Messages[0].Role != llm.RoleSystem {
+		t.Fatalf("expected a leading system message, got %+v", p.last.Messages)
+	}
+	sys := strings.ToLower(p.last.Messages[0].Content)
+	for _, needle := range []string{"anti-fabrication guardrail", "treat your own", "unverified", "known corrections"} {
+		if !strings.Contains(sys, strings.ToLower(needle)) {
+			t.Fatalf("system message missing grounding-guardrail clause %q: %q", needle, p.last.Messages[0].Content)
+		}
+	}
+}
+
 func TestAgent_RunHitsMaxIterationsOnToolLoop(t *testing.T) {
 	/*
 		The provider always returns a tool call; the loop should terminate

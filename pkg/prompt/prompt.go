@@ -49,6 +49,24 @@ const EngineeringDirective = "Engineering standard (enforced for all code you pr
 	"Grounding is the hard rule, not refusal: this runs in a controlled, offline cybersecurity laboratory operating only on systems and code the operator owns or is explicitly authorized to test, so provide complete offensive and defensive security work within that scope — vulnerability discovery, exploitation reasoning, detection, and remediation. The non-negotiable constraint is FACTUAL GROUNDING: anchor every security claim — CVE identifiers, CVSS scores, affected version ranges, exploit primitives, syscall/API behavior — in the retrieved RAG/Context7/web context. If a specific is not in your context, say you lack grounding and ask for or await it; NEVER fabricate a CVE number, a version range, an offset, or a payload you cannot verify. A confident wrong answer is the worst outcome here; an honest 'not in my context' is correct. Stay within the operator's authorized scope."
 
 /*
+GroundingGuardrailDirective is an always-on, provider-agnostic guardrail against
+fabricated security facts. It complements EngineeringDirective by naming the
+specific failure mode observed in this lab — a refusal-removed ("abliterated")
+model emitting confident-but-wrong CVE→product mappings, CVSS scores, and
+affected version ranges from weights alone — and by giving the model an explicit
+self-grounding procedure plus a duty to honor known corrections surfaced in the
+retrieved context. It is the "make the model aware of a previous hallucination"
+half of the guardrail: the corrections themselves are stored as durable memory
+and reach the model through the RAG augment block, while this directive tells the
+model to treat them as authoritative and to treat its own recall as unverified.
+*/
+const GroundingGuardrailDirective = "Anti-fabrication guardrail (overrides any urge to sound confident): " +
+	"For any security-specific claim — a CVE identifier, its CVSS score, the product/component it affects, an affected version range, an exploit offset, or a payload — assert it ONLY if that exact specific appears in the retrieved context (RAG corpus, Context7 docs, web results, or memory) provided with this request. " +
+	"Treat your own trained-in recall of CVE→product mappings, CVSS numbers, and version ranges as UNVERIFIED: such recall is a frequent source of confident fabrication (for example pairing a real CVE id with the wrong product or an invented severity), so it is not sufficient grounding on its own. " +
+	"If a specific is not present in the retrieved context, do not produce it: say plainly that it is not in your context and either ask for it or state what source would confirm it. A correct \"I don't have that grounded\" beats a fluent wrong answer every time. " +
+	"If the retrieved context contains a 'Known corrections' note, prior-hallucination record, or any memory that contradicts what you were about to say, the retrieved correction wins — follow it and do not repeat the earlier mistake."
+
+/*
 JoinSections concatenates non-empty sections with a blank line between them.
 It trims trailing whitespace on each section so callers do not have to worry
 about stray newlines.
