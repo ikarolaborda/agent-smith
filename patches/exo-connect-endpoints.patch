@@ -1,0 +1,27 @@
+diff --git a/rust/networking/src/lib.rs b/rust/networking/src/lib.rs
+index 171337d..b320c08 100644
+--- a/rust/networking/src/lib.rs
++++ b/rust/networking/src/lib.rs
+@@ -32,6 +32,22 @@ pub fn cfg(identity: &str, listen_port: u16) -> Result<zenoh::Config> {
+     cfg.insert_json5("scouting/multicast/enabled", "false")?;
+     cfg.insert_json5("scouting/multicast/autoconnect", "[]")?;
+     cfg.insert_json5("scouting/gossip/multihop", "true")?;
++    // Force stable peering over a known routable path (e.g. the Thunderbolt IPv4
++    // link) instead of relying on link-local multicast discovery, which is
++    // non-deterministic on multi-homed macOS hosts and yields scope-less,
++    // unusable fe80:: locators. Comma-separated zenoh endpoints, e.g.
++    // EXO_CONNECT_ENDPOINTS=tcp/10.0.0.1:52414,tcp/10.0.0.2:52414
++    if let Ok(endpoints) = std::env::var("EXO_CONNECT_ENDPOINTS") {
++        let list: Vec<String> = endpoints
++            .split(',')
++            .map(|e| e.trim())
++            .filter(|e| !e.is_empty())
++            .map(|e| format!("\"{e}\""))
++            .collect();
++        if !list.is_empty() {
++            cfg.insert_json5("connect/endpoints", &format!("[{}]", list.join(",")))?;
++        }
++    }
+     cfg.insert_json5("adminspace/enabled", "true")?;
+     //cfg.insert_json5("transport/link/tx/batch_size", "9216")?;
+     cfg.insert_json5("transport/link/rx/buffer_size", "16777216")?;
