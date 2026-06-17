@@ -59,3 +59,18 @@ Scope it narrowly to concrete confidence-improving patterns; do **not** build a 
 - abliteration.ai compatibility, LangGraph language support, LangSmith OTEL ingestion: **Tier-3** (official/vendor docs + web). Conformance of abliteration.ai's tool/stream behavior with our code: **Tier-1 not yet run** — gated behind the conformance suite above.
 - agent-smith integration surface (`BaseURL`, registry, no OTEL today): **Tier-1** (source on disk).
 - Adversarial design review: **buddy** `01KVA87D7RTQGJ6SC2BP95FQMN` — accepted, high confidence.
+
+## Addendum (2026-06-17) — best community Go LangGraph port
+
+If the library route is taken despite the "build native" recommendation, the community ports ranked by GitHub stars (Tier-2, GitHub API):
+
+| Repo | ★ | forks | last commit | release | notes |
+| --- | --- | --- | --- | --- | --- |
+| `tmc/langgraphgo` | 273 | 39 | **2024-04-23** | none (pseudo-version only) | original; by the langchaingo author; **abandoned ~2 yrs** |
+| `smallnest/langgraphgo` | 264 | 43 | 2026-02-24 | **v0.8.5** | **fork of the above lineage, actively maintained, Python-LangGraph feature parity** |
+| `paulnegz/langgraphgo` | 34 | 1 | 2025-09-05 | — | intermediate fork (tmc → paulnegz → smallnest) |
+| `dshills/langgraph-go` | 8 | 3 | 2025-11-18 | — | clean Go-native rewrite, typed state/checkpoint, tiny adoption |
+
+**Pick: `smallnest/langgraphgo`.** It is #2 by raw stars but the clear winner once liveness counts: it is the maintained successor of the #1 (lineage `tmc → paulnegz → smallnest`), has more forks, semver releases (v0.8.5), CI + coverage, and aims at feature parity with Python LangGraph (parallel execution, Redis/Postgres/SQLite/File checkpointers, subgraphs, streaming, human-in-the-loop, typed generic state). The #1 by stars (`tmc/langgraphgo`) is its dead ancestor (no commits since 2024, no tagged release). "Imported by" is ~0 for all (these are niche libs) — popularity here is stars, not downloads.
+
+**Integration caveat (unchanged verdict):** `smallnest/langgraphgo` depends on **`tmc/langchaingo`** and its `llms.Model` interface — adopting it pulls langchaingo in as a transitive dependency and needs an adapter from agent-smith's `llm.Provider` to `llms.Model`. So it is best treated as a **reference/optional** orchestration engine, not the default execution path; the ADR's native-Go recommendation stands. It is, however, the right library to study/borrow from if building the native layer.
