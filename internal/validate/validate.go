@@ -17,6 +17,7 @@ package validate
 
 import (
 	"context"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -135,6 +136,13 @@ func (v *CrossProviderValidator) Verify(ctx context.Context, text string) (strin
 			defer cancel()
 			verdict, err := r.Review(rctx, answer)
 			if err != nil || strings.TrimSpace(verdict) == "" {
+				/*
+					A reviewer failure is folded into a soft advisory note rather
+					than surfaced as a blocking error, but it must not be silent:
+					an operator who believes grounding is active needs to see when
+					a reviewer (e.g. a model-id or parameter mismatch) is failing.
+				*/
+				slog.Warn("cross-provider reviewer did not return a verdict", "reviewer", r.Name(), "error", err)
 				results[i] = result{name: r.Name(), verdict: "could not validate (provider unavailable or timed out); treat as unconfirmed."}
 				return
 			}
