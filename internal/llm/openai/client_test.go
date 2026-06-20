@@ -127,6 +127,58 @@ func TestChatStream_ParsesSSEAndDONE(t *testing.T) {
 	}
 }
 
+func TestChat_ReasoningModelOmitsTemperatureAndRemapsTokenCap(t *testing.T) {
+	capture := func(model string) map[string]json.RawMessage {
+		var body map[string]json.RawMessage
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{}}`)
+		}))
+		defer srv.Close()
+
+		c, err := openai.New(openai.Config{APIKey: "sk-test", BaseURL: srv.URL, Model: model})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		temp := 0.2
+		maxTok := 256
+		if _, err := c.Chat(context.Background(), llm.ChatRequest{
+			Messages:    []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+			Temperature: &temp,
+			MaxTokens:   &maxTok,
+		}); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		return body
+	}
+
+	/* GPT-5.x reasoning model: temperature must be dropped, cap moved to max_completion_tokens. */
+	reasoning := capture("gpt-5.5")
+	if _, ok := reasoning["temperature"]; ok {
+		t.Errorf("gpt-5.5: temperature must be omitted, got %s", reasoning["temperature"])
+	}
+	if _, ok := reasoning["max_tokens"]; ok {
+		t.Errorf("gpt-5.5: max_tokens must be omitted in favour of max_completion_tokens")
+	}
+	if _, ok := reasoning["max_completion_tokens"]; !ok {
+		t.Errorf("gpt-5.5: max_completion_tokens must be present")
+	}
+
+	/* Chat model (gpt-4o): historical shape preserved. */
+	chat := capture("gpt-4o")
+	if _, ok := chat["temperature"]; !ok {
+		t.Errorf("gpt-4o: temperature must be preserved")
+	}
+	if _, ok := chat["max_tokens"]; !ok {
+		t.Errorf("gpt-4o: max_tokens must be preserved")
+	}
+	if _, ok := chat["max_completion_tokens"]; ok {
+		t.Errorf("gpt-4o: max_completion_tokens must not be set")
+	}
+}
+
 func TestChat_PropagatesErrorEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

@@ -7,7 +7,9 @@ providers:
   openai:
     api_key: ${OPENAI_API_KEY}
     base_url: https://api.openai.com/v1
-    model: gpt-4o-mini
+    # Expanded from OPENAI_MODEL in .env so the operator's .env is authoritative
+    # for the validator model. Must be a real model id (e.g. gpt-5.5, gpt-4o-mini).
+    model: ${OPENAI_MODEL}
 
   anthropic:
     api_key: ${ANTHROPIC_API_KEY}

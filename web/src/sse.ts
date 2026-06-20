@@ -7,7 +7,7 @@
  *   - terminator `data: [DONE]`
  */
 
-import type { Role } from './types';
+import type { Role, RefineRound, RefineSummary } from './types';
 
 /*
  * A wire message sent to /v1/chat/completions. content is either a plain
@@ -53,10 +53,20 @@ export interface StreamCallbacks {
   onToolResult: (r: ToolResultPayload) => void;
   onError: (message: string) => void;
   onDone: () => void;
+  onRefineRound?: (r: RefineRound) => void;
+  onRefineSummary?: (s: RefineSummary) => void;
 }
 
 export async function streamChatCompletion(
-  body: { model: string; messages: WireMessage[]; stream: true; profile_id?: string; web_search?: boolean },
+  body: {
+    model: string;
+    messages: WireMessage[];
+    stream: true;
+    profile_id?: string;
+    web_search?: boolean;
+    refine?: boolean;
+    refine_max_iters?: number;
+  },
   cbs: StreamCallbacks,
   signal: AbortSignal,
 ): Promise<void> {
@@ -142,6 +152,14 @@ function handleFrame(frame: string, cbs: StreamCallbacks): void {
 
   if (eventName === 'tool_result') {
     cbs.onToolResult(parsed as ToolResultPayload);
+    return;
+  }
+  if (eventName === 'refine_round') {
+    cbs.onRefineRound?.(parsed as RefineRound);
+    return;
+  }
+  if (eventName === 'refine_summary') {
+    cbs.onRefineSummary?.(parsed as RefineSummary);
     return;
   }
   if (eventName === 'error') {

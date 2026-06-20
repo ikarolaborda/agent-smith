@@ -27,6 +27,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm/ollama"
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
+	"github.com/ikarolaborda/agent-smith/internal/refine"
 	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
 	"github.com/ikarolaborda/agent-smith/internal/validate"
 	"github.com/ikarolaborda/agent-smith/internal/verify"
@@ -127,6 +128,13 @@ type Server struct {
 	answerVerifier agent.Verifier
 
 	/*
+		refineJudge is the strict judge for opt-in refine mode (judge-in-the-loop).
+		Built once from the openai provider config; nil when unavailable, in which
+		case a refine request hard-fails rather than returning an unevaluated answer.
+	*/
+	refineJudge refine.Judge
+
+	/*
 		modelsMu guards the dynamic Ollama model list. We preload it at
 		boot and refresh on /v1/models GET when the TTL elapses; if the
 		refresh call fails, we keep serving the last known list.
@@ -198,6 +206,7 @@ func New(opts Options) (*Server, error) {
 		webSearchEnabled: opts.WebSearchEnabled,
 	}
 	s.answerVerifier = BuildAnswerVerifier(opts.Config, opts.VerifyCVE, opts.ValidateVuln, logger)
+	s.refineJudge = buildRefineJudge(opts.Config)
 	for _, o := range opts.AllowedOrigins {
 		s.allowedOrigins[o] = struct{}{}
 	}

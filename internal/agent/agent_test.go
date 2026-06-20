@@ -235,3 +235,26 @@ func TestAgent_RunHitsMaxIterationsOnToolLoop(t *testing.T) {
 		t.Fatalf("expected ErrMaxIterations, got nil")
 	}
 }
+
+func TestRun_MaxTokensPlumbing(t *testing.T) {
+	/* Zero (default) must omit max_tokens so ordinary chat is unbounded as before. */
+	p := &capturingProvider{}
+	a := agent.New(p, tools.NewRegistry(), "", 3, nil)
+	if _, err := a.Run(context.Background(), agent.NewSession(), "hi"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if p.last.MaxTokens != nil {
+		t.Fatalf("default MaxTokens must be nil (unlimited), got %v", *p.last.MaxTokens)
+	}
+
+	/* A positive cap must reach the provider request so the model output is bounded. */
+	p2 := &capturingProvider{}
+	a2 := agent.New(p2, tools.NewRegistry(), "", 3, nil)
+	a2.MaxTokens = 4096
+	if _, err := a2.Run(context.Background(), agent.NewSession(), "hi"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if p2.last.MaxTokens == nil || *p2.last.MaxTokens != 4096 {
+		t.Fatalf("expected MaxTokens=4096 plumbed to request, got %v", p2.last.MaxTokens)
+	}
+}

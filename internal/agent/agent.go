@@ -62,6 +62,14 @@ type Agent struct {
 		the gate entirely, so existing callers see no behavior change.
 	*/
 	Verifier Verifier
+	/*
+		MaxTokens caps the model's output tokens per generation (mapped to the
+		provider's max_tokens / num_predict). Zero means unlimited — the historical
+		default, so ordinary chat is unchanged. It is set on the refine path to bound
+		a degenerate/repeating local model so a runaway self-terminates and is judged
+		rather than burning the whole round timeout.
+	*/
+	MaxTokens int
 }
 
 /*
@@ -177,6 +185,10 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 		}
 		if a.Tools != nil {
 			req.Tools = a.Tools.Definitions()
+		}
+		if a.MaxTokens > 0 {
+			limit := a.MaxTokens
+			req.MaxTokens = &limit
 		}
 
 		resp, err := a.Provider.Chat(ctx, req)

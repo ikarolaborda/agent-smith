@@ -97,6 +97,37 @@ export function MessageBubble({ message, onRemember, onCorrect }: Props) {
     <div className={'message-row ' + message.role}>
       <div className="avatar">{roleLabel[message.role]}</div>
       <div className="bubble">
+        {(message.refine_rounds?.length || message.refine_summary) && (
+          <div className="refine-panel">
+            <div className="refine-rounds">
+              {message.refine_rounds?.map((r) => (
+                <div key={r.iter} className={'refine-round ' + r.status}>
+                  <span className="refine-round-head">
+                    <i className={r.usable ? 'bi bi-check-circle' : 'bi bi-arrow-repeat'} /> Round {r.iter} — {r.usable ? 'usable' : 'not usable'}
+                    <span className="refine-round-time"> ({Math.round(r.duration_ms / 1000)}s)</span>
+                  </span>
+                  {r.reasons && <span className="refine-round-reasons">{r.reasons}</span>}
+                  {r.failure_modes && r.failure_modes.length > 0 && (
+                    <span className="refine-round-modes">{r.failure_modes.join(', ')}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+            {message.refine_summary && (
+              <div className={'refine-verdict refine-verdict-' + message.refine_summary.status}>
+                {message.refine_summary.status === 'usable' && (
+                  <><i className="bi bi-shield-check" /> Evaluated &amp; usable — the most-evaluated output is shown below.</>
+                )}
+                {message.refine_summary.status === 'least_fabricated' && (
+                  <><i className="bi bi-exclamation-triangle" /> Refinement did not reach a usable result after {message.refine_summary.rounds} round(s). The least-fabricated attempt is shown below — <strong>NOT a confirmed result</strong>.</>
+                )}
+                {message.refine_summary.status === 'error' && (
+                  <><i className="bi bi-x-octagon" /> Refinement could not run: {message.refine_summary.reason}</>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         {message.content && (
           <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={markdownComponents}>
             {message.content + (showCursor ? ' ' : '')}

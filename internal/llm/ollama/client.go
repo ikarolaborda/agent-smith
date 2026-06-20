@@ -49,7 +49,14 @@ func New(cfg Config) (*Client, error) {
 		cfg.BaseURL = DefaultBaseURL
 	}
 	if cfg.HTTP == nil {
-		cfg.HTTP = &http.Client{Timeout: 5 * time.Minute}
+		/*
+			Transport backstop only — the per-request context deadline is the real
+			bound. Large local models (e.g. a 60B served via Ollama) can take several
+			minutes for a single grounded, long-context generation; 5m cut healthy
+			refine rounds before their context deadline, so this is a finite-but-
+			generous backstop against truly hung sockets, not a generation budget.
+		*/
+		cfg.HTTP = &http.Client{Timeout: 15 * time.Minute}
 	}
 	return &Client{
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),

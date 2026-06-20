@@ -642,3 +642,17 @@ body {
 .sidebar-brand-mark {
   flex: 0 0 auto;
 }
+
+/* Refine (judge-in-the-loop) transparency panel */
+.refine-panel { margin-bottom: .5rem; border-left: 3px solid var(--bs-border-color, #444); padding-left: .6rem; }
+.refine-rounds { display: flex; flex-direction: column; gap: .25rem; }
+.refine-round { display: flex; flex-direction: column; font-size: .8rem; opacity: .9; }
+.refine-round.usable .refine-round-head { color: #2ecc71; }
+.refine-round.not_usable .refine-round-head { color: #e0a800; }
+.refine-round-time { opacity: .6; }
+.refine-round-reasons { opacity: .85; }
+.refine-round-modes { opacity: .65; font-style: italic; }
+.refine-verdict { margin-top: .4rem; font-size: .85rem; padding: .35rem .5rem; border-radius: .35rem; }
+.refine-verdict-usable { background: rgba(46,204,113,.12); color: #2ecc71; }
+.refine-verdict-least_fabricated { background: rgba(224,168,0,.14); color: #e0a800; }
+.refine-verdict-error { background: rgba(231,76,60,.14); color: #e74c3c; }

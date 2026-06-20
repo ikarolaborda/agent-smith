@@ -128,12 +128,13 @@ type wireOutMessage struct {
 }
 
 type wireRequest struct {
-	Model       string           `json:"model"`
-	Messages    []wireOutMessage `json:"messages"`
-	Tools       []wireTool       `json:"tools,omitempty"`
-	Temperature *float64         `json:"temperature,omitempty"`
-	MaxTokens   *int             `json:"max_tokens,omitempty"`
-	Stream      bool             `json:"stream,omitempty"`
+	Model               string           `json:"model"`
+	Messages            []wireOutMessage `json:"messages"`
+	Tools               []wireTool       `json:"tools,omitempty"`
+	Temperature         *float64         `json:"temperature,omitempty"`
+	MaxTokens           *int             `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int             `json:"max_completion_tokens,omitempty"`
+	Stream              bool             `json:"stream,omitempty"`
 }
 
 type wireUsage struct {
@@ -169,10 +170,22 @@ func (c *Client) buildRequest(req llm.ChatRequest, stream bool) wireRequest {
 	}
 
 	out := wireRequest{
-		Model:       model,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      stream,
+		Model:  model,
+		Stream: stream,
+	}
+	/*
+		GPT-5.x and the o-series are reasoning models: they reject a non-default
+		temperature (HTTP 400 unsupported_value — only the default value 1 is
+		allowed) and require max_completion_tokens in place of the deprecated
+		max_tokens. For those models we omit temperature entirely and remap the
+		token cap; every other model keeps the historical request shape so this
+		change cannot regress chat models (incl. gpt-4o) or other providers.
+	*/
+	if isReasoningModel(model) {
+		out.MaxCompletionTokens = req.MaxTokens
+	} else {
+		out.Temperature = req.Temperature
+		out.MaxTokens = req.MaxTokens
 	}
 
 	out.Messages = make([]wireOutMessage, 0, len(req.Messages))
@@ -225,6 +238,29 @@ func (c *Client) buildRequest(req llm.ChatRequest, stream bool) wireRequest {
 		})
 	}
 	return out
+}
+
+/*
+isReasoningModel reports whether an OpenAI model id is a reasoning model that
+rejects a non-default temperature and uses max_completion_tokens instead of the
+deprecated max_tokens. It covers the GPT-5.x family and the o1/o3/o4 series. The
+GPT-5 "-chat" aliases (e.g. gpt-5-chat-latest) are conventional chat models that
+keep the standard parameters, and gpt-4o is a chat model, so both are excluded.
+*/
+func isReasoningModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(m, "-chat") {
+		return false
+	}
+	if strings.HasPrefix(m, "gpt-5") {
+		return true
+	}
+	for _, p := range []string{"o1", "o3", "o4"} {
+		if m == p || strings.HasPrefix(m, p+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 /* dataURL re-wraps a canonical ImagePart as the base64 data URL OpenAI expects. */

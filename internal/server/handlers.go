@@ -13,6 +13,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/agent"
 	"github.com/ikarolaborda/agent-smith/internal/cluster"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
+	"github.com/ikarolaborda/agent-smith/internal/refine"
 )
 
 /* chatCompletionRequest is the OpenAI-shape request body accepted by /v1/chat/completions. */
@@ -27,6 +28,20 @@ type chatCompletionRequest struct {
 		non-nil means the caller has chosen.
 	*/
 	WebSearch *bool `json:"web_search,omitempty"`
+	/*
+		Refine enables opt-in judge-in-the-loop mode: the answer is regenerated with
+		the strict judge's critique until USABLE or the iteration budget is spent,
+		streaming per-round progress. Evaluation-first and may take minutes; it never
+		upgrades a non-usable result into a confirmed claim.
+	*/
+	Refine         bool `json:"refine,omitempty"`
+	RefineMaxIters int  `json:"refine_max_iters,omitempty"`
+	/*
+		RefineTimeoutSeconds overrides the per-round generate+judge budget for refine
+		mode (0 = server default). A large local model needs minutes per round; it is
+		clamped server-side to a safe range.
+	*/
+	RefineTimeoutSeconds int `json:"refine_timeout_seconds,omitempty"`
 }
 
 /*
@@ -308,6 +323,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range history {
 		session.Append(m)
+	}
+
+	/*
+		Refine mode: regenerate-and-judge until USABLE or the budget is spent,
+		streaming per-round progress so the web user watches the evaluation. It
+		runs off the normal token-streaming path (each round is non-streaming) and
+		takes the latest user message as the task, regenerating in a fresh session
+		each round. The advisory verifier is disabled here because the judge IS the
+		validation.
+	*/
+	if req.Refine {
+		a.Verifier = nil
+		/* Bound a degenerate/repeating local model so a runaway self-terminates and is judged, not hung. */
+		a.MaxTokens = refineGenMaxTokens
+		task := lastUser.Content
+		gen := func(gctx context.Context, t, brief string) (string, error) {
+			prompt := t
+			if brief != "" {
+				prompt = t + "\n\n[Refinement brief — improve grounding, scoping, and labelling ONLY; do NOT fabricate]\n" + brief
+			}
+			return a.Run(gctx, agent.NewSession(), prompt)
+		}
+		streamRefine(r.Context(), enc, completionID, displayModel, createdAt, task, gen, s.refineJudge, refine.LoopConfig{
+			MaxIters:     clampRefineIters(req.RefineMaxIters),
+			RoundTimeout: clampRefineTimeout(req.RefineTimeoutSeconds),
+		})
+		return
 	}
 
 	emittedRole := false

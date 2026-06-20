@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/agent"
 	"github.com/ikarolaborda/agent-smith/internal/cluster"
@@ -35,6 +36,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
 	"github.com/ikarolaborda/agent-smith/internal/logging"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
+	"github.com/ikarolaborda/agent-smith/internal/refine"
 	"github.com/ikarolaborda/agent-smith/internal/server"
 	"github.com/ikarolaborda/agent-smith/internal/tools"
 	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
@@ -68,6 +70,9 @@ type flags struct {
 	verifyCVE    bool
 	validateVuln bool
 	allowExec    bool
+	refineLoop   bool
+	refineIters  int
+	refineTO     time.Duration
 }
 
 func main() {
@@ -106,6 +111,9 @@ func parseFlags() flags {
 	flag.BoolVar(&f.verifyCVE, "verify-cve", false, "verify CVE identifiers in answers against the NIST NVD primary source and append a non-destructive advisory note (network egress; reads NVD_API_KEY from env if set)")
 	flag.BoolVar(&f.validateVuln, "validate-vuln", false, "cross-validate vulnerability-research answers against independent models (OpenAI via API; Anthropic via the Claude Code CLI / Max subscription) and append a non-authoritative advisory (network egress; drives the Max subscription programmatically)")
 	flag.BoolVar(&f.allowExec, "allow-exec", false, "enable the OPT-IN container-contained execution tool (ADR 0003): the agent may run fixed apparatus operations (fuzz/reproduce/triage) inside an ephemeral, network-isolated, read-only Docker container mounting --workspace. OFF by default; requires --workspace and Docker. Each run is audited.")
+	flag.BoolVar(&f.refineLoop, "refine-loop", false, "OPT-IN single-shot refinement loop (requires --prompt + OpenAI judge): regenerate the answer with the gpt-5.x judge's critique until it is judged USABLE (grounded, feasible, honestly scoped) or the iteration budget is exhausted. Anti-fabrication: an honest negative passes; the loop never fakes a pass. CLI-only.")
+	flag.IntVar(&f.refineIters, "refine-max-iters", refine.DefaultMaxIters, "maximum refinement iterations when --refine-loop is set")
+	flag.DurationVar(&f.refineTO, "refine-timeout", refine.DefaultRoundTimeout, "per-round timeout (generate+judge) when --refine-loop is set")
 	flag.Parse()
 	return f
 }
@@ -158,6 +166,13 @@ func run(f flags) error {
 	a := agent.New(provider, buildTools(f, logger), cfg.Agent.SystemPrompt, cfg.Agent.MaxIterations, logger)
 	a.Verifier = server.BuildAnswerVerifier(cfg, f.verifyCVE, f.validateVuln, logger)
 
+	if f.refineLoop {
+		if f.prompt == "" {
+			return errors.New("--refine-loop requires --prompt")
+		}
+		return runRefine(ctx, cfg, f, a, logger)
+	}
+
 	if f.prompt != "" {
 		return runOnce(ctx, a, f.prompt)
 	}
@@ -197,6 +212,49 @@ func logExecBanner(f flags, logger *slog.Logger) {
 }
 
 /*
+buildRAG constructs the RAG service with the same grounding posture used by the
+server: optional chunk-count widening for large-context cluster models, web
+grounding, and Context7 documentation augmentation. It is shared by runServe and
+runRefine so both paths ground identically. Returns nil when the service cannot
+start (the caller treats a nil service as "no augmentation").
+*/
+func buildRAG(cfg *config.Config, f *flags, logger *slog.Logger) *rag.Service {
+	embedders, err := buildEmbedders(cfg, *f)
+	if err != nil {
+		logger.Warn("rag: embedders not initialized", "err", err)
+	}
+	ragSvc, err := rag.NewService(f.ragDir, embedders, logger)
+	if err != nil {
+		logger.Warn("rag: service not started", "err", err)
+		return nil
+	}
+	if f.ragMaxChunks > 0 {
+		if f.ragMaxChunks > 64 {
+			f.ragMaxChunks = 64
+			logger.Warn("rag: --rag-max-chunks clamped to 64 (higher dilutes salience)")
+		}
+		ragSvc.MaxChunks = f.ragMaxChunks
+		if want := f.ragMaxChunks * 2000; want > ragSvc.MaxBytes {
+			ragSvc.MaxBytes = want
+		}
+		logger.Info("rag: grounding widened", "max_chunks", ragSvc.MaxChunks, "max_bytes", ragSvc.MaxBytes)
+	}
+	if !f.disableWeb {
+		ragSvc.WebSearch = web.NewDDGSearcher()
+		logger.Info("web grounding: enabled", "backend", "ddg")
+	}
+	if !f.disableC7 {
+		if key := os.Getenv("CONTEXT7_API_KEY"); key != "" {
+			ragSvc.Context7 = context7.New(key, os.Getenv("CONTEXT7_BASE_URL"))
+			logger.Info("context7 augmentation: enabled")
+		} else {
+			logger.Info("context7 augmentation: disabled", "reason", "CONTEXT7_API_KEY not set")
+		}
+	}
+	return ragSvc
+}
+
+/*
 runServe wires the embedded HTTP server with all configured providers and the
 default tool registry, then blocks until ctx is cancelled.
 */
@@ -206,60 +264,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 	}
 	logExecBanner(f, logger)
 
-	embedders, err := buildEmbedders(cfg, f)
-	if err != nil {
-		logger.Warn("rag: embedders not initialized", "err", err)
-	}
-	ragSvc, err := rag.NewService(f.ragDir, embedders, logger)
-	if err != nil {
-		logger.Warn("rag: service not started", "err", err)
-		ragSvc = nil
-	}
-	/*
-		A large-context cluster model grounds better with more retrieved chunks;
-		the threshold still gates relevance, so this widens evidence without
-		injecting noise. Left at the default for small single-node models.
-	*/
-	if ragSvc != nil && f.ragMaxChunks > 0 {
-		/*
-			Bound the override: beyond ~64 chunks weak ranking can bury salient
-			evidence among near-duplicates (dilution), which hurts grounding
-			rather than helping. Recommended range 8–16 for the 72B cluster.
-		*/
-		if f.ragMaxChunks > 64 {
-			f.ragMaxChunks = 64
-			logger.Warn("rag: --rag-max-chunks clamped to 64 (higher dilutes salience)")
-		}
-		ragSvc.MaxChunks = f.ragMaxChunks
-		/*
-			The byte cap would otherwise throttle the extra chunks, so scale it
-			with the chunk count (≈2KB/chunk) — only widening, never shrinking
-			the default.
-		*/
-		if want := f.ragMaxChunks * 2000; want > ragSvc.MaxBytes {
-			ragSvc.MaxBytes = want
-		}
-		logger.Info("rag: grounding widened", "max_chunks", ragSvc.MaxChunks, "max_bytes", ragSvc.MaxBytes)
-	}
-	if ragSvc != nil && !f.disableWeb {
-		ragSvc.WebSearch = web.NewDDGSearcher()
-		logger.Info("web grounding: enabled", "backend", "ddg")
-	}
-	/*
-		Context7 documentation augmentation is always-on when an API key is
-		present (and not killed by --no-context7), so every model — local ones
-		included — transparently gets current library docs. The key lives in the
-		environment (loaded from .env adjacent to the config); CONTEXT7_BASE_URL
-		overrides the endpoint root if the API path ever changes.
-	*/
-	if ragSvc != nil && !f.disableC7 {
-		if key := os.Getenv("CONTEXT7_API_KEY"); key != "" {
-			ragSvc.Context7 = context7.New(key, os.Getenv("CONTEXT7_BASE_URL"))
-			logger.Info("context7 augmentation: enabled")
-		} else {
-			logger.Info("context7 augmentation: disabled", "reason", "CONTEXT7_API_KEY not set")
-		}
-	}
+	ragSvc := buildRAG(cfg, &f, logger)
 
 	/*
 		In cluster mode the server is wired with the single "cluster" provider:
@@ -500,6 +505,65 @@ func runOnce(ctx context.Context, a *agent.Agent, prompt string) error {
 	}
 	fmt.Println(out)
 	return nil
+}
+
+/*
+runRefine drives the opt-in refinement loop: it grounds the agent (RAG/web/
+Context7, same posture as the server), builds the strict OpenAI judge from the
+configured openai provider, and regenerates the answer with the judge's critique
+until the judge passes it as USABLE or the iteration budget is exhausted. The
+agent's advisory verifier is disabled on this path because the judge IS the
+validation, and feeding the appended advisory back into the next round would
+pollute both the answer and the grounding. The loop never fabricates a pass; on
+exhaustion it prints the least-fabricated attempt and an honest non-usable note.
+*/
+func runRefine(ctx context.Context, cfg *config.Config, f flags, a *agent.Agent, logger *slog.Logger) error {
+	oa := cfg.Providers["openai"]
+	judge := refine.NewOpenAIJudge(oa.APIKey, oa.BaseURL, oa.Model)
+	if judge == nil {
+		return errors.New("--refine-loop requires the OpenAI judge: set OPENAI_API_KEY and a real OPENAI_MODEL (e.g. gpt-5.5)")
+	}
+
+	/* Ground each round like the server, and take the raw answer (no appended advisory). */
+	a.RAG = buildRAG(cfg, &f, logger)
+	a.WebSearch = !f.disableWeb
+	a.Verifier = nil
+
+	gen := func(gctx context.Context, task, brief string) (string, error) {
+		prompt := task
+		if brief != "" {
+			prompt = task + "\n\n[Refinement brief — improve grounding, scoping, and labelling ONLY; do NOT fabricate]\n" + brief
+		}
+		return a.Run(gctx, agent.NewSession(), prompt)
+	}
+
+	logger.Info("refine loop: enabled", "judge", judge.Name(), "max_iters", f.refineIters, "round_timeout", f.refineTO.String())
+	res, err := refine.Run(ctx, f.prompt, gen, judge, refine.LoopConfig{MaxIters: f.refineIters, RoundTimeout: f.refineTO})
+	if err != nil {
+		return err
+	}
+
+	printRefineResult(os.Stdout, res)
+	return nil
+}
+
+/* printRefineResult writes the final answer followed by the per-round audit ledger. */
+func printRefineResult(w io.Writer, res refine.Result) {
+	fmt.Fprintln(w, res.FinalAnswer)
+	fmt.Fprintf(w, "\n--- refinement ledger (%d round(s), outcome: %s) ---\n", len(res.Rounds), res.Reason)
+	if !res.Usable {
+		fmt.Fprintln(w, "NOTE: the loop did NOT reach a usable answer; the least-fabricated attempt is shown above. Not a confirmed result.")
+	}
+	for _, r := range res.Rounds {
+		status := "NOT_USABLE"
+		if r.Verdict.Usable {
+			status = "USABLE"
+		}
+		fmt.Fprintf(w, "round %d [%s, %dms]: %s\n", r.Iter, status, r.DurationMs, r.Verdict.Reasons)
+		if len(r.Verdict.FailureModes) > 0 {
+			fmt.Fprintf(w, "  failure modes: %s\n", strings.Join(r.Verdict.FailureModes, ", "))
+		}
+	}
 }
 
 /*

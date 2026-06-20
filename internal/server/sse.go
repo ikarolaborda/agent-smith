@@ -79,6 +79,20 @@ func (e *sseEncoder) writeNamedEvent(name string, payload any) error {
 	return nil
 }
 
+/*
+writeComment emits an SSE comment line (": ...\n\n"). Clients ignore comments
+(the spec, and the UI parser, skip lines beginning with ':'), so it serves as a
+keepalive that keeps bytes flowing during long gaps — e.g. a refine round that
+spends minutes generating and judging before its next named event.
+*/
+func (e *sseEncoder) writeComment(text string) error {
+	if _, err := fmt.Fprintf(e.w, ": %s\n\n", text); err != nil {
+		return err
+	}
+	e.flusher.Flush()
+	return nil
+}
+
 /* writeDone emits the OpenAI terminator. */
 func (e *sseEncoder) writeDone() {
 	_, _ = fmt.Fprint(e.w, "data: [DONE]\n\n")

@@ -202,10 +202,17 @@ export function App() {
     };
 
     const webSearch = conv.webSearch ?? defaultWebSearchFor(conv.model);
+    const refine = conv.refine ?? false;
     try {
       await streamChatCompletion(
-        { model: conv.model, messages: wireMessages, stream: true, profile_id: profileId, web_search: webSearch },
+        { model: conv.model, messages: wireMessages, stream: true, profile_id: profileId, web_search: webSearch, refine },
         {
+          onRefineRound: (r) => {
+            patchAssistant((m) => ({ ...m, refine_rounds: [...(m.refine_rounds ?? []), r] }));
+          },
+          onRefineSummary: (s) => {
+            patchAssistant((m) => ({ ...m, refine_summary: s }));
+          },
           onDelta: (delta) => {
             if (delta.content) {
               patchAssistant((m) => ({ ...m, content: m.content + (delta.content ?? '') }));
@@ -311,6 +318,11 @@ export function App() {
     updateConversation(active.id, (c) => ({ ...c, webSearch: next }));
   }
 
+  function handleToggleRefine(next: boolean) {
+    if (!active) return;
+    updateConversation(active.id, (c) => ({ ...c, refine: next }));
+  }
+
   function handleModelChange(id: string) {
     if (!active) {
       const m = models.find((x) => x.id === id);
@@ -357,6 +369,15 @@ export function App() {
               disabled={!active}
             />
             <span>Ground with web</span>
+          </label>
+          <label className="web-toggle" title="Judge-in-the-loop: regenerate and re-evaluate until the answer is grounded/usable. Evaluation-first; may take minutes; an honest negative is not upgraded to a confirmed result.">
+            <input
+              type="checkbox"
+              checked={active?.refine ?? false}
+              onChange={(e) => handleToggleRefine(e.target.checked)}
+              disabled={!active}
+            />
+            <span>Refine &amp; evaluate</span>
           </label>
           <WorkspaceBar />
           <ClusterBadge />

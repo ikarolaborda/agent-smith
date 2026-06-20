@@ -28,7 +28,35 @@ export interface Message {
   images?: ImageAttachment[];
   tool_calls?: ToolCall[];
   tool_results?: ToolResult[];
+  refine_rounds?: RefineRound[];
+  refine_summary?: RefineSummary;
   streaming?: boolean;
+}
+
+/*
+ * RefineRound is one generate->judge cycle surfaced to the UI so the user can
+ * watch the evaluation. status is the judge verdict for that round.
+ */
+export interface RefineRound {
+  iter: number;
+  status: 'usable' | 'not_usable';
+  usable: boolean;
+  reasons?: string;
+  fixes?: string[];
+  failure_modes?: string[];
+  duration_ms: number;
+}
+
+/*
+ * RefineSummary is the loop outcome. status drives the UI label: only 'usable'
+ * may be presented as a confirmed result; 'least_fabricated' is the most honest
+ * attempt and MUST be marked NOT confirmed.
+ */
+export interface RefineSummary {
+  status: 'usable' | 'least_fabricated' | 'error';
+  usable: boolean;
+  reason: string;
+  rounds: number;
 }
 
 export interface Conversation {
@@ -44,6 +72,11 @@ export interface Conversation {
    * undefined means "use server default" (Ollama=true, cloud=false).
    */
   webSearch?: boolean;
+  /*
+   * Opt-in judge-in-the-loop refinement for this conversation. undefined/false
+   * means a normal single-pass streamed answer.
+   */
+  refine?: boolean;
 }
 
 export interface ProvidersResponse {
