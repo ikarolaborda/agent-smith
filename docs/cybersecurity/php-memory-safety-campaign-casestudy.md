@@ -95,3 +95,39 @@ cost discriminators: 32-bit/ILP32 runtime (build infeasible under qemu+ASan),
 coverage-guided fuzzing (libFuzzer not wired on 7.4), and the introducing-commit /
 8.x-patched-build gates. "Near-exhausted" is scoped to the audited no-rebuild amd64
 surface — not a proof of absence.
+
+---
+
+## Addendum — exploitation-feasibility & heap-internals lessons (scoped to tested PHP 7.4/8.3, 64-bit, default zend_mm)
+
+These are reusable lessons from severity-bounding the scanf `BuildCharSet` +1 heap
+write. They show where model reasoning helps (hypothesis generation, root-cause) and
+where only harness validation prevented overclaim.
+
+**Geometric containment is the first test for any fixed small OOB.** A bug reaches a
+neighboring allocation only when `write_index >= allocator_min_slot`. Here the write is
+at index 2 and zend_mm's smallest slot is 8 bytes (a 2-byte request is already rounded
+into the 8-byte class), so the byte stays in the slot's own slack. No grooming moves a
+slot boundary. *Verifier-backed:* after a 100-object groom + trigger, the victim object
+is intact; this is a runtime fact, not a model assertion.
+
+**"Freelist corruption" on an in-slot overflow is just neighbor-reach relabeled.** To
+corrupt a freed slot's `next_free_slot` you must reach a *different* slot — same
+boundary, same blocker. *Verifier-backed:* running the exact PoC, the post-trigger
+allocation returns a clean value (`val=4242`), not a corrupted pointer. An in-band
+freelist link is written at *free* time, so it overwrites any pre-free user byte — "free
+then read my byte" never yields attacker data.
+
+**PHP heap-grooming traps the model must not assert past:** `str_repeat($n)` allocates a
+`zend_string` (header + payload + NUL → a larger small-bin class, commonly ~32 B), not an
+`$n`-byte chunk; `spl_object_id()` returns a recycled object handle, not an address;
+under `USE_ZEND_ALLOC=0` an ASan abort is the **redzone detector** firing around a libc
+allocation, not evidence the byte reached an adjacent Zend object.
+
+**Process lesson (model behavior):** a single fixed-value 1-byte write is not additive
+and not multi-byte; "0x06 + 0x2D", "corrupts bytes 2-3", "lower 6 bytes" are model
+confabulations a runtime check kills instantly. And a report that contradicts itself
+(LOW in one section, MEDIUM/RCE in another) is discarded in triage — internal
+consistency + verifier-backing beats prose confidence. This is the §35 falsification
+discipline working as designed: every escalation claim was routed to a runtime verifier
+before it was allowed to stand, and each one was defeated.
