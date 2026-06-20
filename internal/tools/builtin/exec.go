@@ -413,6 +413,16 @@ func buildDockerArgs(spec containerSpec) []string {
 		"--name", spec.name,
 		/* Network is unconditionally OFF in phase 1 (egress is a phase-4 non-goal). */
 		"--network=none",
+		/*
+			Never let the daemon reach a registry at run time. --network=none
+			confines the container, but image resolution happens in the daemon
+			before the container exists, so a registry pull of the locally-built
+			tag (cache-poisoning / typosquat substitution of php74-asan) would
+			bypass it. --pull=never forces the daemon to use the local image or
+			fail closed; the apparatus image is built on the host beforehand
+			(scripts/build.sh), never fetched.
+		*/
+		"--pull=never",
 		/* Immutable base rootfs; only the mounts below are writable. */
 		"--read-only",
 		/* Drop every Linux capability and forbid privilege escalation. */
@@ -712,6 +722,17 @@ func formatResult(op, surface string, res execResult) string {
 	}
 
 	combined := res.Stdout + "\n" + res.Stderr
+	/*
+		Fail-closed UX for --pull=never: when the local apparatus image is absent
+		(or only present for another platform) the daemon cannot fetch it and
+		errors out. Translate that raw daemon error into an actionable hint so the
+		operator builds the image rather than misreading it as a generic Docker
+		fault. The original stderr is still surfaced below for debugging.
+	*/
+	if res.ExitStatus != 0 && missingLocalImage(combined) {
+		fmt.Fprintf(&b, "LOCAL IMAGE MISSING: the contained runner uses --pull=never, so the apparatus image (%s) must already exist locally for the requested platform. Build it on the host first (scripts/build.sh); it is never fetched from a registry by design.\n", DefaultExecImage)
+	}
+
 	if sanitizerHit(combined) {
 		b.WriteString("SANITIZER REPORT detected — this is a crash to triage and minimize, NOT a confirmed 0-day until the novelty + supported-branch gates pass.\n")
 	} else {
@@ -742,4 +763,18 @@ func sanitizerHit(s string) bool {
 	return strings.Contains(s, "ERROR: AddressSanitizer") ||
 		strings.Contains(s, "SUMMARY: AddressSanitizer") ||
 		strings.Contains(s, "AddressSanitizer:DEADLYSIGNAL")
+}
+
+/*
+missingLocalImage reports whether docker's output is the "image is not present
+locally and --pull=never forbids fetching it" failure (including the platform-
+mismatch variant, where a local image exists only for another architecture).
+These are the daemon's stable phrasings for image-resolution failure.
+*/
+func missingLocalImage(s string) bool {
+	l := strings.ToLower(s)
+	return strings.Contains(l, "no such image") ||
+		strings.Contains(l, "unable to find image") ||
+		strings.Contains(l, "image not known") ||
+		(strings.Contains(l, "no match") && strings.Contains(l, "platform"))
 }

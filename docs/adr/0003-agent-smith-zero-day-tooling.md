@@ -144,8 +144,15 @@ local Docker daemon and the kernel/container isolation boundary (a daemon or
 kernel compromise defeats the flags); the validation **image** (a malicious or
 drifted image can taint results or exploit a runtime bug); and the robustness of
 host-side consumers of the captured, size-bounded, untrusted output. Phase-2+
-hardening (deferred): image digest pinning + `--pull=never`, tighter seccomp
-profile, and image provenance controls.
+hardening: `--pull=never` is now applied (the daemon resolves only the local
+image and fails closed — no run-time registry pull of the `php74-asan` tag, so
+cache-poisoning / typosquat image substitution cannot bypass `--network=none`,
+which confines only the container). This intentionally trades convenience for
+fail-closed local-image trust: the run tool translates the daemon's
+image-absent error into an actionable "build it on the host first
+(scripts/build.sh)" hint rather than surfacing a raw Docker fault. It does not
+yet defend against a malicious or mistaken local re-tag. Still deferred: image
+digest pinning, a tighter seccomp profile, and image provenance controls.
 
 ## Rejected alternatives
 - **Host `sh -c` with cwd/timeout/cap "sandbox"** — rejected (not a sandbox;

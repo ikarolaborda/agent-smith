@@ -170,6 +170,7 @@ func TestBuildDockerArgs_ContainmentInvariants(t *testing.T) {
 	required := []string{
 		"--rm",
 		"--network=none",
+		"--pull=never",
 		"--read-only",
 		"--cap-drop=ALL",
 		"--security-opt=no-new-privileges",
@@ -203,6 +204,77 @@ func TestBuildDockerArgs_ContainmentInvariants(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--tmpfs /tmp:rw,size=64m,mode=1777,nosuid,nodev,noexec") {
 		t.Errorf("tmpfs /tmp must be the only writable path; got: %s", joined)
+	}
+}
+
+/*
+TestBuildDockerArgs_PullNeverFailsClosed proves the run never resolves its image
+from a registry: --pull=never must be present, must be the only --pull mode, and
+must precede the image positional (a --pull after the image is an argument to the
+container, not to docker run, and would silently re-enable the default pull).
+*/
+func TestBuildDockerArgs_PullNeverFailsClosed(t *testing.T) {
+	spec := containerSpec{
+		name:      "n",
+		image:     "php74-asan",
+		workspace: "/ws",
+		env:       containedEnv(),
+		cmdArgs:   []string{"/work/driver.php"},
+	}
+	args := buildDockerArgs(spec)
+
+	pullIdx, imageIdx := -1, -1
+	for i, a := range args {
+		switch {
+		case a == "--pull=never":
+			pullIdx = i
+		case strings.HasPrefix(a, "--pull"):
+			t.Errorf("unexpected --pull mode %q; only --pull=never is allowed: %v", a, args)
+		case a == "php74-asan":
+			imageIdx = i
+		}
+	}
+	if pullIdx == -1 {
+		t.Fatalf("--pull=never missing; image could be fetched from a registry: %v", args)
+	}
+	if imageIdx == -1 {
+		t.Fatalf("image positional not found: %v", args)
+	}
+	if pullIdx >= imageIdx {
+		t.Errorf("--pull=never (idx %d) must precede the image positional (idx %d): %v", pullIdx, imageIdx, args)
+	}
+}
+
+/*
+TestFormatResult_MissingLocalImageHint proves that a non-zero run whose stderr is
+docker's "image absent + --pull=never" failure gets the actionable build-it-first
+hint, while a clean run does not, and the raw stderr is still surfaced.
+*/
+func TestFormatResult_MissingLocalImageHint(t *testing.T) {
+	missing := execResult{
+		ExitStatus: 125,
+		Stderr:     "docker: Error response from daemon: No such image: php74-asan:latest.",
+	}
+	out := formatResult("fuzz", "scanf", missing)
+	if !strings.Contains(out, "LOCAL IMAGE MISSING") {
+		t.Errorf("expected missing-image hint for No such image stderr; got: %s", out)
+	}
+	if !strings.Contains(out, "scripts/build.sh") {
+		t.Errorf("hint must tell the operator how to build the image; got: %s", out)
+	}
+	if !strings.Contains(out, "No such image") {
+		t.Errorf("raw stderr must still be surfaced for debugging; got: %s", out)
+	}
+
+	clean := execResult{ExitStatus: 0, Stdout: "ok"}
+	if strings.Contains(formatResult("fuzz", "scanf", clean), "LOCAL IMAGE MISSING") {
+		t.Errorf("must not emit missing-image hint on a successful run")
+	}
+
+	/* A non-zero exit for an unrelated reason must NOT be mislabeled as missing-image. */
+	other := execResult{ExitStatus: 1, Stderr: "PHP Parse error: syntax error"}
+	if strings.Contains(formatResult("fuzz", "scanf", other), "LOCAL IMAGE MISSING") {
+		t.Errorf("missing-image hint must not fire on unrelated non-zero exits")
 	}
 }
 
