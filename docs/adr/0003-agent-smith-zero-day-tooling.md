@@ -150,9 +150,16 @@ cache-poisoning / typosquat image substitution cannot bypass `--network=none`,
 which confines only the container). This intentionally trades convenience for
 fail-closed local-image trust: the run tool translates the daemon's
 image-absent error into an actionable "build it on the host first
-(scripts/build.sh)" hint rather than surfacing a raw Docker fault. It does not
-yet defend against a malicious or mistaken local re-tag. Still deferred: image
-digest pinning, a tighter seccomp profile, and image provenance controls.
+(scripts/build.sh)" hint rather than surfacing a raw Docker fault. The
+local-re-tag residual is now closeable: an operator MAY pin the apparatus image
+to an exact local image ID via `--exec-image-digest sha256:<hex>` (the
+`WithExpectedImageDigest` option). Because a locally-built image has no registry
+RepoDigest, the pin is the bare image ID — which `docker run` accepts as a
+reference — not `name@sha256`; combined with `--pull=never` this resolves the
+exact image content or fails closed, so a re-tag of the `php74-asan` tag to
+different content is no longer honored. The pin is opt-in (unset = resolve by
+tag) because the digest is host-specific. Still deferred: a tighter seccomp
+profile and image provenance/signature verification.
 
 ## Rejected alternatives
 - **Host `sh -c` with cwd/timeout/cap "sandbox"** — rejected (not a sandbox;

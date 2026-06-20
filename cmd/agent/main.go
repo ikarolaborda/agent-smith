@@ -45,34 +45,35 @@ import (
 
 /* flags groups the CLI flag values so we can pass them around as one value. */
 type flags struct {
-	configPath   string
-	provider     string
-	model        string
-	prompt       string
-	stream       bool
-	serve        bool
-	addr         string
-	ingest       bool
-	collection   string
-	source       string
-	embedder     string
-	embedModel   string
-	ragDir       string
-	disableRAG   bool
-	disableWeb   bool
-	disableC7    bool
-	clusterCfg   string
-	workspace    string
-	ragMaxChunks int
-	buildDataset bool
-	datasetSrc   string
-	datasetOut   string
-	verifyCVE    bool
-	validateVuln bool
-	allowExec    bool
-	refineLoop   bool
-	refineIters  int
-	refineTO     time.Duration
+	configPath      string
+	provider        string
+	model           string
+	prompt          string
+	stream          bool
+	serve           bool
+	addr            string
+	ingest          bool
+	collection      string
+	source          string
+	embedder        string
+	embedModel      string
+	ragDir          string
+	disableRAG      bool
+	disableWeb      bool
+	disableC7       bool
+	clusterCfg      string
+	workspace       string
+	ragMaxChunks    int
+	buildDataset    bool
+	datasetSrc      string
+	datasetOut      string
+	verifyCVE       bool
+	validateVuln    bool
+	allowExec       bool
+	execImageDigest string
+	refineLoop      bool
+	refineIters     int
+	refineTO        time.Duration
 }
 
 func main() {
@@ -111,6 +112,7 @@ func parseFlags() flags {
 	flag.BoolVar(&f.verifyCVE, "verify-cve", false, "verify CVE identifiers in answers against the NIST NVD primary source and append a non-destructive advisory note (network egress; reads NVD_API_KEY from env if set)")
 	flag.BoolVar(&f.validateVuln, "validate-vuln", false, "cross-validate vulnerability-research answers against independent models (OpenAI via API; Anthropic via the Claude Code CLI / Max subscription) and append a non-authoritative advisory (network egress; drives the Max subscription programmatically)")
 	flag.BoolVar(&f.allowExec, "allow-exec", false, "enable the OPT-IN container-contained execution tool (ADR 0003): the agent may run fixed apparatus operations (fuzz/reproduce/triage) inside an ephemeral, network-isolated, read-only Docker container mounting --workspace. OFF by default; requires --workspace and Docker. Each run is audited.")
+	flag.StringVar(&f.execImageDigest, "exec-image-digest", "", "pin the contained-exec apparatus image to an exact local image ID (sha256:<hex>, from `docker images --no-trunc --quiet php74-asan`). With --pull=never this makes image resolution fail closed on any other content, defeating a local re-tag. Empty = resolve by tag (unpinned).")
 	flag.BoolVar(&f.refineLoop, "refine-loop", false, "OPT-IN single-shot refinement loop (requires --prompt + OpenAI judge): regenerate the answer with the gpt-5.x judge's critique until it is judged USABLE (grounded, feasible, honestly scoped) or the iteration budget is exhausted. Anti-fabrication: an honest negative passes; the loop never fakes a pass. CLI-only.")
 	flag.IntVar(&f.refineIters, "refine-max-iters", refine.DefaultMaxIters, "maximum refinement iterations when --refine-loop is set")
 	flag.DurationVar(&f.refineTO, "refine-timeout", refine.DefaultRoundTimeout, "per-round timeout (generate+judge) when --refine-loop is set")
@@ -189,7 +191,12 @@ func buildTools(f flags, logger *slog.Logger) *tools.Registry {
 		logger.Info("workspace: agentic file mutation enabled", "root", f.workspace)
 	}
 	logExecBanner(f, logger)
-	return builtin.NewDefaultRegistryWithExec(f.workspace, f.allowExec)
+	var execOpts []builtin.ContainedExecOption
+	if f.execImageDigest != "" {
+		execOpts = append(execOpts, builtin.WithExpectedImageDigest(f.execImageDigest))
+		logger.Info("exec: apparatus image pinned by digest", "digest", f.execImageDigest)
+	}
+	return builtin.NewDefaultRegistryWithExec(f.workspace, f.allowExec, execOpts...)
 }
 
 /*
@@ -287,6 +294,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		Config:           cfg,
 		Workspace:        f.workspace,
 		AllowExec:        f.allowExec,
+		ExecImageDigest:  f.execImageDigest,
 		Logger:           logger,
 		RAG:              ragSvc,
 		DisableRAG:       f.disableRAG,

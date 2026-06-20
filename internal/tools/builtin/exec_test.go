@@ -246,6 +246,87 @@ func TestBuildDockerArgs_PullNeverFailsClosed(t *testing.T) {
 }
 
 /*
+TestBuildDockerArgs_ImageDigestPin proves the optional content pin: when a digest
+is set the image positional is the digest (not the mutable tag), it still sits
+after --pull=never and before the container args, and an unset digest falls back
+to the tag. Together with --pull=never this is what makes a local re-tag of the
+apparatus tag fail closed instead of being silently honored.
+*/
+func TestBuildDockerArgs_ImageDigestPin(t *testing.T) {
+	const digest = "sha256:2f081d4445bfc7a11322f38cff8c8939bfd52713e1089efd4a1a7d6262d09219"
+
+	base := containerSpec{
+		name:      "n",
+		image:     "php74-asan",
+		workspace: "/ws",
+		env:       containedEnv(),
+		cmdArgs:   []string{"/work/driver.php"},
+	}
+
+	/* Unpinned: the image positional is the tag. */
+	unpinned := buildDockerArgs(base)
+	if got := imageReference(base); got != "php74-asan" {
+		t.Errorf("unpinned imageReference = %q, want the tag php74-asan", got)
+	}
+	if !containsArg(unpinned, "php74-asan") {
+		t.Errorf("unpinned args must carry the tag: %v", unpinned)
+	}
+
+	/* Pinned: the digest replaces the tag as the image positional. */
+	pinned := base
+	pinned.imageDigest = digest
+	args := buildDockerArgs(pinned)
+
+	if got := imageReference(pinned); got != digest {
+		t.Errorf("pinned imageReference = %q, want the digest %q", got, digest)
+	}
+	if containsArg(args, "php74-asan") {
+		t.Errorf("pinned args must NOT carry the mutable tag: %v", args)
+	}
+
+	pullIdx, digestIdx, cmdIdx := -1, -1, -1
+	for i, a := range args {
+		switch a {
+		case "--pull=never":
+			pullIdx = i
+		case digest:
+			digestIdx = i
+		case "/work/driver.php":
+			cmdIdx = i
+		}
+	}
+	if pullIdx == -1 || digestIdx == -1 || cmdIdx == -1 {
+		t.Fatalf("expected --pull=never, digest, and cmd arg all present: %v", args)
+	}
+	if !(pullIdx < digestIdx && digestIdx < cmdIdx) {
+		t.Errorf("order must be --pull=never(%d) < digest(%d) < cmd(%d): %v", pullIdx, digestIdx, cmdIdx, args)
+	}
+}
+
+/*
+TestWithExpectedImageDigest proves the option trims surrounding whitespace and
+that an empty/blank value leaves the runner unpinned (tag resolution preserved).
+*/
+func TestWithExpectedImageDigest(t *testing.T) {
+	t.Setenv("HOME", "/tmp")
+
+	pinned := NewContainedExec("/ws", true, WithExpectedImageDigest("  sha256:abc  "))
+	if pinned.imageDigest != "sha256:abc" {
+		t.Errorf("imageDigest = %q, want trimmed sha256:abc", pinned.imageDigest)
+	}
+
+	blank := NewContainedExec("/ws", true, WithExpectedImageDigest("   "))
+	if blank.imageDigest != "" {
+		t.Errorf("blank digest must leave the runner unpinned, got %q", blank.imageDigest)
+	}
+
+	none := NewContainedExec("/ws", true)
+	if none.imageDigest != DefaultExecImageDigest {
+		t.Errorf("default imageDigest = %q, want %q", none.imageDigest, DefaultExecImageDigest)
+	}
+}
+
+/*
 TestFormatResult_MissingLocalImageHint proves that a non-zero run whose stderr is
 docker's "image absent + --pull=never" failure gets the actionable build-it-first
 hint, while a clean run does not, and the raw stderr is still surfaced.
@@ -546,4 +627,66 @@ func TestNewDefaultRegistry_ExecGatedOff(t *testing.T) {
 	if _, err := NewDefaultRegistryWithExec(t.TempDir(), false).Get("run"); err == nil {
 		t.Fatal("exec tool must stay off when allowExec is false")
 	}
+}
+
+/*
+TestContainedExec_InvalidPinFailsClosed proves a malformed image pin makes the
+tool refuse to run (buildSpec errors) rather than handing an ambiguous reference
+to docker — the runner must never be invoked.
+*/
+func TestContainedExec_InvalidPinFailsClosed(t *testing.T) {
+	rr := &recordingRunner{}
+	tool := NewContainedExec(t.TempDir(), true, WithExpectedImageDigest("php74-asan"))
+	tool.run = rr.run
+	tool.audit = func(string) {}
+
+	if _, err := call(t, tool, map[string]any{"operation": "fuzz", "surface": "unserialize"}); err == nil {
+		t.Fatal("expected a malformed image pin to error before running")
+	}
+	if rr.calls != 0 {
+		t.Fatalf("invalid pin must not invoke the runner; got %d calls", rr.calls)
+	}
+}
+
+/*
+TestValidImagePin proves the pin format guard accepts the content-addressable
+forms docker resolves and rejects tags, short IDs, and junk so a malformed pin
+fails closed (enforced in buildSpec) instead of reaching docker as an ambiguous arg.
+*/
+func TestValidImagePin(t *testing.T) {
+	id := "2f081d4445bfc7a11322f38cff8c8939bfd52713e1089efd4a1a7d6262d09219"
+	good := []string{
+		id,
+		"sha256:" + id,
+		"php74-asan@sha256:" + id,
+	}
+	for _, s := range good {
+		if !validImagePin(s) {
+			t.Errorf("validImagePin(%q) = false, want true", s)
+		}
+	}
+	bad := []string{
+		"",
+		"php74-asan",                    // a tag, not a pin
+		"sha256:abc",                    // too short
+		"sha256:" + id + "ff",           // too long
+		"  sha256:" + id,                // leading space
+		"--privileged",                  // flag-shaped
+		"sha256:" + strings.ToUpper(id), // uppercase hex
+	}
+	for _, s := range bad {
+		if validImagePin(s) {
+			t.Errorf("validImagePin(%q) = true, want false", s)
+		}
+	}
+}
+
+/* containsArg reports whether args contains s as an exact element (not a substring). */
+func containsArg(args []string, s string) bool {
+	for _, a := range args {
+		if a == s {
+			return true
+		}
+	}
+	return false
 }

@@ -50,7 +50,13 @@ type Options struct {
 		mount and Docker on the host.
 	*/
 	AllowExec bool
-	Logger    *slog.Logger
+	/*
+		ExecImageDigest, when set, pins the contained-exec apparatus image to an
+		exact local image ID (sha256:<hex>) so resolution fails closed on a local
+		re-tag. Empty = resolve by tag. Mirrors the CLI --exec-image-digest flag.
+	*/
+	ExecImageDigest string
+	Logger          *slog.Logger
 	/*
 		Providers, when non-nil, replaces the providers New would build from
 		Config.Providers. Used by tests to inject fake provider clients;
@@ -112,7 +118,9 @@ type Server struct {
 	workspace   string
 	workspaceMu sync.RWMutex
 	/* allowExec enables the opt-in contained exec tool on per-request agents (ADR 0003). */
-	allowExec        bool
+	allowExec bool
+	/* execImageDigest optionally pins the apparatus image by local image ID (ADR 0003). */
+	execImageDigest  string
 	allowedOrigins   map[string]struct{}
 	readTimeout      time.Duration
 	writeTimeout     time.Duration
@@ -195,6 +203,7 @@ func New(opts Options) (*Server, error) {
 		cfg:              opts.Config,
 		workspace:        opts.Workspace,
 		allowExec:        opts.AllowExec,
+		execImageDigest:  opts.ExecImageDigest,
 		logger:           logger,
 		providers:        map[string]llm.Provider{},
 		mux:              http.NewServeMux(),
@@ -626,7 +635,11 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 		opened in the UI takes effect immediately and file_write/file_edit appear
 		only while a workspace is set.
 	*/
-	reg := builtin.NewDefaultRegistryWithExec(s.getWorkspace(), s.allowExec)
+	var execOpts []builtin.ContainedExecOption
+	if s.execImageDigest != "" {
+		execOpts = append(execOpts, builtin.WithExpectedImageDigest(s.execImageDigest))
+	}
+	reg := builtin.NewDefaultRegistryWithExec(s.getWorkspace(), s.allowExec, execOpts...)
 	a := agent.New(prov, reg, s.cfg.Agent.SystemPrompt, s.cfg.Agent.MaxIterations, s.logger)
 	if s.rag != nil && !s.disableRAG {
 		a.RAG = s.rag

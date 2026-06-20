@@ -38,23 +38,38 @@ network exfiltration) — see ADR 0003 threat model.
 type ContainedExec struct {
 	workspace string
 	image     string
-	platform  string
-	allowExec bool
-	maxWall   time.Duration
-	maxOutput int
-	memoryMB  int
-	pidsLimit int
-	cpus      string
-	user      string
-	audit     func(string)
-	run       execRunner
+	/*
+		imageDigest, when set, pins the run to an exact local image by content (the
+		image ID, e.g. "sha256:<64hex>") instead of the mutable tag. Empty means
+		unpinned. This is the closure for the local-re-tag residual documented in
+		ADR-0003: --pull=never stops a registry substitution, but a local re-tag of
+		the apparatus tag would still be honored; an image-ID pin will not.
+	*/
+	imageDigest string
+	platform    string
+	allowExec   bool
+	maxWall     time.Duration
+	maxOutput   int
+	memoryMB    int
+	pidsLimit   int
+	cpus        string
+	user        string
+	audit       func(string)
+	run         execRunner
 	/* mu serializes contained runs: phase 1 allows one at a time (concurrency cap). */
 	mu sync.Mutex
 }
 
 /* Phase-1 containment defaults. */
 const (
-	DefaultExecImage          = "php74-asan"
+	DefaultExecImage = "php74-asan"
+	/*
+		DefaultExecImageDigest is empty by default: unpinned, so the runner resolves
+		the apparatus image by tag (with --pull=never). An operator MAY pin the exact
+		local image content via WithExpectedImageDigest; see imageReference for why a
+		bare image ID — not name@sha256 — is the correct pin for a locally-built image.
+	*/
+	DefaultExecImageDigest    = ""
 	DefaultExecPlatform       = "linux/amd64"
 	DefaultExecMaxWall        = 10 * time.Minute
 	DefaultExecMaxOutputBytes = 64 * 1024
@@ -92,6 +107,7 @@ single input to buildDockerArgs, so the entire containment policy is expressed
 type containerSpec struct {
 	name        string
 	image       string
+	imageDigest string
 	platform    string
 	workspace   string
 	memoryMB    int
@@ -128,26 +144,47 @@ tool registers but refuses to execute. workspace is the only writable host path
 (mounted at /work); it is resolved to an absolute path. The production docker
 runner and a stderr audit sink are wired by default and can be overridden.
 */
-func NewContainedExec(workspace string, allowExec bool) *ContainedExec {
+func NewContainedExec(workspace string, allowExec bool, opts ...ContainedExecOption) *ContainedExec {
 	abs := workspace
 	if abs != "" {
 		if resolved, err := filepath.Abs(abs); err == nil {
 			abs = resolved
 		}
 	}
-	return &ContainedExec{
-		workspace: abs,
-		image:     DefaultExecImage,
-		platform:  DefaultExecPlatform,
-		allowExec: allowExec,
-		maxWall:   DefaultExecMaxWall,
-		maxOutput: DefaultExecMaxOutputBytes,
-		memoryMB:  DefaultExecMemoryMB,
-		pidsLimit: DefaultExecPidsLimit,
-		cpus:      DefaultExecCPUs,
-		user:      DefaultExecUser,
-		audit:     stderrAudit,
-		run:       dockerRunner(defaultReaper),
+	t := &ContainedExec{
+		workspace:   abs,
+		image:       DefaultExecImage,
+		imageDigest: DefaultExecImageDigest,
+		platform:    DefaultExecPlatform,
+		allowExec:   allowExec,
+		maxWall:     DefaultExecMaxWall,
+		maxOutput:   DefaultExecMaxOutputBytes,
+		memoryMB:    DefaultExecMemoryMB,
+		pidsLimit:   DefaultExecPidsLimit,
+		cpus:        DefaultExecCPUs,
+		user:        DefaultExecUser,
+		audit:       stderrAudit,
+		run:         dockerRunner(defaultReaper),
+	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
+
+/* ContainedExecOption configures a ContainedExec at construction (opt-in hardening). */
+type ContainedExecOption func(*ContainedExec)
+
+/*
+WithExpectedImageDigest pins the runner to an exact local image by content. d is
+the image ID ("sha256:<64hex>", as shown by `docker images --no-trunc --quiet`);
+surrounding whitespace is trimmed and an empty value leaves the runner unpinned.
+Pairing this with --pull=never makes image resolution fail closed on any content
+that is not the pinned image, defeating a local re-tag of the apparatus tag.
+*/
+func WithExpectedImageDigest(d string) ContainedExecOption {
+	return func(t *ContainedExec) {
+		t.imageDigest = strings.TrimSpace(d)
 	}
 }
 
@@ -255,9 +292,20 @@ func (t *ContainedExec) buildSpec(op string, args execArgs) (containerSpec, erro
 		return containerSpec{}, err
 	}
 
+	/*
+		Fail closed on a malformed pin: a typo'd image-ID would otherwise be passed
+		straight to docker, where it might resolve to nothing (or, worse, to an
+		unintended reference) — defeating the very substitution defense this pin
+		exists to provide. Reject it at the policy layer instead.
+	*/
+	if t.imageDigest != "" && !validImagePin(t.imageDigest) {
+		return containerSpec{}, fmt.Errorf("run: invalid --exec-image-digest %q (want sha256:<64 hex>, a bare 64-hex image ID, or name@sha256:<64 hex>)", t.imageDigest)
+	}
+
 	spec := containerSpec{
 		name:        name,
 		image:       t.image,
+		imageDigest: t.imageDigest,
 		platform:    t.platform,
 		workspace:   t.workspace,
 		memoryMB:    t.memoryMB,
@@ -484,9 +532,37 @@ func buildDockerArgs(spec containerSpec) []string {
 	if spec.entrypoint != "" {
 		args = append(args, "--entrypoint", spec.entrypoint)
 	}
-	args = append(args, spec.image)
+	args = append(args, imageReference(spec))
 	args = append(args, spec.cmdArgs...)
 	return args
+}
+
+/*
+imageReference returns the docker image argument: the pinned image ID when one is
+configured, else the tag. A locally-built apparatus image has no registry
+RepoDigest (it was never pulled), so the only content-stable handle is its image
+ID, which `docker run` accepts as a bare reference ("sha256:<id>") — name@sha256
+would require a RepoDigest the local build lacks. With --pull=never this resolves
+the exact image or fails closed; a local re-tag of the apparatus tag is bypassed.
+*/
+func imageReference(spec containerSpec) string {
+	if spec.imageDigest != "" {
+		return spec.imageDigest
+	}
+	return spec.image
+}
+
+/*
+imagePinRe accepts the content-addressable forms docker resolves: a bare 64-hex
+image ID, the sha256:-prefixed image ID, or a name@sha256:<64hex> repo digest.
+Anything else (a tag, a short ID, whitespace, a flag-shaped string) is rejected so
+a malformed pin fails closed rather than reaching docker as an ambiguous argument.
+*/
+var imagePinRe = regexp.MustCompile(`^(?:[A-Za-z0-9][A-Za-z0-9._/:-]*@)?(?:sha256:)?[0-9a-f]{64}$`)
+
+/* validImagePin reports whether s is an acceptable exact-image pin (see imagePinRe). */
+func validImagePin(s string) bool {
+	return imagePinRe.MatchString(s)
 }
 
 /*

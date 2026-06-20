@@ -25,7 +25,7 @@ workspace to mount at /work, so without one it is silently omitted. Existing
 callers keep using NewDefaultRegistry (allowExec=false) and are unaffected,
 preserving the read-only-by-default posture.
 */
-func NewDefaultRegistryWithExec(workspace string, allowExec bool) *tools.Registry {
+func NewDefaultRegistryWithExec(workspace string, allowExec bool, execOpts ...ContainedExecOption) *tools.Registry {
 	reg := tools.NewRegistry()
 	_ = reg.Register(NewShell())
 	_ = reg.Register(NewHTTP())
@@ -35,7 +35,7 @@ func NewDefaultRegistryWithExec(workspace string, allowExec bool) *tools.Registr
 		_ = reg.Register(NewFileWrite(workspace))
 		_ = reg.Register(NewFileEdit(workspace))
 		if allowExec {
-			_ = reg.Register(NewContainedExec(workspace, allowExec))
+			_ = reg.Register(NewContainedExec(workspace, allowExec, execOpts...))
 		}
 	}
 	return reg
