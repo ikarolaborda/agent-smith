@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -54,6 +56,20 @@ type Store struct {
 	dir string
 }
 
+var collectionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+/*
+validateCollectionName keeps collection identifiers as single safe filename
+components. Dots are useful in human-readable slugs, but a double-dot sequence
+is rejected so a name can never acquire traversal semantics on any platform.
+*/
+func validateCollectionName(name string) error {
+	if !collectionNameRE.MatchString(name) || strings.Contains(name, "..") {
+		return fmt.Errorf("rag: invalid collection name %q; use 1-128 ASCII letters, digits, '.', '_', or '-' without '..'", name)
+	}
+	return nil
+}
+
 /* NewStore returns a Store rooted at dir, creating the directory if missing. */
 func NewStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -62,9 +78,12 @@ func NewStore(dir string) (*Store, error) {
 	return &Store{dir: dir}, nil
 }
 
-/* Path returns the on-disk path for the named collection. */
-func (s *Store) Path(name string) string {
-	return filepath.Join(s.dir, name+".json")
+/* Path validates name and returns its on-disk collection path. */
+func (s *Store) Path(name string) (string, error) {
+	if err := validateCollectionName(name); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.dir, name+".json"), nil
 }
 
 /* List returns the names of all collections currently on disk. */
@@ -94,7 +113,11 @@ func (s *Store) List() ([]string, error) {
 func (s *Store) Load(name string) (*Collection, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	raw, err := os.ReadFile(s.Path(name))
+	path, err := s.Path(name)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +125,21 @@ func (s *Store) Load(name string) (*Collection, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("rag: decode %s: %w", name, err)
 	}
+	if c.Name == "" {
+		/* Older hand-authored collections may omit name; bind them to the safe filename. */
+		c.Name = name
+	} else if c.Name != name {
+		return nil, fmt.Errorf("rag: collection file %q declares mismatched name %q", name, c.Name)
+	}
+	if err := validateCollectionName(c.Name); err != nil {
+		return nil, err
+	}
 	if c.Kind == "" {
-		c.Kind = CollectionKindDocs
+		if c.Name == MemoryCollectionName || name == MemoryCollectionName {
+			c.Kind = CollectionKindMemory
+		} else {
+			c.Kind = CollectionKindDocs
+		}
 	}
 	return &c, nil
 }
@@ -118,6 +154,9 @@ func (s *Store) Save(c *Collection) error {
 	if c == nil {
 		return errors.New("rag: nil collection")
 	}
+	if err := validateCollectionName(c.Name); err != nil {
+		return err
+	}
 	if c.Version == 0 {
 		c.Version = CollectionVersion
 	}
@@ -130,7 +169,10 @@ func (s *Store) Save(c *Collection) error {
 	if err != nil {
 		return fmt.Errorf("rag: marshal: %w", err)
 	}
-	dst := s.Path(c.Name)
+	dst, err := s.Path(c.Name)
+	if err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(s.dir, c.Name+".*.json.tmp")
 	if err != nil {
 		return fmt.Errorf("rag: temp file: %w", err)

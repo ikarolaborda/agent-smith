@@ -191,10 +191,13 @@ func (s *Server) handleRAGSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "query is required")
 		return
 	}
+	if req.K > rag.MaxSearchResults {
+		req.K = rag.MaxSearchResults
+	}
 	results, err := s.rag.Search(r.Context(), req.Query, rag.SearchOpts{Filter: req.Collection, K: req.K})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "search_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	writeJSON(w, http.StatusOK, map[string]any{"results": rag.RedactSearchResults(results)})
 }

@@ -114,11 +114,14 @@ func SplitMarkdown(source, text string, opts ChunkOptions) []Chunk {
 				Ordinal: i,
 				Text:    body,
 			}
-			c.ID = chunkID(source, sec.heading, i, body)
 			out = append(out, c)
 		}
 	}
 	applyOverlap(out, opts.OverlapChars)
+	/* IDs describe the final stored text, including its retrieval overlap. */
+	for i := range out {
+		out[i].ID = chunkID(out[i].Source, out[i].Heading, out[i].Ordinal, out[i].Text)
+	}
 	return out
 }
 
@@ -168,34 +171,44 @@ trying to break on paragraph boundaries first and hard-splitting only when a
 single paragraph exceeds the cap.
 */
 func splitBySize(body string, opts ChunkOptions) []string {
-	if len(body) <= opts.MaxChars {
+	if utf8.RuneCountInString(body) <= opts.MaxChars {
 		return []string{body}
 	}
 	paragraphs := strings.Split(body, "\n\n")
 	var out []string
 	var current strings.Builder
+	currentChars := 0
 	for _, p := range paragraphs {
-		if current.Len()+len(p)+2 <= opts.MaxChars {
+		pRunes := []rune(p)
+		separatorChars := 0
+		if current.Len() > 0 {
+			separatorChars = 2
+		}
+		if currentChars+len(pRunes)+separatorChars <= opts.MaxChars {
 			if current.Len() > 0 {
 				current.WriteString("\n\n")
+				currentChars += 2
 			}
 			current.WriteString(p)
+			currentChars += len(pRunes)
 			continue
 		}
 		if current.Len() > 0 {
 			out = append(out, current.String())
 			current.Reset()
+			currentChars = 0
 		}
-		if len(p) > opts.MaxChars {
-			for start := 0; start < len(p); start += opts.MaxChars {
+		if len(pRunes) > opts.MaxChars {
+			for start := 0; start < len(pRunes); start += opts.MaxChars {
 				end := start + opts.MaxChars
-				if end > len(p) {
-					end = len(p)
+				if end > len(pRunes) {
+					end = len(pRunes)
 				}
-				out = append(out, p[start:end])
+				out = append(out, string(pRunes[start:end]))
 			}
 		} else {
 			current.WriteString(p)
+			currentChars = len(pRunes)
 		}
 	}
 	if current.Len() > 0 {
@@ -214,12 +227,11 @@ func applyOverlap(chunks []Chunk, overlap int) {
 		return
 	}
 	for i := 0; i < len(chunks)-1; i++ {
-		next := chunks[i+1].Text
-		add := next
-		if len(add) > overlap {
-			add = add[:overlap]
+		next := []rune(chunks[i+1].Text)
+		if len(next) > overlap {
+			next = next[:overlap]
 		}
-		chunks[i].Text += "\n\n" + add
+		chunks[i].Text += "\n\n" + string(next)
 	}
 }
 

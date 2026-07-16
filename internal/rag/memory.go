@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"regexp"
 	"sort"
@@ -87,6 +88,14 @@ func (s *Service) Remember(ctx context.Context, w MemoryWrite) (*Chunk, error) {
 		return nil, errors.New("rag: memory text matches instruction-injection pattern; refused")
 	}
 
+	/*
+		The memory collection is one persisted read/modify/write document. Keep
+		selection, embedding, persistence, and index replacement in one critical
+		section so concurrent HTTP writes cannot discard one another.
+	*/
+	s.memoryMu.Lock()
+	defer s.memoryMu.Unlock()
+
 	embedder, err := s.pickAnyEmbedder()
 	if err != nil {
 		return nil, err
@@ -104,18 +113,27 @@ func (s *Service) Remember(ctx context.Context, w MemoryWrite) (*Chunk, error) {
 	if len(vectors) != 1 {
 		return nil, errors.New("rag: embedder returned no vector for memory text")
 	}
+	if len(vectors[0]) == 0 {
+		return nil, errors.New("rag: embedder returned an empty vector for memory text")
+	}
+	if col.Dim == 0 {
+		col.Dim = len(vectors[0])
+	} else if col.Dim != len(vectors[0]) {
+		return nil, fmt.Errorf("rag: memory vector dim %d != collection dim %d", len(vectors[0]), col.Dim)
+	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	imp := w.Importance
 	if imp <= 0 {
 		imp = defaultImportance(kind, w.Pinned)
 	}
 
+	ordinal := len(col.Chunks)
 	chunk := Chunk{
-		ID:           memoryChunkID(w.ProfileID, kind, now, w.Text),
+		ID:           memoryChunkID(w.ProfileID, kind, now, w.Text, ordinal),
 		Source:       "user-input",
 		Heading:      kind,
-		Ordinal:      len(col.Chunks),
+		Ordinal:      ordinal,
 		Text:         w.Text,
 		Vector:       vectors[0],
 		Kind:         kind,
@@ -148,6 +166,8 @@ func (s *Service) Forget(ctx context.Context, profileID, chunkID string) error {
 	if profileID == "" || chunkID == "" {
 		return errors.New("rag: profileID and chunkID required")
 	}
+	s.memoryMu.Lock()
+	defer s.memoryMu.Unlock()
 	col, err := s.Store.Load(MemoryCollectionName)
 	if err != nil {
 		return err
@@ -282,6 +302,9 @@ func (s *Service) openOrCreateMemoryCollection(embedder embedderShim) (*Collecti
 		}
 		return existing, nil
 	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	return &Collection{
 		Version:    CollectionVersion,
@@ -301,17 +324,53 @@ type embedderShim interface {
 	EmbedTexts(ctx context.Context, texts []string) ([][]float32, error)
 }
 
-/* pickAnyEmbedder returns one registered embedder, preferring the one that matches the memory collection. */
+/*
+pickAnyEmbedder resolves the private-memory embedding backend. An existing
+collection's embedding space remains authoritative but must agree with an
+explicit operator preference. A new collection uses MemoryEmbedderID; without
+one, exactly one registered embedder is required. Multiple candidates fail
+closed so memory text is never sent to a random local or remote backend.
+*/
 func (s *Service) pickAnyEmbedder() (embedderShim, error) {
-	if existing, err := s.Store.Load(MemoryCollectionName); err == nil {
-		if e, ok := s.Embedders[existing.EmbedderID]; ok {
+	existing, err := s.Store.Load(MemoryCollectionName)
+	if err == nil {
+		if s.MemoryEmbedderID != "" && existing.EmbedderID != s.MemoryEmbedderID {
+			return nil, fmt.Errorf(
+				"rag: memory collection embedder %q != configured memory embedder %q",
+				existing.EmbedderID, s.MemoryEmbedderID,
+			)
+		}
+		e, ok := s.Embedders[existing.EmbedderID]
+		if !ok {
+			return nil, fmt.Errorf("rag: memory collection requires unavailable embedder %q", existing.EmbedderID)
+		}
+		return e, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	if s.MemoryEmbedderID != "" {
+		e, ok := s.Embedders[s.MemoryEmbedderID]
+		if !ok {
+			return nil, fmt.Errorf("rag: configured memory embedder %q is unavailable", s.MemoryEmbedderID)
+		}
+		return e, nil
+	}
+	if len(s.Embedders) == 1 {
+		for _, e := range s.Embedders {
 			return e, nil
 		}
 	}
-	for _, e := range s.Embedders {
-		return e, nil
+	if len(s.Embedders) == 0 {
+		return nil, errors.New("rag: no embedders registered")
 	}
-	return nil, errors.New("rag: no embedders registered")
+	ids := make([]string, 0, len(s.Embedders))
+	for id := range s.Embedders {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return nil, fmt.Errorf("rag: ambiguous memory embedder across %v; configure one explicitly", ids)
 }
 
 /* defaultImportance returns a kind-specific default boost weight. */
@@ -347,8 +406,8 @@ func recencyFactor(lastAccessedRFC3339 string, now time.Time) float32 {
 	return float32(1.0 / (1.0 + 0.05*days))
 }
 
-/* memoryChunkID is deterministic from profile + kind + created_at + text. */
-func memoryChunkID(profile, kind, createdAt, text string) string {
+/* memoryChunkID is deterministic from profile + kind + created_at + text + ordinal. */
+func memoryChunkID(profile, kind, createdAt, text string, ordinal int) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte(profile))
 	_, _ = h.Write([]byte("\x00"))
@@ -357,6 +416,8 @@ func memoryChunkID(profile, kind, createdAt, text string) string {
 	_, _ = h.Write([]byte(createdAt))
 	_, _ = h.Write([]byte("\x00"))
 	_, _ = h.Write([]byte(text))
+	_, _ = h.Write([]byte("\x00"))
+	_, _ = fmt.Fprintf(h, "%d", ordinal)
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 

@@ -1,6 +1,9 @@
 package rag
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 /*
 TopicRouter maps a user query to a candidate set of collection names based
@@ -12,13 +15,33 @@ type TopicRouter struct {
 }
 
 /*
-DefaultTopicRouter returns the built-in keyword table for the five seeded
-collections. Keywords are matched case-insensitively against the user's
-message.
+DefaultTopicRouter returns the built-in keyword table for the shipped knowledge
+collections. Keywords are matched case-insensitively against the user's message.
 */
 func DefaultTopicRouter() *TopicRouter {
 	return &TopicRouter{
 		rules: map[string][]string{
+			"software-engineering": {
+				"software engineering", "clean architecture", "clean code",
+				"solid", "single responsibility", "open-closed", "open closed",
+				"liskov", "interface segregation", "dependency inversion",
+				"object-oriented", "object oriented", "oop", "code smell",
+				"refactoring", "design pattern", "test-driven", "tdd",
+			},
+			"computer-networks": {
+				"computer network", "networking", "tcp/ip", "tcp", "udp",
+				"dns", "tls", "ipv4", "ipv6", "icmp", "arp", "dhcp",
+				"bgp", "ospf", "ethernet", "vlan", "subnet", "cidr",
+				"routing", "router", "packet", "socket", "quic",
+				"network address translation", "firewall", "osi model",
+			},
+			"cybersecurity": {
+				"cybersecurity", "cyber security", "security", "secure coding",
+				"vulnerability", "exploit", "exploitation", "cve", "cwe",
+				"owasp", "threat model", "attack surface", "penetration test",
+				"fuzz", "sanitizer", "memory safety", "buffer overflow",
+				"sql injection", "xss", "ssrf", "csrf", "privilege escalation",
+			},
 			"laravel": {
 				"laravel", "eloquent", "artisan", "blade", "tinker",
 				"form request", "formrequest", "service container",
@@ -118,5 +141,6 @@ func (t *TopicRouter) Route(query string) []string {
 			}
 		}
 	}
+	sort.Strings(out)
 	return out
 }

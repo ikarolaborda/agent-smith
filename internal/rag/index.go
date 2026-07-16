@@ -52,6 +52,46 @@ func (i *Index) Names() []string {
 }
 
 /*
+DocumentNames returns only non-memory collections. Document retrieval must use
+this view rather than Names so the writable, per-profile memory namespace can
+never become a fallback document corpus.
+*/
+func (i *Index) DocumentNames() []string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	out := make([]string, 0, len(i.collections))
+	for name, collection := range i.collections {
+		if isMemoryCollection(collection) {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+/* HasDocuments reports whether filter selects at least one document collection. */
+func (i *Index) HasDocuments(filter []string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if len(filter) == 0 {
+		for _, collection := range i.collections {
+			if collection != nil && !isMemoryCollection(collection) && len(collection.Chunks) > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	for _, name := range filter {
+		collection := i.collections[name]
+		if collection != nil && !isMemoryCollection(collection) && len(collection.Chunks) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+/*
 EmbedderIDs returns the sorted, distinct embedder identities across all loaded
 collections. It is the corpus's source of truth for which embedding model a
 query must use: a query vector can only be compared against chunks embedded by
@@ -63,6 +103,9 @@ func (i *Index) EmbedderIDs() []string {
 	defer i.mu.RUnlock()
 	seen := map[string]struct{}{}
 	for _, c := range i.collections {
+		if isMemoryCollection(c) {
+			continue
+		}
 		if c.EmbedderID != "" {
 			seen[c.EmbedderID] = struct{}{}
 		}
@@ -83,11 +126,11 @@ func (i *Index) Get(name string) *Collection {
 }
 
 /*
-Search runs cosine TopK over the listed collections (or all, if filter is
-empty) restricted to the embedder identity of the query. K is the top-K per
-search; threshold is the minimum cosine similarity to return; perCollectionCap
-limits how many results any single collection can contribute (to avoid one
-corpus monopolizing the result set).
+Search runs cosine TopK over the listed document collections (or all documents,
+if filter is empty) restricted to the embedder identity of the query. Memory is
+always excluded, including under an explicit filter. K is the top-K per search;
+threshold is the minimum cosine similarity to return; perCollectionCap limits
+how many results any single collection can contribute.
 */
 func (i *Index) Search(query []float32, embedderID string, filter []string, k, perCollectionCap int, threshold float32) ([]SearchResult, error) {
 	if len(query) == 0 {
@@ -122,6 +165,14 @@ func (i *Index) Search(query []float32, embedderID string, filter []string, k, p
 		if !ok {
 			continue
 		}
+		/*
+			Memory is a separate, subject-scoped retrieval path. Enforce the
+			boundary here as defense in depth, including when a caller explicitly
+			passes "memory" in filter.
+		*/
+		if isMemoryCollection(c) {
+			continue
+		}
 		if c.EmbedderID != embedderID {
 			continue
 		}
@@ -137,6 +188,11 @@ func (i *Index) Search(query []float32, embedderID string, filter []string, k, p
 		all = all[:k]
 	}
 	return all, nil
+}
+
+/* isMemoryCollection recognizes both current metadata and the legacy reserved name. */
+func isMemoryCollection(collection *Collection) bool {
+	return collection == nil || collection.Kind == CollectionKindMemory || collection.Name == MemoryCollectionName
 }
 
 /* topKInCollection scores every chunk in a collection and returns the top N. */
