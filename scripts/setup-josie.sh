@@ -23,7 +23,7 @@ MODELFILE="configs/josie/Modelfile"
 BIN="bin/agent"
 
 # Collections shipped under docs/<name>; mirrors the Makefile `ingest` target.
-COLLECTIONS=(laravel php nestjs tailwind-css architectural-patterns native-php cs-fundamentals go-lang)
+COLLECTIONS=(laravel php nestjs tailwind-css architectural-patterns software-engineering native-php cs-fundamentals computer-networks go-lang cybersecurity)
 
 log() { printf '\033[32m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }

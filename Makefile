@@ -8,6 +8,7 @@ CONFIG      ?= configs/config.example.yaml
 # Cluster topology for the *-cluster targets. Override per machine:
 #   make serve-cluster CLUSTER=configs/cluster.example.yaml
 CLUSTER     ?= configs/cluster.local.yaml
+RAG_COLLECTIONS := laravel php nestjs tailwind-css architectural-patterns software-engineering native-php cs-fundamentals computer-networks go-lang cybersecurity
 
 .PHONY: build run run-cluster test lint fmt tidy docker clean web web-install serve serve-cluster ingest josie
 
@@ -39,7 +40,7 @@ serve-cluster: build
 	./bin/$(BINARY) --config $(CONFIG) --cluster-config $(CLUSTER) --serve
 
 ingest: build
-	@for c in laravel php nestjs tailwind-css architectural-patterns native-php cs-fundamentals go-lang cybersecurity; do \
+	@for c in $(RAG_COLLECTIONS); do \
 	  echo "ingesting $$c..."; \
 	  ./bin/$(BINARY) --config $(CONFIG) --ingest --collection $$c --source docs/$$c --embedder ollama --embed-model nomic-embed-text || exit 1; \
 	done
