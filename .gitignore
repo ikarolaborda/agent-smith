@@ -44,3 +44,9 @@ Thumbs.db
 # RAG cached embeddings (re-ingested on first run)
 data/rag/collections/*.json
 !data/rag/collections/.gitkeep
+
+# Autonomous GGUF downloads can be tens of gigabytes. The normal default is
+# outside the repository; this covers the no-home fallback and local overrides.
+data/models/
+*.gguf
+*.gguf.part

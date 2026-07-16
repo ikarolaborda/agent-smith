@@ -21,6 +21,43 @@ providers:
     model: huihui_ai/gpt-oss-abliterated:20b
     stream: true
 
+  # llamacpp — SELF-MANAGED local model: agent-smith downloads the GGUF from
+  # Hugging Face on its own and supervises a local llama-server subprocess
+  # (OpenAI-compatible /v1). No Ollama, no cgo. Requires the `llama-server`
+  # binary on PATH (build/install llama.cpp). Set default_provider: llamacpp
+  # or run with --provider llamacpp. Assess without downloading first:
+  #   ./bin/agent --inspect-model hf.co/2lains/Huihui-Step3-VL-10B-abliterated-GGUF:Q4_K_M
+  llamacpp:
+    # Model name advertised to callers / echoed to llama-server.
+    model: huihui-step3-vl-10b-q4
+    llama_cpp:
+      # Source repos containing only Safetensors are rejected. Configure an
+      # exact GGUF conversion and pin multimodal projectors explicitly.
+      repo: 2lains/Huihui-Step3-VL-10B-abliterated-GGUF
+      file: Huihui-Step3-VL-10B-Q4_K_M.gguf
+      quant: Q4_K_M  # consistency assertion: must match the pinned file
+      mmproj_file: Step3-VL-10B-mmproj-F16.gguf
+      # Mutable names are resolved to an immutable commit before artifact GETs.
+      revision: main
+      # Or skip the download and serve an existing local file instead:
+      # model_path: /path/to/model.gguf
+      # mmproj_path: /path/to/mmproj.gguf
+      # Where downloaded weights are stored (default: ~/.agent-smith/models).
+      # models_dir: /volume/with/enough/free/space/agent-smith-models
+      # Optional Hugging Face token for gated/private repos (else $HF_TOKEN).
+      hf_token: ${HF_TOKEN}
+      # These admitted values are passed explicitly. Never start at a model's
+      # advertised maximum context: KV memory grows with context and parallelism.
+      binary: llama-server          # resolved from PATH
+      # host: 127.0.0.1             # loopback only; an ephemeral API key is generated
+      # port: 0                     # 0 = auto-select a free port
+      ctx_size: 4096
+      parallel: 1
+      # gpu_layers: 99              # tune only after measuring the exact backend
+      jinja: true                   # use the model's own chat template (tool calls)
+      startup_timeout_seconds: 300  # generous: large models load for minutes
+      # extra_args: ["--flash-attn"]
+
   # abliteration.ai — OpenAI-compatible REMOTE endpoint (NOT offline). Only
   # registers when ABLITERATION_AI_API_KEY is set; defaults to a low temperature
   # (0.2) for factual, low-creativity output. Set the model to an id served by

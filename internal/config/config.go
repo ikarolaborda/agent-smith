@@ -12,8 +12,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
@@ -27,6 +29,41 @@ type ProviderConfig struct {
 	APIKey  string `yaml:"api_key"`
 	BaseURL string `yaml:"base_url"`
 	Model   string `yaml:"model"`
+	/*
+		LlamaCpp is the optional configuration for the self-managed llama.cpp
+		provider, which downloads GGUF weights and supervises a local
+		llama-server subprocess. It is only consulted for a provider entry named
+		"llamacpp" and is ignored (and may be nil) for every other provider.
+	*/
+	LlamaCpp *LlamaCppConfig `yaml:"llama_cpp"`
+}
+
+/*
+LlamaCppConfig configures the self-managed llama.cpp provider. Exactly one model
+source is required: ModelPath for an existing local .gguf, or Repo for a Hugging
+Face reference that agent-smith downloads on its own. All other fields are
+optional and fall back to safe defaults (loopback host, auto-selected port,
+llama-server on PATH).
+*/
+type LlamaCppConfig struct {
+	Binary                string   `yaml:"binary"`
+	ModelsDir             string   `yaml:"models_dir"`
+	Repo                  string   `yaml:"repo"`
+	File                  string   `yaml:"file"`
+	Quant                 string   `yaml:"quant"`
+	Revision              string   `yaml:"revision"`
+	MMProjFile            string   `yaml:"mmproj_file"`
+	ModelPath             string   `yaml:"model_path"`
+	MMProjPath            string   `yaml:"mmproj_path"`
+	HFToken               string   `yaml:"hf_token"`
+	Host                  string   `yaml:"host"`
+	Port                  int      `yaml:"port"`
+	CtxSize               int      `yaml:"ctx_size"`
+	Parallel              int      `yaml:"parallel"`
+	GPULayers             int      `yaml:"gpu_layers"`
+	Jinja                 bool     `yaml:"jinja"`
+	ExtraArgs             []string `yaml:"extra_args"`
+	StartupTimeoutSeconds int      `yaml:"startup_timeout_seconds"`
 }
 
 /* AgentConfig controls the agent loop's high-level behavior. */
@@ -110,6 +147,20 @@ func ApplyEnvOverrides(cfg *Config) error {
 		p.APIKey = os.ExpandEnv(p.APIKey)
 		p.BaseURL = os.ExpandEnv(p.BaseURL)
 		p.Model = os.ExpandEnv(p.Model)
+		if p.LlamaCpp != nil {
+			p.LlamaCpp.Binary = os.ExpandEnv(p.LlamaCpp.Binary)
+			p.LlamaCpp.HFToken = os.ExpandEnv(p.LlamaCpp.HFToken)
+			p.LlamaCpp.File = os.ExpandEnv(p.LlamaCpp.File)
+			p.LlamaCpp.MMProjFile = os.ExpandEnv(p.LlamaCpp.MMProjFile)
+			p.LlamaCpp.ModelPath = os.ExpandEnv(p.LlamaCpp.ModelPath)
+			p.LlamaCpp.MMProjPath = os.ExpandEnv(p.LlamaCpp.MMProjPath)
+			p.LlamaCpp.ModelsDir = os.ExpandEnv(p.LlamaCpp.ModelsDir)
+			p.LlamaCpp.Repo = os.ExpandEnv(p.LlamaCpp.Repo)
+			p.LlamaCpp.Revision = os.ExpandEnv(p.LlamaCpp.Revision)
+			for i := range p.LlamaCpp.ExtraArgs {
+				p.LlamaCpp.ExtraArgs[i] = os.ExpandEnv(p.LlamaCpp.ExtraArgs[i])
+			}
+		}
 		cfg.Providers[name] = p
 	}
 	return nil
@@ -130,5 +181,58 @@ func validate(cfg *Config) error {
 	if cfg.Agent.MaxIterations < 0 {
 		return fmt.Errorf("config: agent.max_iterations must be non-negative, got %d", cfg.Agent.MaxIterations)
 	}
+	for name, provider := range cfg.Providers {
+		if provider.LlamaCpp == nil {
+			continue
+		}
+		if name != "llamacpp" {
+			return fmt.Errorf("config: provider %q has llama_cpp settings; use the reserved provider name %q", name, "llamacpp")
+		}
+		if err := validateLlamaCpp(provider.LlamaCpp); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func validateLlamaCpp(cfg *LlamaCppConfig) error {
+	hasRepo := strings.TrimSpace(cfg.Repo) != ""
+	hasLocal := strings.TrimSpace(cfg.ModelPath) != ""
+	if hasRepo == hasLocal {
+		return errors.New("config: providers.llamacpp.llama_cpp requires exactly one of repo or model_path")
+	}
+	if hasRepo && cfg.MMProjPath != "" {
+		return errors.New("config: providers.llamacpp.llama_cpp.mmproj_path is only valid with model_path; use mmproj_file for a repository")
+	}
+	if hasLocal && (cfg.File != "" || cfg.Quant != "" || cfg.Revision != "" || cfg.MMProjFile != "") {
+		return errors.New("config: repository selectors file, quant, revision, and mmproj_file cannot be combined with model_path")
+	}
+	if cfg.Host != "" && !isLoopbackHost(cfg.Host) {
+		return fmt.Errorf("config: providers.llamacpp.llama_cpp.host %q is not loopback; the supervised endpoint is intentionally local-only", cfg.Host)
+	}
+	if cfg.Port < 0 || cfg.Port > 65535 {
+		return fmt.Errorf("config: providers.llamacpp.llama_cpp.port must be between 0 and 65535, got %d", cfg.Port)
+	}
+	if cfg.CtxSize < 0 {
+		return fmt.Errorf("config: providers.llamacpp.llama_cpp.ctx_size must be non-negative, got %d", cfg.CtxSize)
+	}
+	if cfg.Parallel < 0 {
+		return fmt.Errorf("config: providers.llamacpp.llama_cpp.parallel must be non-negative, got %d", cfg.Parallel)
+	}
+	if cfg.GPULayers < 0 {
+		return fmt.Errorf("config: providers.llamacpp.llama_cpp.gpu_layers must be non-negative, got %d", cfg.GPULayers)
+	}
+	if cfg.StartupTimeoutSeconds < 0 {
+		return fmt.Errorf("config: providers.llamacpp.llama_cpp.startup_timeout_seconds must be non-negative, got %d", cfg.StartupTimeoutSeconds)
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

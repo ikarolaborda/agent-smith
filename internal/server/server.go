@@ -62,7 +62,16 @@ type Options struct {
 		Config.Providers. Used by tests to inject fake provider clients;
 		production callers should leave it nil.
 	*/
-	Providers      map[string]llm.Provider
+	Providers map[string]llm.Provider
+	/*
+		ExtraProviders are additive: unlike Providers (which replaces the
+		config-built set), these are merged on TOP of the providers built from
+		Config.Providers, so a self-managed provider like llamacpp — whose
+		subprocess lifecycle is owned by the caller, not the server — can coexist
+		with the configured cloud/ollama providers. An extra provider overrides a
+		config-built one of the same name.
+	*/
+	ExtraProviders map[string]llm.Provider
 	AllowedOrigins []string
 	ReadTimeout    time.Duration
 	WriteTimeout   time.Duration
@@ -195,7 +204,13 @@ func New(opts Options) (*Server, error) {
 		logger = slog.Default()
 	}
 	if opts.Addr == "" {
-		opts.Addr = ":9090"
+		/*
+			The API has profile-scoped memory and mutating agent tools but no
+			authentication boundary. Keep a default launch local to the host;
+			operators who deliberately put it behind an authenticated reverse proxy
+			can still opt into an all-interface address explicitly.
+		*/
+		opts.Addr = "127.0.0.1:9090"
 	}
 
 	s := &Server{
@@ -257,11 +272,20 @@ func New(opts Options) (*Server, error) {
 				OwnedBy:        name,
 				Provider:       name,
 				Model:          model,
-				SupportsVision: cloudModelSupportsVision(name, model),
+				SupportsVision: providerSupportsVision(prov, name, model),
 			})
 		}
 	} else {
 		for name, p := range opts.Config.Providers {
+			/*
+				llamacpp is self-managed: it needs a downloaded model and a
+				supervised llama-server subprocess, which is built and owned by
+				the caller and injected via ExtraProviders. Skip it here so the
+				config-path builder does not report it as unavailable.
+			*/
+			if name == "llamacpp" {
+				continue
+			}
 			prov, err := buildProvider(name, p)
 			if err != nil {
 				logger.Warn("provider unavailable", "provider", name, "err", err)
@@ -280,6 +304,24 @@ func New(opts Options) (*Server, error) {
 			logger.Info("provider ready", "provider", name, "model", p.Model)
 		}
 	}
+	for name, prov := range opts.ExtraProviders {
+		s.providers[name] = prov
+		model := ""
+		if cfg, ok := opts.Config.Providers[name]; ok {
+			model = cfg.Model
+		}
+		s.models = append(s.models, modelEntry{
+			ID:             name + "/" + model,
+			Object:         "model",
+			Created:        created,
+			OwnedBy:        name,
+			Provider:       name,
+			Model:          model,
+			SupportsVision: providerSupportsVision(prov, name, model),
+		})
+		logger.Info("provider ready", "provider", name, "model", model)
+	}
+
 	if len(s.providers) == 0 {
 		logger.Warn("no providers ready — chat completions will return 503")
 	}
@@ -397,6 +439,19 @@ func cloudModelSupportsVision(provider, model string) bool {
 	default:
 		return false
 	}
+}
+
+/*
+providerSupportsVision lets a self-managed runtime report a capability learned
+from its resolved artifacts (for example, a llama.cpp model with a validated
+mmproj) instead of guessing from the model name. Cloud clients do not expose
+this method, so they retain the conservative name-based fallback.
+*/
+func providerSupportsVision(prov llm.Provider, provider, model string) bool {
+	if capable, ok := prov.(interface{ SupportsVision() bool }); ok {
+		return capable.SupportsVision()
+	}
+	return cloudModelSupportsVision(provider, model)
 }
 
 /*
@@ -547,7 +602,7 @@ func buildProvider(name string, p config.ProviderConfig) (llm.Provider, error) {
 
 /*
 shouldWebSearch applies the precedence rules: operator kill switch first,
-then per-request override, then provider default (true for Ollama only).
+then per-request override, then the local/refusal-removed provider default.
 */
 func (s *Server) shouldWebSearch(provName string, requested *bool) bool {
 	if !s.webSearchEnabled {
@@ -561,8 +616,8 @@ func (s *Server) shouldWebSearch(provName string, requested *bool) bool {
 	}
 	/*
 		Default web grounding ON for the providers most prone to fabrication when
-		left ungrounded. The cluster provider runs local 70B/72B models (exo / MLX
-		/ llama.cpp) exactly like Ollama, so it needs the same hallucination-
+		left ungrounded. The cluster and self-managed llamacpp providers run local
+		models exactly like Ollama, so they need the same hallucination-
 		suppressing grounding by default. The remote abliteration model is a
 		refusal-removed model that — as observed in this lab — confidently
 		fabricates CVE identifiers, CVSS scores, and version ranges when answered
@@ -570,7 +625,7 @@ func (s *Server) shouldWebSearch(provName string, requested *bool) bool {
 		exactly that failure. The operator kill switch (--no-web-search) and the
 		per-request override both still take precedence over this default.
 	*/
-	return provName == "ollama" || provName == "cluster" || provName == "abliteration"
+	return provName == "ollama" || provName == "llamacpp" || provName == "cluster" || provName == "abliteration"
 }
 
 /*

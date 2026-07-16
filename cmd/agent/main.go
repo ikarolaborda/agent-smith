@@ -11,6 +11,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/llm/abliteration"
 	"github.com/ikarolaborda/agent-smith/internal/llm/anthropic"
+	"github.com/ikarolaborda/agent-smith/internal/llm/llamacpp"
 	"github.com/ikarolaborda/agent-smith/internal/llm/ollama"
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
 	"github.com/ikarolaborda/agent-smith/internal/logging"
@@ -74,6 +76,8 @@ type flags struct {
 	refineLoop      bool
 	refineIters     int
 	refineTO        time.Duration
+	pull            string
+	inspectModel    string
 }
 
 func main() {
@@ -88,12 +92,12 @@ func main() {
 func parseFlags() flags {
 	var f flags
 	flag.StringVar(&f.configPath, "config", "configs/config.example.yaml", "path to YAML config file")
-	flag.StringVar(&f.provider, "provider", "", "override default provider (openai, anthropic, ollama)")
+	flag.StringVar(&f.provider, "provider", "", "override default provider (openai, anthropic, ollama, llamacpp, abliteration)")
 	flag.StringVar(&f.model, "model", "", "override provider model")
 	flag.StringVar(&f.prompt, "prompt", "", "single-shot prompt; if empty, read lines from stdin")
 	flag.BoolVar(&f.stream, "stream", false, "stream the assistant response incrementally")
 	flag.BoolVar(&f.serve, "serve", false, "start the HTTP+SSE server and serve the embedded React UI instead of the stdin loop")
-	flag.StringVar(&f.addr, "addr", ":9090", "address to bind when --serve is set")
+	flag.StringVar(&f.addr, "addr", "127.0.0.1:9090", "address to bind when --serve is set (set :9090 explicitly to expose on every interface)")
 	flag.BoolVar(&f.ingest, "ingest", false, "ingest markdown docs into a RAG collection and exit")
 	flag.BoolVar(&f.buildDataset, "build-dataset", false, "generate a Chat-SFT JSONL dataset from a folder of source files via the selected provider, then exit")
 	flag.StringVar(&f.datasetSrc, "dataset-source", "", "directory of .md/.txt source files when --build-dataset is set")
@@ -116,6 +120,8 @@ func parseFlags() flags {
 	flag.BoolVar(&f.refineLoop, "refine-loop", false, "OPT-IN single-shot refinement loop (requires --prompt + OpenAI judge): regenerate the answer with the gpt-5.x judge's critique until it is judged USABLE (grounded, feasible, honestly scoped) or the iteration budget is exhausted. Anti-fabrication: an honest negative passes; the loop never fakes a pass. CLI-only.")
 	flag.IntVar(&f.refineIters, "refine-max-iters", refine.DefaultMaxIters, "maximum refinement iterations when --refine-loop is set")
 	flag.DurationVar(&f.refineTO, "refine-timeout", refine.DefaultRoundTimeout, "per-round timeout (generate+judge) when --refine-loop is set")
+	flag.StringVar(&f.pull, "pull", "", "download a GGUF model from Hugging Face and exit (e.g. hf.co/ggml-org/gemma-3-1b-it-GGUF:Q4_K_M). Uses the llamacpp provider's models_dir/hf_token when configured.")
+	flag.StringVar(&f.inspectModel, "inspect-model", "", "resolve a GGUF artifact manifest, inspect this host, print the fit report as JSON, and exit without downloading model data")
 	flag.Parse()
 	return f
 }
@@ -138,6 +144,14 @@ func run(f flags) error {
 	logger := logging.New(logging.Options{Format: cfg.Logging.Format, Level: cfg.Logging.Level})
 	logger.Info("agent starting", "config", f.configPath, "provider", chooseProviderName(cfg, f), "stream", f.stream, "serve", f.serve, "ingest", f.ingest)
 
+	if f.inspectModel != "" {
+		return runInspectModel(ctx, cfg, f, logger)
+	}
+
+	if f.pull != "" {
+		return runPull(ctx, cfg, f, logger)
+	}
+
 	if f.ingest {
 		return runIngest(ctx, cfg, f, logger)
 	}
@@ -159,14 +173,34 @@ func run(f flags) error {
 		defer func() { _ = cp.Close(context.Background()) }()
 		provider = cp
 	} else {
-		provider, err = buildProvider(cfg, f)
+		provider, err = buildProvider(ctx, cfg, f, logger)
 		if err != nil {
 			return fmt.Errorf("build provider: %w", err)
+		}
+		/*
+			A self-managing provider (llamacpp supervises a llama-server child)
+			exposes Close; stop the subprocess on exit so no server is orphaned.
+		*/
+		if c, ok := provider.(interface{ Close(context.Context) error }); ok {
+			defer func() { _ = c.Close(context.Background()) }()
 		}
 	}
 
 	a := agent.New(provider, buildTools(f, logger), cfg.Agent.SystemPrompt, cfg.Agent.MaxIterations, logger)
 	a.Verifier = server.BuildAnswerVerifier(cfg, f.verifyCVE, f.validateVuln, logger)
+	/*
+		Grounding belongs above the provider boundary. Attach it to the ordinary
+		CLI paths too, so switching from the web UI to --prompt/interactive mode
+		does not silently drop the knowledge layer for the exact same model.
+	*/
+	if !f.disableRAG {
+		ragSvc, ragErr := buildRAG(cfg, &f, logger)
+		if ragErr != nil {
+			return fmt.Errorf("initialize required knowledge layer: %w", ragErr)
+		}
+		a.RAG = ragSvc
+		a.WebSearch = !f.disableWeb && isLocalProvider(provider.Name())
+	}
 
 	if f.refineLoop {
 		if f.prompt == "" {
@@ -179,6 +213,16 @@ func run(f flags) error {
 		return runOnce(ctx, a, f.prompt)
 	}
 	return runInteractive(ctx, a, os.Stdin, os.Stdout)
+}
+
+/* isLocalProvider selects providers whose CLI web-grounding default is enabled. */
+func isLocalProvider(name string) bool {
+	switch name {
+	case "ollama", "llamacpp", "cluster", "abliteration":
+		return true
+	default:
+		return false
+	}
 }
 
 /*
@@ -221,19 +265,32 @@ func logExecBanner(f flags, logger *slog.Logger) {
 /*
 buildRAG constructs the RAG service with the same grounding posture used by the
 server: optional chunk-count widening for large-context cluster models, web
-grounding, and Context7 documentation augmentation. It is shared by runServe and
-runRefine so both paths ground identically. Returns nil when the service cannot
-start (the caller treats a nil service as "no augmentation").
+grounding, and Context7 documentation augmentation. It is shared by CLI and
+server paths so both ground identically. Failure to load the required embedded
+knowledge layer is returned to the caller and stops startup.
 */
-func buildRAG(cfg *config.Config, f *flags, logger *slog.Logger) *rag.Service {
+func buildRAG(cfg *config.Config, f *flags, logger *slog.Logger) (*rag.Service, error) {
 	embedders, err := buildEmbedders(cfg, *f)
 	if err != nil {
 		logger.Warn("rag: embedders not initialized", "err", err)
 	}
 	ragSvc, err := rag.NewService(f.ragDir, embedders, logger)
 	if err != nil {
-		logger.Warn("rag: service not started", "err", err)
-		return nil
+		return nil, err
+	}
+	/*
+		Memory may contain private project/profile facts. Bind it to the
+		operator-selected --embedder backend instead of allowing the first write
+		to choose nondeterministically from every configured provider.
+	*/
+	memoryEmbedderID, memoryErr := requestedMemoryEmbedderID(*f)
+	if memoryErr != nil {
+		return nil, memoryErr
+	}
+	ragSvc.MemoryEmbedderID = memoryEmbedderID
+	if _, ok := embedders[memoryEmbedderID]; !ok {
+		logger.Warn("rag: preferred memory embedder unavailable; memory writes are disabled until it is configured",
+			"embedder", memoryEmbedderID)
 	}
 	if f.ragMaxChunks > 0 {
 		if f.ragMaxChunks > 64 {
@@ -258,7 +315,7 @@ func buildRAG(cfg *config.Config, f *flags, logger *slog.Logger) *rag.Service {
 			logger.Info("context7 augmentation: disabled", "reason", "CONTEXT7_API_KEY not set")
 		}
 	}
-	return ragSvc
+	return ragSvc, nil
 }
 
 /*
@@ -266,12 +323,19 @@ runServe wires the embedded HTTP server with all configured providers and the
 default tool registry, then blocks until ctx is cancelled.
 */
 func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) error {
+	serverCfg, err := configForServe(cfg, f)
+	if err != nil {
+		return err
+	}
 	if f.workspace != "" {
 		logger.Info("workspace: agentic file mutation enabled", "root", f.workspace)
 	}
 	logExecBanner(f, logger)
 
-	ragSvc := buildRAG(cfg, &f, logger)
+	ragSvc, err := buildRAG(serverCfg, &f, logger)
+	if err != nil {
+		return fmt.Errorf("initialize required knowledge layer: %w", err)
+	}
 
 	/*
 		In cluster mode the server is wired with the single "cluster" provider:
@@ -281,7 +345,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 	*/
 	var injected map[string]llm.Provider
 	if f.clusterCfg != "" {
-		cp, err := buildClusterProvider(ctx, cfg, f, logger)
+		cp, err := buildClusterProvider(ctx, serverCfg, f, logger)
 		if err != nil {
 			return fmt.Errorf("build cluster provider: %w", err)
 		}
@@ -289,9 +353,28 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		injected = map[string]llm.Provider{cp.Name(): cp}
 	}
 
+	/*
+		The llamacpp provider must download+launch a llama-server before the
+		server can route to it, which the server's own per-config provider
+		builder cannot do (it has no process lifecycle). Build it here, own its
+		shutdown, and hand it to the server as an additive extra provider so it
+		coexists with the config-built cloud/ollama providers.
+	*/
+	var extra map[string]llm.Provider
+	if p, ok := serverCfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && f.clusterCfg == "" && serverCfg.DefaultProvider == "llamacpp" {
+		prov, err := buildLlamaCppProvider(ctx, p, logger)
+		if err != nil {
+			return fmt.Errorf("build llamacpp provider: %w", err)
+		}
+		if c, ok := prov.(interface{ Close(context.Context) error }); ok {
+			defer func() { _ = c.Close(context.Background()) }()
+		}
+		extra = map[string]llm.Provider{prov.Name(): prov}
+	}
+
 	srv, err := server.New(server.Options{
 		Addr:             f.addr,
-		Config:           cfg,
+		Config:           serverCfg,
 		Workspace:        f.workspace,
 		AllowExec:        f.allowExec,
 		ExecImageDigest:  f.execImageDigest,
@@ -302,11 +385,35 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		VerifyCVE:        f.verifyCVE,
 		ValidateVuln:     f.validateVuln,
 		Providers:        injected,
+		ExtraProviders:   extra,
 	})
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
 	return srv.ListenAndServe(ctx)
+}
+
+/* configForServe makes CLI provider/model overrides authoritative for empty-model API requests and the UI default. */
+func configForServe(cfg *config.Config, f flags) (*config.Config, error) {
+	if cfg == nil {
+		return nil, errors.New("serve: nil config")
+	}
+	selected := chooseProviderName(cfg, f)
+	provider, ok := cfg.Providers[selected]
+	if !ok {
+		return nil, fmt.Errorf("serve: provider %q has no config block", selected)
+	}
+	clone := *cfg
+	clone.DefaultProvider = selected
+	clone.Providers = make(map[string]config.ProviderConfig, len(cfg.Providers))
+	for name, candidate := range cfg.Providers {
+		clone.Providers[name] = candidate
+	}
+	if f.model != "" {
+		provider.Model = f.model
+		clone.Providers[selected] = provider
+	}
+	return &clone, nil
 }
 
 /*
@@ -320,7 +427,7 @@ func buildClusterProvider(ctx context.Context, cfg *config.Config, f flags, logg
 	if err != nil {
 		return nil, err
 	}
-	local, err := buildProvider(cfg, f)
+	local, err := buildProvider(ctx, cfg, f, logger)
 	if err != nil {
 		logger.Warn("cluster: local fallback provider unavailable", "err", err)
 		local = nil
@@ -339,7 +446,7 @@ func runBuildDataset(ctx context.Context, cfg *config.Config, f flags, logger *s
 	if f.datasetSrc == "" {
 		return errors.New("--build-dataset requires --dataset-source <dir>")
 	}
-	provider, err := buildProvider(cfg, f)
+	provider, err := buildProvider(ctx, cfg, f, logger)
 	if err != nil {
 		return fmt.Errorf("build provider: %w", err)
 	}
@@ -414,8 +521,8 @@ func runIngest(ctx context.Context, cfg *config.Config, f flags, logger *slog.Lo
 
 /*
 buildEmbedders constructs every embedder for which the relevant provider is
-configured (and credentialed). Returns an empty map when no embedder can be
-built; the server treats RAG as a soft feature.
+configured (and credentialed). An empty map still permits the required embedded
+lexical corpus; dense retrieval and writable memory remain unavailable.
 */
 func buildEmbedders(cfg *config.Config, f flags) (map[string]llm.Embedder, error) {
 	out := map[string]llm.Embedder{}
@@ -465,6 +572,28 @@ func buildSingleEmbedder(cfg *config.Config, f flags) (llm.Embedder, error) {
 	}
 }
 
+/* requestedMemoryEmbedderID resolves --embedder/--embed-model without contacting a backend. */
+func requestedMemoryEmbedderID(f flags) (string, error) {
+	name := f.embedder
+	if name == "" {
+		name = "ollama"
+	}
+	model := f.embedModel
+	switch name {
+	case "openai":
+		if model == "" {
+			model = "text-embedding-3-small"
+		}
+	case "ollama":
+		if model == "" {
+			model = "nomic-embed-text"
+		}
+	default:
+		return "", fmt.Errorf("unknown memory embedder provider %q", name)
+	}
+	return name + ":" + model, nil
+}
+
 /* chooseProviderName picks the active provider name from the flag or the config default. */
 func chooseProviderName(cfg *config.Config, f flags) string {
 	if f.provider != "" {
@@ -478,7 +607,7 @@ buildProvider resolves the active provider name, locates its config block,
 applies the --model override if set, and asks the llm registry to construct
 the concrete client.
 */
-func buildProvider(cfg *config.Config, f flags) (llm.Provider, error) {
+func buildProvider(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) (llm.Provider, error) {
 	name := chooseProviderName(cfg, f)
 	if name == "" {
 		return nil, errors.New("no provider selected and no default in config")
@@ -500,9 +629,219 @@ func buildProvider(cfg *config.Config, f flags) (llm.Provider, error) {
 		return llm.New(name, anthropic.Config{APIKey: pcfg.APIKey, BaseURL: pcfg.BaseURL, Model: pcfg.Model})
 	case "ollama":
 		return llm.New(name, ollama.Config{BaseURL: pcfg.BaseURL, Model: pcfg.Model})
+	case "llamacpp":
+		return buildLlamaCppProvider(ctx, pcfg, logger)
 	default:
 		return nil, fmt.Errorf("unknown provider %q (registered: %v)", name, llm.Names())
 	}
+}
+
+/*
+buildLlamaCppProvider downloads the model if needed, starts a local llama-server,
+and returns a Provider that owns the subprocess. The returned provider exposes
+Close; callers must defer it so the server is stopped on exit.
+*/
+func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logger *slog.Logger) (llm.Provider, error) {
+	lc := pcfg.LlamaCpp
+	if lc == nil {
+		return nil, errors.New("llamacpp: provider selected but no llama_cpp config block")
+	}
+
+	rc := llamacpp.RuntimeConfig{
+		Binary:         lc.Binary,
+		ModelPath:      lc.ModelPath,
+		MMProjPath:     lc.MMProjPath,
+		Host:           lc.Host,
+		Port:           lc.Port,
+		CtxSize:        effectiveLlamaContext(lc),
+		Parallel:       effectiveLlamaParallel(lc),
+		GPULayers:      lc.GPULayers,
+		Jinja:          lc.Jinja,
+		ExtraArgs:      lc.ExtraArgs,
+		StartupTimeout: time.Duration(lc.StartupTimeoutSeconds) * time.Second,
+		APIKey:         pcfg.APIKey,
+		Logger:         logger,
+	}
+	if lc.ModelPath == "" {
+		if lc.Repo == "" {
+			return nil, errors.New("llamacpp: set llama_cpp.model_path or llama_cpp.repo")
+		}
+		ref, err := llamacpp.ParseRef(lc.Repo)
+		if err != nil {
+			return nil, err
+		}
+		if lc.File != "" {
+			ref.File = lc.File
+		}
+		if lc.Quant != "" {
+			ref.Quant = lc.Quant
+		}
+		if lc.Revision != "" {
+			ref.Revision = lc.Revision
+		}
+		if lc.MMProjFile != "" {
+			ref.MMProjFile = lc.MMProjFile
+		}
+		modelsDir := lc.ModelsDir
+		if modelsDir == "" {
+			modelsDir = defaultModelsDir()
+		}
+		rc.Ref = &ref
+		rc.Downloader = llamacpp.NewDownloader(modelsDir, hfToken(lc.HFToken), logger)
+		rc.Downloader.ContextTokens = rc.CtxSize
+		rc.Downloader.Parallel = rc.Parallel
+	}
+
+	rt := llamacpp.NewRuntime(rc)
+	if err := rt.Start(ctx); err != nil {
+		return nil, err
+	}
+	prov, err := llamacpp.New(llamacpp.Config{Runtime: rt, Model: pcfg.Model, APIKey: pcfg.APIKey})
+	if err != nil {
+		_ = rt.Close(context.Background())
+		return nil, err
+	}
+	return prov, nil
+}
+
+/*
+runPull resolves and downloads a GGUF model without starting a server, so a
+model can be pre-fetched. It reuses the llamacpp provider's models_dir and token
+when a llama_cpp config block is present, else uses defaults and $HF_TOKEN.
+*/
+func runPull(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) error {
+	ref, dl, err := configuredLlamaDownload(cfg, f.pull, logger)
+	if err != nil {
+		return err
+	}
+	plan, err := dl.Inspect(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("pull preflight: %w", err)
+	}
+	if err := writeJSON(os.Stdout, plan); err != nil {
+		return fmt.Errorf("print pull preflight: %w", err)
+	}
+	if !plan.Fit.Fits {
+		return &llamacpp.FitError{Report: plan.Fit}
+	}
+	/* Download exactly the commit that produced the displayed fit report. */
+	ref.Revision = plan.Manifest.CommitSHA
+	local, err := dl.EnsureArtifacts(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("pull: %w", err)
+	}
+	for _, path := range local.ModelFiles {
+		fmt.Println(path)
+	}
+	if local.MMProj != "" {
+		fmt.Println(local.MMProj)
+	}
+	return nil
+}
+
+/* runInspectModel performs the same metadata and live-host admission as pull, without artifact GETs. */
+func runInspectModel(ctx context.Context, cfg *config.Config, f flags, logger *slog.Logger) error {
+	ref, dl, err := configuredLlamaDownload(cfg, f.inspectModel, logger)
+	if err != nil {
+		return err
+	}
+	plan, err := dl.Inspect(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("inspect model: %w", err)
+	}
+	if err := writeJSON(os.Stdout, plan); err != nil {
+		return fmt.Errorf("print model inspection: %w", err)
+	}
+	if !plan.Fit.Fits {
+		return &llamacpp.FitError{Report: plan.Fit}
+	}
+	return nil
+}
+
+/* configuredLlamaDownload applies repository selectors only to their configured repository. */
+func configuredLlamaDownload(cfg *config.Config, raw string, logger *slog.Logger) (llamacpp.Ref, *llamacpp.Downloader, error) {
+	ref, err := llamacpp.ParseRef(raw)
+	if err != nil {
+		return llamacpp.Ref{}, nil, err
+	}
+	modelsDir := defaultModelsDir()
+	token := hfToken("")
+	ctxSize := 4096
+	parallel := 1
+	if provider, ok := cfg.Providers["llamacpp"]; ok && provider.LlamaCpp != nil {
+		lc := provider.LlamaCpp
+		if lc.ModelsDir != "" {
+			modelsDir = lc.ModelsDir
+		}
+		token = hfToken(lc.HFToken)
+		ctxSize = effectiveLlamaContext(lc)
+		parallel = effectiveLlamaParallel(lc)
+		configuredRef, parseErr := llamacpp.ParseRef(lc.Repo)
+		if parseErr == nil && configuredRef.Repo == ref.Repo {
+			explicitQuant := ref.Quant != ""
+			if lc.File != "" && !explicitQuant {
+				ref.File = lc.File
+			}
+			if !explicitQuant {
+				switch {
+				case lc.Quant != "":
+					ref.Quant = lc.Quant
+				case configuredRef.Quant != "":
+					ref.Quant = configuredRef.Quant
+				}
+			}
+			if lc.Revision != "" {
+				ref.Revision = lc.Revision
+			}
+			if lc.MMProjFile != "" {
+				ref.MMProjFile = lc.MMProjFile
+			}
+		}
+	}
+	dl := llamacpp.NewDownloader(modelsDir, token, logger)
+	dl.ContextTokens = ctxSize
+	dl.Parallel = parallel
+	return ref, dl, nil
+}
+
+func effectiveLlamaContext(cfg *config.LlamaCppConfig) int {
+	if cfg != nil && cfg.CtxSize > 0 {
+		return cfg.CtxSize
+	}
+	return 4096
+}
+
+func effectiveLlamaParallel(cfg *config.LlamaCppConfig) int {
+	if cfg != nil && cfg.Parallel > 0 {
+		return cfg.Parallel
+	}
+	return 1
+}
+
+func writeJSON(w io.Writer, value any) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
+
+/* defaultModelsDir is where autonomously downloaded GGUF weights are stored. */
+func defaultModelsDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".agent-smith", "models")
+	}
+	return filepath.Join("data", "models")
+}
+
+/*
+hfToken resolves the Hugging Face access token: an explicit config value wins,
+otherwise the conventional HF_TOKEN environment variable (the same source
+llama.cpp's own -hf uses).
+*/
+func hfToken(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return os.Getenv("HF_TOKEN")
 }
 
 /* runOnce answers a single prompt and writes the result to stdout. */
@@ -533,7 +872,6 @@ func runRefine(ctx context.Context, cfg *config.Config, f flags, a *agent.Agent,
 	}
 
 	/* Ground each round like the server, and take the raw answer (no appended advisory). */
-	a.RAG = buildRAG(cfg, &f, logger)
 	a.WebSearch = !f.disableWeb
 	a.Verifier = nil
 

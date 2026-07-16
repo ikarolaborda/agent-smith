@@ -86,6 +86,42 @@ func TestServer_Models(t *testing.T) {
 	}
 }
 
+/*
+TestServer_ExtraProviders verifies the additive overlay: a self-managed provider
+(e.g. llamacpp) injected via ExtraProviders is registered on top of the
+config-built set and surfaces in /v1/models, while the "llamacpp" config entry
+is skipped by the config-path builder (it is owned by the caller).
+*/
+func TestServer_ExtraProviders(t *testing.T) {
+	cfg := &config.Config{
+		DefaultProvider: "llamacpp",
+		Providers: map[string]config.ProviderConfig{
+			"llamacpp": {Model: "local-gguf"},
+		},
+		Agent: config.AgentConfig{MaxIterations: 3},
+	}
+	srv, err := server.New(server.Options{
+		Addr:           ":0",
+		Config:         cfg,
+		ExtraProviders: map[string]llm.Provider{"llamacpp": &fakeProvider{}},
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"id":"llamacpp/local-gguf"`) {
+		t.Fatalf("extra provider not registered in models: %s", body)
+	}
+}
+
 func TestServer_Providers(t *testing.T) {
 	ts := newTestServer(t, map[string]llm.Provider{"fake": &fakeProvider{}})
 	resp, err := http.Get(ts.URL + "/v1/providers")
