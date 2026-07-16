@@ -722,6 +722,26 @@ func (r *Runtime) waitReady(ctx context.Context, serverURL, apiKey string, waitD
 			ready := modelsResp.StatusCode >= 200 && modelsResp.StatusCode < 300 && decodeErr == nil && payload.Object == "list" && len(payload.Data) > 0
 			_ = modelsResp.Body.Close()
 			if ready {
+				/*
+					The authenticated probe proves the key WORKS, not that the
+					server REJECTS an unauthenticated request. If --api-key-file is
+					unsupported/ignored by this build, the endpoint is open to every
+					local process while the probe still passes. When a key is
+					configured, confirm a keyless request to a protected route is
+					refused; fail closed otherwise rather than serve unauthenticated.
+				*/
+				if apiKey != "" {
+					unauthReq, uerr := http.NewRequestWithContext(ctx, http.MethodGet, serverURL+"/v1/models", nil)
+					if uerr == nil {
+						if unauthResp, derr := client.Do(unauthReq); derr == nil {
+							code := unauthResp.StatusCode
+							_ = unauthResp.Body.Close()
+							if code >= 200 && code < 300 {
+								return fmt.Errorf("llamacpp: llama-server answered an unauthenticated request (status %d); the API key is not being enforced — is --api-key-file supported by this build?", code)
+							}
+						}
+					}
+				}
 				return nil
 			}
 		}
