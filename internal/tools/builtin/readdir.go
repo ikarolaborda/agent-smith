@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,6 +48,21 @@ func NewReadDir(root string) *ReadDir {
 		root = abs
 	}
 	return &ReadDir{Root: root, MaxBytes: DefaultReadDirMaxBytes, MaxFileBytes: DefaultReadDirMaxFileBytes}
+}
+
+/*
+readCappedFile reads at most maxBytes+1 bytes so allocation is bounded by the
+per-file cap (a multi-GB file cannot OOM a single call), while the extra byte
+still lets the caller detect that truncation occurred.
+*/
+func readCappedFile(path string, maxBytes int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return io.ReadAll(io.LimitReader(f, int64(maxBytes)+1))
 }
 
 func (*ReadDir) Name() string { return "read_dir" }
@@ -137,12 +153,27 @@ func (t *ReadDir) Execute(_ context.Context, raw json.RawMessage) (string, error
 	})
 	sort.Strings(files)
 
+	rootReal, rootErr := filepath.EvalSymlinks(t.Root)
+	if rootErr != nil {
+		rootReal = t.Root
+	}
+
 	var b strings.Builder
 	used := 0
 	included, skipped := 0, 0
 	truncated := false
 	for _, p := range files {
-		data, err := os.ReadFile(p)
+		/*
+			Mirror file_read's symlink confinement: WalkDir yields a symlinked
+			file as a plain entry, so without resolving the link a `docs/x ->
+			/etc/passwd` symlink would read the outside target. Require the
+			resolved real path to stay inside the canonicalized root.
+		*/
+		if real, err := filepath.EvalSymlinks(p); err == nil && !insideRoot(real, rootReal) {
+			skipped++
+			continue
+		}
+		data, err := readCappedFile(p, t.MaxFileBytes)
 		if err != nil {
 			skipped++
 			continue
