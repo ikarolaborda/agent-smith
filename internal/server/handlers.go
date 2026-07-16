@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -242,8 +243,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req chatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "malformed JSON body: "+err.Error())
+	if !decodeJSONRequest(w, r, &req, maxChatBodyBytes) {
 		return
 	}
 	if !req.Stream {
@@ -442,6 +442,41 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	env.Error.Message = msg
 	env.Error.Type = code
 	writeJSON(w, status, env)
+}
+
+/* Body-size caps for JSON request decoding. Chat carries base64 image parts. */
+const (
+	maxChatBodyBytes    = 24 << 20 /* 24 MiB */
+	maxControlBodyBytes = 1 << 20  /* 1 MiB for small control/mutation bodies */
+)
+
+/*
+decodeJSONRequest enforces the request hardening every mutating JSON endpoint
+needs and that was previously missing everywhere: it requires a JSON
+Content-Type (so a cross-origin "simple request" with text/plain — the shape a
+CSRF/DNS-rebinding page can send without a preflight — is rejected before it can
+cause a side effect) and caps the body with http.MaxBytesReader (so one large
+body cannot exhaust memory on an unauthenticated call). It writes the error
+response and returns false on any failure.
+*/
+func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) bool {
+	ct := r.Header.Get("Content-Type")
+	if ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+			writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+			return false
+		}
+	} else {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+		return false
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "malformed or oversized JSON body: "+err.Error())
+		return false
+	}
+	return true
 }
 
 /* newCompletionID mirrors OpenAI's `chatcmpl-...` prefix using the request time. */

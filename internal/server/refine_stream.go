@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -126,6 +127,17 @@ func streamRefine(ctx context.Context, enc *sseEncoder, id, model string, create
 	}
 	doneCh := make(chan outcome, 1)
 	go func() {
+		/*
+			net/http only recovers panics raised in the handler goroutine, not in
+			ones it spawns. Without this a panic anywhere under refine.Run (the
+			judge call, the provider stack) would crash the whole server process
+			instead of failing this one request.
+		*/
+		defer func() {
+			if p := recover(); p != nil {
+				doneCh <- outcome{err: fmt.Errorf("refine: panic: %v", p)}
+			}
+		}()
 		res, err := refine.Run(ctx, task, gen, judge, cfg)
 		doneCh <- outcome{res: res, err: err}
 	}()

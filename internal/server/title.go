@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"regexp"
 	"strings"
@@ -45,8 +44,7 @@ func (s *Server) handleTitle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req titleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "malformed JSON body: "+err.Error())
+	if !decodeJSONRequest(w, r, &req, maxControlBodyBytes) {
 		return
 	}
 

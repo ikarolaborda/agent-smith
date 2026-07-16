@@ -12,6 +12,38 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 )
 
+func TestDecodeJSONRequest_RejectsNonJSONContentTypeAndOversizedBody(t *testing.T) {
+	var dst struct {
+		X string `json:"x"`
+	}
+
+	/* No JSON Content-Type (the CSRF/simple-request shape) must be refused. */
+	plain := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"x":"y"}`))
+	plain.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	if decodeJSONRequest(rec, plain, &dst, 1<<20) {
+		t.Error("must reject a non-application/json Content-Type")
+	}
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("status = %d, want 415", rec.Code)
+	}
+
+	/* application/json with a charset parameter is accepted. */
+	ok := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"x":"y"}`))
+	ok.Header.Set("Content-Type", "application/json; charset=utf-8")
+	if !decodeJSONRequest(httptest.NewRecorder(), ok, &dst, 1<<20) || dst.X != "y" {
+		t.Error("must accept application/json with a charset parameter")
+	}
+
+	/* A body over the cap is refused. */
+	big := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"x":"`+strings.Repeat("A", 4096)+`"}`))
+	big.Header.Set("Content-Type", "application/json")
+	recBig := httptest.NewRecorder()
+	if decodeJSONRequest(recBig, big, &dst, 64) {
+		t.Error("must reject a body larger than the cap")
+	}
+}
+
 type ragSearchEmbedder struct{}
 
 func (ragSearchEmbedder) Identity() string { return "test:rag-search" }
@@ -48,6 +80,7 @@ func TestHandleRAGSearch_RedactsVectorsAndSubjectsAndCapsK(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/rag/search", bytes.NewBufferString(
 		`{"query":"server-redaction-canary","k":100000}`,
 	))
+	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	server.handleRAGSearch(recorder, req)
 

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -59,8 +58,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Path string `json:"path"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request", "malformed JSON body: "+err.Error())
+		if !decodeJSONRequest(w, r, &req, maxControlBodyBytes) {
 			return
 		}
 		path := strings.TrimSpace(req.Path)

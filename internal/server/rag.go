@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/ikarolaborda/agent-smith/internal/rag"
@@ -58,8 +57,7 @@ func (s *Server) handleRAGRemember(w http.ResponseWriter, r *http.Request) {
 		Importance float32 `json:"importance,omitempty"`
 		Pinned     bool    `json:"pinned,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	if !decodeJSONRequest(w, r, &req, maxControlBodyBytes) {
 		return
 	}
 	chunk, err := s.rag.Remember(r.Context(), rag.MemoryWrite{
@@ -91,8 +89,7 @@ func (s *Server) handleRAGForget(w http.ResponseWriter, r *http.Request) {
 		ProfileID string `json:"profile_id"`
 		ID        string `json:"id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	if !decodeJSONRequest(w, r, &req, maxControlBodyBytes) {
 		return
 	}
 	if err := s.rag.Forget(r.Context(), req.ProfileID, req.ID); err != nil {
@@ -144,8 +141,7 @@ func (s *Server) handleRAGCorrection(w http.ResponseWriter, r *http.Request) {
 		WrongAnswer   string `json:"wrong_answer"`
 		CorrectAnswer string `json:"correct_answer"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	if !decodeJSONRequest(w, r, &req, maxControlBodyBytes) {
 		return
 	}
 	text := "Question: " + req.Question +
@@ -183,8 +179,7 @@ func (s *Server) handleRAGSearch(w http.ResponseWriter, r *http.Request) {
 		Collection []string `json:"collection"`
 		K          int      `json:"k"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	if !decodeJSONRequest(w, r, &req, maxControlBodyBytes) {
 		return
 	}
 	if req.Query == "" {
