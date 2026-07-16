@@ -185,32 +185,52 @@ func (s *scheduler) memoryFits(name string, model ModelConfig) bool {
 		This applies EVEN under force_distribute: force_distribute waives the
 		single-node-first preference, never the safety limit.
 	*/
-	if !s.workersWithinSafeBudget(model) {
+	if !s.allNodesWithinSafeBudget(model) {
 		return false
 	}
 	return true
 }
 
 /*
-workersWithinSafeBudget reports whether every worker node's projected peak memory
-for this model stays inside its safe budget. Projected peak = weight slice +
-compute/KV reserve that scales with context. Logs and returns false on the first
-worker that would overflow.
+allNodesWithinSafeBudget reports whether EVERY participating node's projected
+peak memory stays inside its safe budget — the coordinator (tensor-split device
+0) included, not just the workers. In distributed mode the coordinator holds a
+weight slice like any node, so omitting it let a failed worker fit while the
+coordinator silently over-allocated: the exact OOM the gate exists to prevent.
+Projected peak = the node's normalized weight slice + a compute/KV reserve that
+scales with context. Logs and returns false on the first node that would
+overflow.
 */
-func (s *scheduler) workersWithinSafeBudget(model ModelConfig) bool {
-	share := s.workerTensorShare()
+func (s *scheduler) allNodesWithinSafeBudget(model ModelConfig) bool {
+	nodes := s.orderedNodes()
+	shares := s.nodeShares()
 	reserve := computeReserveGB(model.ContextTokens)
-	for _, w := range s.cfg.WorkerNodes() {
-		budget := s.nodeSafeModelGB(w)
-		projected := int(float64(model.MinMemoryGB)*share+0.5) + reserve
+	for i, n := range nodes {
+		/*
+			The coordinator (device 0) uses the same total-minus-reserve budget as
+			the single-node gate; workers use their own model-memory cap.
+		*/
+		budget := s.nodeSafeModelGB(n)
+		if i == 0 {
+			budget = s.coordinatorSafeMemoryGB()
+		}
+		projected := int(float64(model.MinMemoryGB)*shares[i]+0.5) + reserve
 		if projected > budget {
-			s.logger.Warn("cluster: worker slice exceeds its safe memory budget, refusing distributed launch (use a smaller context or single-node)",
-				"worker", w.ID, "projected_peak_gb", projected, "safe_budget_gb", budget,
-				"weight_share", share, "context_tokens", model.ContextTokens, "compute_reserve_gb", reserve)
+			s.logger.Warn("cluster: node slice exceeds its safe memory budget, refusing distributed launch (use a smaller context or single-node)",
+				"node", n.ID, "projected_peak_gb", projected, "safe_budget_gb", budget,
+				"weight_share", shares[i], "context_tokens", model.ContextTokens, "compute_reserve_gb", reserve)
 			return false
 		}
 	}
 	return true
+}
+
+/*
+orderedNodes lists nodes in tensor-split device order: the coordinator is
+device 0, followed by the workers. tensor_split values align to this order.
+*/
+func (s *scheduler) orderedNodes() []Node {
+	return append([]Node{s.cfg.CoordinatorNode()}, s.cfg.WorkerNodes()...)
 }
 
 /* nodeSafeModelGB is the node's hard cap on model-related memory; zero derives to half its RAM. */
@@ -222,27 +242,58 @@ func (s *scheduler) nodeSafeModelGB(n Node) int {
 }
 
 /*
-workerTensorShare is the fraction of the model assigned to the worker (the last
-tensor_split value; the coordinator is device 0). Defaults to the worker's share
-of total cluster RAM when no split is configured.
+nodeShares returns each node's fraction of the model weights, aligned to
+orderedNodes(). llama.cpp treats --tensor-split values as PROPORTIONAL weights
+that it normalizes, so "0.2,0.2" means a 50/50 split, not two 20% slices. The
+prior code read the single last value as an absolute fraction, which
+under-estimated every node's real slice — a fail-open hole in the admission
+gate. Normalize the split (sum then divide); fall back to a RAM-proportional
+share when no valid split is configured.
 */
-func (s *scheduler) workerTensorShare() float64 {
+func (s *scheduler) nodeShares() []float64 {
+	nodes := s.orderedNodes()
+	shares := make([]float64, len(nodes))
+
 	ts := strings.TrimSpace(s.cfg.Runtime.Llama.TensorSplit)
 	if ts != "" {
 		parts := strings.Split(ts, ",")
-		if v, err := strconv.ParseFloat(strings.TrimSpace(parts[len(parts)-1]), 64); err == nil && v > 0 {
-			return v
+		if len(parts) == len(nodes) {
+			weights := make([]float64, len(nodes))
+			sum := 0.0
+			valid := true
+			for i := range nodes {
+				v, err := strconv.ParseFloat(strings.TrimSpace(parts[i]), 64)
+				if err != nil || v < 0 {
+					valid = false
+					break
+				}
+				weights[i] = v
+				sum += v
+			}
+			if valid && sum > 0 {
+				for i := range weights {
+					shares[i] = weights[i] / sum
+				}
+				return shares
+			}
 		}
 	}
-	total := s.mgr.totalClusterMemoryGB()
-	workerMem := 0
-	for _, w := range s.cfg.WorkerNodes() {
-		workerMem += w.MemoryGB
+
+	total := 0
+	for _, n := range nodes {
+		total += n.MemoryGB
 	}
-	if total > 0 && workerMem > 0 {
-		return float64(workerMem) / float64(total)
+	if total > 0 {
+		for i, n := range nodes {
+			shares[i] = float64(n.MemoryGB) / float64(total)
+		}
+		return shares
 	}
-	return 0.5
+
+	for i := range shares {
+		shares[i] = 1.0 / float64(len(nodes))
+	}
+	return shares
 }
 
 /*

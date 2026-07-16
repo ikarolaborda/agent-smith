@@ -42,14 +42,24 @@ func TestScheduler(t *testing.T) {
 		if !s.memoryFits(BackendExo, cfg.Models[0]) {
 			t.Error("exo should fit using whole-cluster memory")
 		}
-		/* A model needing 80 GB does NOT fit the coordinator alone (local). */
+		/* A 50 GB model does NOT fit the coordinator alone (local budget 44) but
+		   DOES fit distributed: coordinator slice ~0.73*50+reserve stays under 44
+		   and the worker budget is neutralized here. */
 		big := cfg.Models[0]
-		big.MinMemoryGB = 80
+		big.MinMemoryGB = 50
 		if s.memoryFits(BackendLocal, big) {
-			t.Error("local must not claim to fit an 80 GB model on a 64 GB coordinator")
+			t.Error("local must not claim to fit a 50 GB model on a 64 GB coordinator")
 		}
 		if !s.memoryFits(BackendExo, big) {
-			t.Error("cluster (88 GB) should fit an 80 GB model")
+			t.Error("cluster should fit a 50 GB model whose per-node slices are safe")
+		}
+		/* An 80 GB model does NOT fit even distributed: the coordinator's own
+		   RAM-proportional slice (~58 GB) overflows its 44 GB safe budget. The
+		   pre-fix gate accepted this because it never bounded the coordinator. */
+		huge := cfg.Models[0]
+		huge.MinMemoryGB = 80
+		if s.memoryFits(BackendExo, huge) {
+			t.Error("cluster must refuse an 80 GB model whose coordinator slice overflows its safe budget")
 		}
 	})
 
@@ -86,21 +96,70 @@ func TestScheduler(t *testing.T) {
 		cfg := testConfig()
 		mgr := NewManager(cfg, nil, discardLogger(), nil)
 		s := newScheduler(cfg, mgr, discardLogger())
-		/* 60 GB model exceeds the coordinator (so it is not single-node-first) and
-		   needs the worker — but the worker's share + compute reserve overflows its
-		   safe budget (24/2 = 12 GB), so distributed is refused even with
-		   force_distribute. This is the guard that prevents the worker freeze. */
+		/* 36 GB at 32k context: the coordinator slice fits its 44 GB budget, but
+		   the worker's share + 16 GB compute reserve overflows its 12 GB budget,
+		   so distributed is refused even with force_distribute. This is the guard
+		   that prevents the worker freeze. */
 		big := cfg.Models[0]
-		big.MinMemoryGB = 60
+		big.MinMemoryGB = 36
 		big.ContextTokens = 32768
 		big.ForceDistribute = true
 		if s.memoryFits(BackendLlamaRPC, big) {
 			t.Error("must refuse distributed when the worker slice exceeds its safe budget")
 		}
-		/* Raising the worker's safe budget high enough re-admits it. */
+		/* Raising the worker's safe budget high enough re-admits it (the
+		   coordinator was already within budget). */
 		cfg.Cluster.Nodes[1].SafeModelGB = 1000
 		if !s.memoryFits(BackendLlamaRPC, big) {
 			t.Error("a large enough worker safe budget should re-admit distributed")
+		}
+	})
+
+	t.Run("it_refuses_distributed_when_the_coordinator_slice_exceeds_its_budget", func(t *testing.T) {
+		cfg := testConfig()
+		/* Neutralize the worker budget so the coordinator is the only constraint.
+		   An explicit split forces most of the model onto the coordinator. */
+		cfg.Cluster.Nodes[1].SafeModelGB = 1000
+		cfg.Runtime.Llama.TensorSplit = "0.9,0.1"
+		mgr := NewManager(cfg, nil, discardLogger(), nil)
+		s := newScheduler(cfg, mgr, discardLogger())
+		big := cfg.Models[0]
+		big.MinMemoryGB = 60
+		big.ContextTokens = 8192
+		big.ForceDistribute = true
+		if s.memoryFits(BackendExo, big) {
+			t.Error("must refuse distributed when the COORDINATOR slice (0.9*60) exceeds its 44 GB safe budget")
+		}
+	})
+
+	t.Run("it_normalizes_proportional_tensor_split_weights", func(t *testing.T) {
+		cfg := testConfig()
+		/* "0.2,0.2" is a 50/50 split after llama.cpp normalization, NOT two 20%
+		   slices. The pre-fix code read the last raw value (0.2) as an absolute
+		   worker fraction and under-counted the worker's real slice. */
+		cfg.Cluster.Nodes[1].SafeModelGB = 30
+		cfg.Runtime.Llama.TensorSplit = "0.2,0.2"
+		mgr := NewManager(cfg, nil, discardLogger(), nil)
+		s := newScheduler(cfg, mgr, discardLogger())
+		shares := s.nodeShares()
+		if len(shares) != 2 || shares[0] < 0.49 || shares[0] > 0.51 || shares[1] < 0.49 || shares[1] > 0.51 {
+			t.Fatalf("expected normalized 50/50 shares, got %v", shares)
+		}
+		/* 48 GB at 50/50 -> worker slice 24 + reserve 4 = 28 <= its 30 GB budget:
+		   admitted. Reading 0.2 as absolute would have projected 48*0.2+4 = ~14,
+		   masking the real 28 GB peak. */
+		big := cfg.Models[0]
+		big.MinMemoryGB = 48
+		big.ContextTokens = 8192
+		big.ForceDistribute = true
+		if !s.memoryFits(BackendExo, big) {
+			t.Error("a normalized 50/50 slice within budget should admit")
+		}
+		/* Dropping the worker budget below the real 28 GB slice must now refuse —
+		   the under-count bug would have wrongly admitted. */
+		cfg.Cluster.Nodes[1].SafeModelGB = 20
+		if s.memoryFits(BackendExo, big) {
+			t.Error("normalized share must expose the real 28 GB worker slice and refuse")
 		}
 	})
 
