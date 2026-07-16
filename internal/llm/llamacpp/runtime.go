@@ -726,18 +726,34 @@ func (r *Runtime) waitReady(ctx context.Context, serverURL, apiKey string, waitD
 					The authenticated probe proves the key WORKS, not that the
 					server REJECTS an unauthenticated request. If --api-key-file is
 					unsupported/ignored by this build, the endpoint is open to every
-					local process while the probe still passes. When a key is
-					configured, confirm a keyless request to a protected route is
-					refused; fail closed otherwise rather than serve unauthenticated.
+					local process while the probe still passes. Confirm a keyless
+					request to a PROTECTED route is refused with 401/403.
+
+					The route matters: llama.cpp deliberately leaves /health and the
+					model-listing endpoints (/models, /v1/models) public even when a
+					key is set, so probing those yields a 200 that says nothing about
+					enforcement. /v1/chat/completions IS behind the api-key
+					middleware, which rejects an unauthenticated request with 401
+					before doing any inference, so it is both correct and cheap.
 				*/
 				if apiKey != "" {
-					unauthReq, uerr := http.NewRequestWithContext(ctx, http.MethodGet, serverURL+"/v1/models", nil)
+					body := strings.NewReader(`{"messages":[{"role":"user","content":"ping"}],"max_tokens":1}`)
+					unauthReq, uerr := http.NewRequestWithContext(ctx, http.MethodPost, serverURL+"/v1/chat/completions", body)
 					if uerr == nil {
+						unauthReq.Header.Set("Content-Type", "application/json")
 						if unauthResp, derr := client.Do(unauthReq); derr == nil {
 							code := unauthResp.StatusCode
 							_ = unauthResp.Body.Close()
 							if code >= 200 && code < 300 {
-								return fmt.Errorf("llamacpp: llama-server answered an unauthenticated request (status %d); the API key is not being enforced — is --api-key-file supported by this build?", code)
+								return fmt.Errorf("llamacpp: llama-server answered an unauthenticated /v1/chat/completions request (status %d); the API key is not being enforced — is --api-key-file supported by this build?", code)
+							}
+							if code != http.StatusUnauthorized && code != http.StatusForbidden {
+								/*
+									Neither a clear accept (2xx) nor a clear reject
+									(401/403): don't block a working server on an
+									ambiguous status, but surface it.
+								*/
+								r.logger.Warn("llamacpp: could not confirm api-key enforcement from readiness probe", "status", code)
 							}
 						}
 					}
