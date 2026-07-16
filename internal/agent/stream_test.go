@@ -2,7 +2,9 @@ package agent_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/agent"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
@@ -153,5 +155,48 @@ func TestRunStream_ContextCancellationStopsLoop(t *testing.T) {
 	_, err := a.RunStream(ctx, agent.NewSession(), "go", agent.SinkFunc(func(agent.StreamEvent) error { return nil }))
 	if err == nil {
 		t.Fatalf("expected error from cancelled context")
+	}
+}
+
+/*
+leakProbeProvider streams via llm.SendChunk (like the real producers) on an
+unbuffered channel and closes exited only when its goroutine returns. If the
+agent fails to cancel the round on a sink error, the goroutine parks forever.
+*/
+type leakProbeProvider struct{ exited chan struct{} }
+
+func (leakProbeProvider) Name() string { return "leakprobe" }
+func (leakProbeProvider) Chat(context.Context, llm.ChatRequest) (*llm.ChatResponse, error) {
+	return &llm.ChatResponse{}, nil
+}
+func (p leakProbeProvider) ChatStream(ctx context.Context, _ llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	out := make(chan llm.StreamChunk)
+	go func() {
+		defer close(out)
+		defer close(p.exited)
+		for i := 0; i < 100000; i++ {
+			if !llm.SendChunk(ctx, out, llm.StreamChunk{Delta: "x"}) {
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+func TestRunStream_SinkErrorCancelsProducer(t *testing.T) {
+	p := leakProbeProvider{exited: make(chan struct{})}
+	a := agent.New(p, tools.NewRegistry(), "", 3, nil)
+
+	sinkErr := errors.New("client disconnected")
+	_, err := a.RunStream(context.Background(), agent.NewSession(), "go",
+		agent.SinkFunc(func(agent.StreamEvent) error { return sinkErr }))
+	if err == nil {
+		t.Fatalf("expected the sink error to propagate")
+	}
+
+	select {
+	case <-p.exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("producer goroutine leaked: not cancelled after the consumer stopped reading")
 	}
 }

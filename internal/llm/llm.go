@@ -135,6 +135,22 @@ type StreamChunk struct {
 }
 
 /*
+SendChunk delivers c on out unless ctx is cancelled first, returning false when
+the send was abandoned. Streaming producers MUST use it for every send: a bare
+blocking `out <- c` is not interrupted by context cancellation, so a consumer
+that stops reading mid-stream (a disconnected client) would park the producer
+goroutine — and its HTTP connection — forever.
+*/
+func SendChunk(ctx context.Context, out chan<- StreamChunk, c StreamChunk) bool {
+	select {
+	case out <- c:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+/*
 Provider is the pluggable chat-completion backend. Implementations live under
 internal/llm/<provider>/. Both methods MUST respect ctx for cancellation and
 timeouts.

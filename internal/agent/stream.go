@@ -107,13 +107,24 @@ func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm
 			req.Tools = a.Tools.Definitions()
 		}
 
-		stream, err := a.Provider.ChatStream(ctx, req)
+		/*
+			Give each round its own cancel scope. If consumeRound returns early
+			(client disconnect surfaced as a sink error, or a terminal chunk
+			error), cancelling here unblocks a provider goroutine that would
+			otherwise be parked forever on a channel send, leaking the goroutine
+			and its HTTP connection. On the success path the producer has already
+			closed the stream, so cancel is a no-op.
+		*/
+		roundCtx, cancel := context.WithCancel(ctx)
+		stream, err := a.Provider.ChatStream(roundCtx, req)
 		if err != nil {
+			cancel()
 			_ = sink.Emit(StreamEvent{Kind: StreamEventError, Iteration: i, Error: err.Error()})
 			return "", fmt.Errorf("agent: provider chat stream: %w", err)
 		}
 
-		assistant, runErr := a.consumeRound(ctx, i, stream, sink)
+		assistant, runErr := a.consumeRound(roundCtx, i, stream, sink)
+		cancel()
 		if runErr != nil {
 			return "", runErr
 		}

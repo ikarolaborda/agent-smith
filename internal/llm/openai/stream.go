@@ -63,13 +63,13 @@ func (c *Client) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan ll
 				continue
 			}
 			if payload == "[DONE]" {
-				out <- llm.StreamChunk{Done: true}
+				llm.SendChunk(ctx, out, llm.StreamChunk{Done: true})
 				return
 			}
 
 			var env streamEnvelope
 			if err := json.Unmarshal([]byte(payload), &env); err != nil {
-				out <- llm.StreamChunk{Err: fmt.Errorf("openai: stream decode: %w", err)}
+				llm.SendChunk(ctx, out, llm.StreamChunk{Err: fmt.Errorf("openai: stream decode: %w", err)})
 				return
 			}
 			if len(env.Choices) == 0 {
@@ -78,7 +78,9 @@ func (c *Client) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan ll
 			ch := env.Choices[0]
 
 			if ch.Delta.Content != "" {
-				out <- llm.StreamChunk{Delta: ch.Delta.Content}
+				if !llm.SendChunk(ctx, out, llm.StreamChunk{Delta: ch.Delta.Content}) {
+					return
+				}
 			}
 
 			for _, tc := range ch.Delta.ToolCalls {
@@ -105,22 +107,34 @@ func (c *Client) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan ll
 					only care about the final call can ignore until the
 					terminator; consumers that want incremental tool-call
 					rendering get the running view.
+
+					Some OpenAI-compatible backends (several llama.cpp/vLLM/LM
+					Studio builds) stream a call's argument fragments with no id.
+					Without a stable key the consumer treats each fragment as a
+					new call and dispatches duplicates with partial JSON. The
+					wire index IS stable per call, so synthesize a surrogate id
+					from it when the backend omits one.
 				*/
 				snapshot := *existing
-				out <- llm.StreamChunk{ToolCallDelta: &snapshot}
+				if snapshot.ID == "" {
+					snapshot.ID = fmt.Sprintf("idx-%d", idx)
+				}
+				if !llm.SendChunk(ctx, out, llm.StreamChunk{ToolCallDelta: &snapshot}) {
+					return
+				}
 			}
 
 			if ch.FinishReason != "" {
-				out <- llm.StreamChunk{Done: true}
+				llm.SendChunk(ctx, out, llm.StreamChunk{Done: true})
 				return
 			}
 		}
 
 		if err := scanner.Err(); err != nil {
-			out <- llm.StreamChunk{Err: fmt.Errorf("openai: stream read: %w", err)}
+			llm.SendChunk(ctx, out, llm.StreamChunk{Err: fmt.Errorf("openai: stream read: %w", err)})
 			return
 		}
-		out <- llm.StreamChunk{Err: errors.New("openai: stream ended without [DONE]")}
+		llm.SendChunk(ctx, out, llm.StreamChunk{Err: errors.New("openai: stream ended without [DONE]")})
 	}()
 
 	return out, nil

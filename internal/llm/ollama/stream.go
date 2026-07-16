@@ -37,30 +37,34 @@ func (c *Client) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan ll
 			}
 			var wr wireResponse
 			if err := json.Unmarshal(line, &wr); err != nil {
-				out <- llm.StreamChunk{Err: fmt.Errorf("ollama: stream decode: %w", err)}
+				llm.SendChunk(ctx, out, llm.StreamChunk{Err: fmt.Errorf("ollama: stream decode: %w", err)})
 				return
 			}
 			if wr.Message.Content != "" {
-				out <- llm.StreamChunk{Delta: wr.Message.Content}
+				if !llm.SendChunk(ctx, out, llm.StreamChunk{Delta: wr.Message.Content}) {
+					return
+				}
 			}
 			for _, tc := range wr.Message.ToolCalls {
 				snapshot := llm.ToolCall{
 					Name:      tc.Function.Name,
 					Arguments: tc.Function.Arguments,
 				}
-				out <- llm.StreamChunk{ToolCallDelta: &snapshot}
+				if !llm.SendChunk(ctx, out, llm.StreamChunk{ToolCallDelta: &snapshot}) {
+					return
+				}
 			}
 			if wr.Done {
-				out <- llm.StreamChunk{Done: true}
+				llm.SendChunk(ctx, out, llm.StreamChunk{Done: true})
 				return
 			}
 		}
 
 		if err := scanner.Err(); err != nil {
-			out <- llm.StreamChunk{Err: fmt.Errorf("ollama: stream read: %w", err)}
+			llm.SendChunk(ctx, out, llm.StreamChunk{Err: fmt.Errorf("ollama: stream read: %w", err)})
 			return
 		}
-		out <- llm.StreamChunk{Done: true}
+		llm.SendChunk(ctx, out, llm.StreamChunk{Done: true})
 	}()
 
 	return out, nil
