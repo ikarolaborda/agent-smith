@@ -82,6 +82,16 @@ func TestSanitizeSnippet_StripsURLsInBody(t *testing.T) {
 	}
 }
 
+func TestSanitizeSnippet_StripsURLWithZeroWidthInScheme(t *testing.T) {
+	/* A zero-width space (U+200B) hidden inside the scheme must not let the URL
+	   survive redaction once invisibles are removed. */
+	raw := "Login at ht" + "​" + "tps://evil-lookalike.example/verify now"
+	got := sanitizeSnippet(raw, 0)
+	if strings.Contains(got, "evil-lookalike.example") {
+		t.Fatalf("zero-width smuggled URL survived redaction: %q", got)
+	}
+}
+
 func TestSanitizeURL_RejectsNonHTTP(t *testing.T) {
 	if got := sanitizeURL("javascript:alert(1)", 300); got != "" {
 		t.Fatalf("expected empty, got %q", got)

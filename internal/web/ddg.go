@@ -109,8 +109,18 @@ func parseDDGLite(body string, k int) []Result {
 	if err != nil {
 		return nil
 	}
-	var titles []string
-	var urls []string
+	/*
+		Record EVERY result-link in document order, including ones whose URL is
+		rejected. The snippet for the Nth result lives in a later row, so pairing
+		is by position; dropping a rejected link from the list would shift every
+		following snippet onto the wrong result (a snippet describing site B shown
+		under site C's URL). Keeping a slot for the rejected link preserves the
+		alignment; acceptance is filtered only at emit time.
+	*/
+	type linkRow struct {
+		title, url string
+	}
+	var links []linkRow
 	var snippets []string
 	var walk func(*xhtml.Node)
 	walk = func(n *xhtml.Node) {
@@ -118,12 +128,10 @@ func parseDDGLite(body string, k int) []Result {
 			switch n.Data {
 			case "a":
 				if hasClass(n, "result-link") {
-					href := attr(n, "href")
-					title := textOf(n)
-					if u := sanitizeURL(href, MaxURLChars); u != "" {
-						urls = append(urls, u)
-						titles = append(titles, sanitizeText(title, MaxTitleChars))
-					}
+					links = append(links, linkRow{
+						title: sanitizeText(textOf(n), MaxTitleChars),
+						url:   sanitizeURL(attr(n, "href"), MaxURLChars),
+					})
 				}
 			case "td":
 				if hasClass(n, "result-snippet") {
@@ -137,24 +145,23 @@ func parseDDGLite(body string, k int) []Result {
 	}
 	walk(doc)
 
-	if len(titles) > k {
-		titles = titles[:k]
-		urls = urls[:k]
-	}
-	out := make([]Result, 0, len(titles))
-	for i := range titles {
+	out := make([]Result, 0, len(links))
+	for i, row := range links {
+		if row.title == "" || row.url == "" {
+			continue
+		}
 		var snip string
 		if i < len(snippets) {
 			snip = snippets[i]
 		}
-		if titles[i] == "" || urls[i] == "" {
-			continue
-		}
 		out = append(out, Result{
-			Title:   titles[i],
-			URL:     urls[i],
+			Title:   row.title,
+			URL:     row.url,
 			Snippet: snip,
 		})
+		if len(out) >= k {
+			break
+		}
 	}
 	return out
 }

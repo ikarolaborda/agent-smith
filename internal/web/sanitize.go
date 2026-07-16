@@ -45,9 +45,15 @@ func sanitizeText(raw string, maxChars int) string {
 func sanitizeSnippet(raw string, maxChars int) string {
 	s := stripHTMLTags(raw)
 	s = html.UnescapeString(s)
-	s = urlLikeRe.ReplaceAllString(s, "[link]")
+	/*
+		Strip invisible/zero-width characters BEFORE redacting URLs. Otherwise a
+		zero-width codepoint planted inside a scheme ("ht<zwsp>tps://evil") slips
+		past urlLikeRe, and removing it afterward reassembles a live link in the
+		snippet — defeating the whole point of redacting URLs from the body.
+	*/
 	s = removeNonPrintable(s)
 	s = zwInvisibleRe.ReplaceAllString(s, "")
+	s = urlLikeRe.ReplaceAllString(s, "[link]")
 	s = whitespaceRunRe.ReplaceAllString(s, " ")
 	s = strings.TrimSpace(s)
 	if maxChars > 0 && len(s) > maxChars {
