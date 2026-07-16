@@ -16,20 +16,23 @@ cluster included — the augmentation lives in the agent layer, not the provider
    Architecture/SOLID/PSR-12; idiomatic, current Go; **mandatory Context7 for any
    third-party code** (never invent APIs); and the authorized-defensive security
    posture.
-2. **RAG corpora** — curated markdown under `docs/<collection>` is embedded and
-   retrieved per request. Relevant collections: `cs-fundamentals`, `go-lang`,
-   `php`, `laravel`, `native-php`, `architectural-patterns`, and the new
-   `cybersecurity` (defensive: OWASP, vuln classes, CVE/CWE workflow, secure
-   coding). Add files to a collection's folder to extend its knowledge.
+2. **RAG corpora** — curated markdown under `docs/<collection>` is compiled into
+   the binary for first-launch lexical retrieval and can additionally be embedded
+   for hybrid dense retrieval. Relevant collections include `cs-fundamentals`,
+   `software-engineering`, `computer-networks`, `go-lang`, `php`, `laravel`,
+   `native-php`, `architectural-patterns`, and `cybersecurity` (authorized
+   assessment methodology, secure coding, vulnerability classes, and CVE/CWE
+   workflow). Add files to a collection's folder to extend its knowledge.
 3. **Context7** — live, version-correct library/framework docs, on by default
    when `CONTEXT7_API_KEY` is set. The directive makes the model rely on it for
    code rather than its training memory.
 
-## One-time setup
+## Optional dense-index setup
 
 ```sh
-# Ingest all corpora (needs Ollama running for nomic-embed-text embeddings):
-make ingest                       # loops docs/* incl. cybersecurity
+# Lexical grounding works without setup. Build denser semantic indexes too
+# (requires Ollama running with nomic-embed-text):
+make ingest
 # Context7 (mandatory for code): put the key in .env at the repo root
 echo 'CONTEXT7_API_KEY=...' >> .env
 ```
@@ -56,19 +59,20 @@ no fabrication**, which these layers provide:
   low confidence, now explicitly extended to security specifics (no invented
   CVE/CVSS/version/offset).
 - **Wider evidence on the cluster** — `--rag-max-chunks` injects more retrieved
-  chunks (byte cap scales with it); the cosine threshold still gates relevance, so
-  it adds grounding, not noise.
+  chunks (byte cap scales with it); hybrid lexical/dense scoring still gates
+  relevance, so it adds grounding rather than blindly dumping the corpus.
 - **Bigger window** — `context_tokens: 32768` (Qwen2.5 native) so more
   RAG/CVE/code evidence fits per request.
 - **Context7** — live API/version facts for code.
 
 Recommended cluster launch (grounding-tuned):
 ```sh
-make ingest                                   # populate RAG (REQUIRED — empty RAG = free-wheeling model)
+make ingest                                   # optional but recommended dense indexes
 ./bin/agent --serve --cluster-config configs/cluster.local.yaml --rag-max-chunks 12
 ```
-The single biggest anti-hallucination lever is **running `make ingest`**: with empty
-collections the model falls back to parametric memory and will invent specifics.
+The built-in corpus prevents a fresh installation from silently running with an
+empty knowledge layer. Dense ingestion improves semantic recall; it does not
+replace the cite-or-abstain rule.
 
 ## Security note — abliterated model
 

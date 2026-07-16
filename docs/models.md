@@ -1,5 +1,12 @@
 # Local model collection
 
+There are two single-node local paths:
+
+- **Ollama-managed** models are discovered dynamically as described below.
+- **agent-smith-managed llama.cpp** models are exact GGUF artifacts configured
+  under the `llamacpp` provider. They pass host-fit admission before download
+  and again before launch. See [Local models via llama.cpp](llamacpp-local-models.md).
+
 agent-smith auto-discovers every installed Ollama model via `/api/tags`, so
 adding a model to the collection is just an `ollama pull` / `ollama create` away
 — no code change. `/v1/models` reports each model's `supports_vision` flag
@@ -29,6 +36,11 @@ machine:
 - **12B q8_0 (~13 GB)** fits with headroom — the sweet spot here.
 - The bare `:12b` tag is **fp16 (24 GB)** — do not use it on 24 GB RAM; pick an
   explicit quantized tag (`:12b-q8_0`).
+
+File size is not a placement rule. Context length, parallel sequences, projectors,
+allocator/graph scratch, current memory pressure, and OS headroom also count.
+Use `--inspect-model` for llama.cpp artifacts; a rejection is a request for a
+smaller quant/context or a larger host, not a prompt to bypass the gate.
 
 ## Vision / image paste
 
