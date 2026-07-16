@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -113,5 +114,32 @@ func TestProbeReportsMissingBinaries(t *testing.T) {
 	}
 	if lcaps.Installed {
 		t.Error("llama should report not installed when llama-server is absent")
+	}
+}
+
+func TestMLXProbeRequiresExplicitUnboundedKVAcknowledgement(t *testing.T) {
+	cfg := testConfig()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar := t.TempDir() + "/mlx_sidecar.py"
+	if err := os.WriteFile(sidecar, []byte("# test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Runtime.MLX.Python = executable
+	cfg.Runtime.MLX.Sidecar = sidecar
+	cfg.Runtime.MLX.AllowUnboundedKV = false
+
+	mlx := newMLXBackend(cfg.Runtime, discardLogger(), NewCollector())
+	caps, err := mlx.Probe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !caps.Installed || caps.Available {
+		t.Fatalf("unexpected caps: %+v", caps)
+	}
+	if !strings.Contains(caps.Diagnostic, "KV-cache") {
+		t.Fatalf("missing safety diagnostic: %q", caps.Diagnostic)
 	}
 }

@@ -56,6 +56,10 @@ func (b *mlxBackend) Probe(ctx context.Context) (*BackendCapabilities, error) {
 		return caps, nil
 	}
 	caps.Installed = true
+	if !b.cfg.MLX.AllowUnboundedKV {
+		caps.Diagnostic = "MLX backend disabled: mlx_lm.server has no enforceable KV-cache bound; set runtime.mlx.unsafe_allow_unbounded_kv only after independently containing the Metal OOM risk"
+		return caps, nil
+	}
 	reachable, detail := b.probeEndpoint(ctx)
 	caps.Available = reachable
 	if !reachable {
@@ -73,6 +77,9 @@ mlx.launch with the hostfile.
 func (b *mlxBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	b.servedName = cfg.Model.ServedName
 	b.maxContext = cfg.Model.ContextTokens
+	if !b.cfg.MLX.AllowUnboundedKV {
+		return fmt.Errorf("mlx_jaccl: refusing launch because mlx_lm.server cannot enforce the configured context/KV memory bound; use a bounded backend or explicitly set unsafe_allow_unbounded_kv")
+	}
 
 	if cfg.Model.Path == "" {
 		return fmt.Errorf("mlx_jaccl: model %q has no path (point models[].path at the MLX model dir or HF id)", cfg.Model.ID)
@@ -97,9 +104,11 @@ func (b *mlxBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		"--port", strconv.Itoa(b.cfg.MLX.Port),
 		"--hostfile", hostfile,
 	}
-	if cfg.Model.ContextTokens > 0 {
-		args = append(args, "--max-tokens", strconv.Itoa(cfg.Model.ContextTokens))
-	}
+	/*
+		Do not map ContextTokens to mlx_lm.server --max-tokens: that flag limits
+		generated OUTPUT, not the prompt/KV context. Pretending otherwise creates
+		a false memory-safety guarantee.
+	*/
 	if b.cfg.MLX.Pipeline {
 		args = append(args, "--pipeline")
 	}

@@ -41,6 +41,9 @@ func TestClusterProviderGetsWebGroundingDefault(t *testing.T) {
 	if !s.shouldWebSearch("ollama", nil) {
 		t.Error("ollama should default web grounding ON")
 	}
+	if !s.shouldWebSearch("llamacpp", nil) {
+		t.Error("self-managed llamacpp should default web grounding ON")
+	}
 	if s.shouldWebSearch("openai", nil) {
 		t.Error("cloud provider should default web grounding OFF")
 	}

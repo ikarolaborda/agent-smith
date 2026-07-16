@@ -145,6 +145,7 @@ func TestStopSuppressesPendingRestart(t *testing.T) {
 /* R1: a streaming request invokes exactly one backend — no post-commit replay. */
 func TestNoFallbackReplayAfterStreamStart(t *testing.T) {
 	cfg := testConfig()
+	cfg.Models[0].MinMemoryGB = 34 // This test intentionally selects local fallback.
 	local := &fakeProvider{name: "ollama", tokens: []string{"a", "b", "c"}}
 	p, err := New(context.Background(), cfg, local, discardLogger())
 	if err != nil {

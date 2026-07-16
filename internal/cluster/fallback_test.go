@@ -10,6 +10,7 @@ import (
 
 func TestProviderFallbackStreaming(t *testing.T) {
 	cfg := testConfig()
+	cfg.Models[0].MinMemoryGB = 34 // Fits the coordinator's 44 GB safe local budget.
 	/* No cluster runtimes installed in CI -> provider must fall back to local. */
 	local := &fakeProvider{name: "ollama", tokens: []string{"patch ", "generated"}}
 
@@ -68,6 +69,7 @@ func TestProviderFallbackStreaming(t *testing.T) {
 
 func TestChatMergesStreamedToolCallSnapshots(t *testing.T) {
 	cfg := testConfig()
+	cfg.Models[0].MinMemoryGB = 34 // This test exercises local stream aggregation.
 	/*
 		Simulate the transport's cumulative-snapshot semantics: one tool call
 		whose arguments arrive across three fragments, each a fuller snapshot of

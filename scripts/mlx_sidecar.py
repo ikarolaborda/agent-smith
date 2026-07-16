@@ -11,11 +11,12 @@ Single node:   this script runs `mlx_lm.server` directly.
 Multiple nodes: this script re-launches itself under `mlx.launch --hostfile ...`
                 so MLX can form a distributed group across the Thunderbolt link.
                 If the distributed launcher or RDMA/ring transport is not set up,
-                it prints a CLEAR diagnostic to stderr and degrades to single-host
-                serving rather than failing silently.
+                it fails closed. Silently placing the whole model on one host can
+                overcommit unified memory and panic the kernel.
 
 This is the first-version sidecar: it launches and proxies. The distributed
-path is best-effort and falls back loudly. See docs/cluster.md.
+path is best-effort and fails closed when it cannot form the requested group.
+See docs/cluster.md.
 """
 
 import argparse
@@ -108,21 +109,22 @@ def try_distributed_launch(args, hosts):
     """
     Re-launch this script under `mlx.launch --hostfile` so MLX forms a
     distributed group. Returns False (with a clear diagnostic) when the
-    distributed launcher is unavailable, so the caller can degrade to
-    single-host serving.
+    distributed launcher is unavailable. The caller must fail the backend;
+    it must never turn a distributed placement into an unplanned single-host
+    placement.
     """
     launcher = shutil.which("mlx.launch")
     if not launcher:
         log("WARNING: multi-node hostfile provided but `mlx.launch` was not found on PATH.")
         log("         Distributed MLX requires mlx + a working Thunderbolt ring/RDMA transport.")
-        log("         Falling back to SINGLE-HOST serving on this node (degraded).")
+        log("         Refusing to fall back to single-host: that could exceed the node memory budget.")
         return False
 
     unreachable = preflight_peers(hosts, socket.gethostname())
     if unreachable:
         log(f"WARNING: peer host(s) not resolvable: {', '.join(unreachable)}")
         log("         Check the Thunderbolt bridge / .local names and SSH reachability.")
-        log("         Falling back to SINGLE-HOST serving on this node (degraded).")
+        log("         Refusing to fall back to single-host: that could exceed the node memory budget.")
         return False
 
     cmd = [launcher, "--hostfile", args.hostfile, sys.executable, os.path.abspath(__file__)]
@@ -136,7 +138,7 @@ def try_distributed_launch(args, hosts):
         completed = subprocess.run(cmd, check=False)
         sys.exit(completed.returncode)
     except OSError as exc:
-        log(f"WARNING: mlx.launch failed to exec: {exc}; degrading to single-host.")
+        log(f"ERROR: mlx.launch failed to exec: {exc}; refusing unsafe single-host fallback.")
         return False
 
 
@@ -151,7 +153,8 @@ def _main():
     if multi_node and not args.relaunched:
         if try_distributed_launch(args, hosts):
             return  # process re-exec'd; unreachable
-        # else: fell through to degraded single-host serving below
+        log("ERROR: distributed MLX launch failed; backend stopped without starting a local model.")
+        sys.exit(3)
 
     run_server(args)
 

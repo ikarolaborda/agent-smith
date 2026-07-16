@@ -5,7 +5,7 @@ across both Macs at the best quality + throughput. Coordinator =
 `Ikaros-MacBook-Pro-M5M.local` (64GB), worker = `ikaros-macbook-pro-m5p.local`
 (`169.254.29.19`, 24GB).
 
-What's already done on the coordinator (this repo): RAG corpora ingested (9
+What's already done on the coordinator (this repo): RAG corpora ingested (11
 collections incl. `cybersecurity`); `configs/cluster.local.yaml` tuned with
 `mode: auto`, `tensor_split 0.73,0.27`, `context_tokens 32768`, and verified
 llama.cpp perf flags (`-fa on`, `-ctk/-ctv q8_0`). `bin/agent` built.

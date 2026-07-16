@@ -34,9 +34,9 @@ func TestScheduler(t *testing.T) {
 		cfg.Cluster.Nodes[1].SafeModelGB = 1000
 		mgr := NewManager(cfg, nil, discardLogger(), nil)
 		s := newScheduler(cfg, mgr, discardLogger())
-		/* 70B-Q4 needs 48 GB: fits the 64 GB coordinator for local. */
-		if !s.memoryFits(BackendLocal, cfg.Models[0]) {
-			t.Error("local should fit a 48 GB model on a 64 GB coordinator")
+		/* The coordinator keeps 20 GB reserved: its safe local budget is 44 GB. */
+		if s.memoryFits(BackendLocal, cfg.Models[0]) {
+			t.Error("local must not fit a 48 GB model in a 44 GB safe budget")
 		}
 		/* Cluster total (64+24=88) easily fits. */
 		if !s.memoryFits(BackendExo, cfg.Models[0]) {
@@ -106,6 +106,7 @@ func TestScheduler(t *testing.T) {
 
 	t.Run("it_falls_back_to_local_when_no_cluster_backend_is_installed", func(t *testing.T) {
 		cfg := testConfig()
+		cfg.Models[0].MinMemoryGB = 34
 		/* exo/mlx/llama binaries are absent in the test env -> Probe Installed=false. */
 		local := &fakeProvider{name: "ollama", tokens: []string{"ok"}}
 		mgr := NewManager(cfg, local, discardLogger(), nil)
@@ -116,6 +117,16 @@ func TestScheduler(t *testing.T) {
 		}
 		if b.Name() != BackendLocal {
 			t.Fatalf("selected %q, want local fallback", b.Name())
+		}
+	})
+
+	t.Run("it_refuses_an_unsafe_local_fallback", func(t *testing.T) {
+		cfg := testConfig() // 48 GB model, 44 GB coordinator safe budget.
+		local := &fakeProvider{name: "ollama", tokens: []string{"must-not-run"}}
+		mgr := NewManager(cfg, local, discardLogger(), nil)
+		s := newScheduler(cfg, mgr, discardLogger())
+		if _, err := s.SelectBackend(context.Background(), llm.ChatRequest{}, cfg.Models[0]); err == nil {
+			t.Fatal("expected unsafe local fallback to be rejected")
 		}
 	})
 

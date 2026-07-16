@@ -92,6 +92,16 @@ func (s *scheduler) SelectBackend(ctx context.Context, req llm.ChatRequest, mode
 	if local == nil {
 		return nil, errors.New("cluster: no cluster backend available and no local fallback configured")
 	}
+	/*
+		Fallback is still a launch decision. It must pass the same admission gate;
+		otherwise a failed distributed start can silently move the entire model
+		onto the coordinator and create the OOM/kernel-pressure event clustering
+		was meant to prevent.
+	*/
+	if !s.memoryFits(BackendLocal, model) {
+		return nil, fmt.Errorf("cluster: no backend available and local fallback is unsafe: model %q needs %d GB, coordinator safe budget is %d GB",
+			model.ID, model.MinMemoryGB, s.coordinatorSafeMemoryGB())
+	}
 	if caps, err := local.Probe(ctx); err != nil || !caps.Available {
 		return nil, fmt.Errorf("cluster: no backend available (local fallback unusable): %w", lastErr)
 	}
@@ -131,9 +141,9 @@ func (s *scheduler) coordinatorBackends() map[string]bool {
 
 /*
 memoryFits reports whether a model's estimated minimum fits the memory the
-backend can draw on: the whole reachable cluster for distributed backends, just
-the coordinator for the local backend. A zero estimate means "unknown" and is
-treated as fitting (the operator opted out of the check).
+backend can draw on: the whole reachable cluster for distributed backends, or
+the coordinator's safe budget (total minus its OS/runtime reserve) for local.
+Validation rejects zero/unknown estimates before the scheduler is constructed.
 
 Placement uses only the statically configured memory_gb of reachable nodes; the
 runtime memory-pressure metric (which may be MemoryPressureUnknown) is never
@@ -141,10 +151,11 @@ consulted here, so an unobserved pressure value cannot bias backend selection.
 */
 func (s *scheduler) memoryFits(name string, model ModelConfig) bool {
 	if model.MinMemoryGB <= 0 {
-		return true
+		/* Defense in depth for programmatically constructed, unvalidated config. */
+		return false
 	}
 	if name == BackendLocal {
-		return s.cfg.CoordinatorNode().MemoryGB >= model.MinMemoryGB
+		return s.coordinatorSafeMemoryGB() >= model.MinMemoryGB
 	}
 	/*
 		Single-node-first guard. A distributed backend tensor-splits the model

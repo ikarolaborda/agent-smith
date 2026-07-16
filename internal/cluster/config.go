@@ -179,6 +179,14 @@ type MLXRuntime struct {
 	Pipeline bool `yaml:"pipeline"`
 	/* FastSync sets MLX_METAL_FAST_SYNCH=1 in the sidecar environment. */
 	FastSync bool `yaml:"fast_sync"`
+	/*
+		AllowUnboundedKV is an explicit acknowledgement that mlx_lm.server does
+		not currently provide the bounded KV-cache admission control required by
+		this project. It is false by default, which keeps the backend disabled.
+		Use llama.cpp/exo unless the operator has independently contained and
+		measured this risk on the exact mlx-lm release.
+	*/
+	AllowUnboundedKV bool `yaml:"unsafe_allow_unbounded_kv"`
 	/* ExtraArgs are appended to the sidecar invocation. */
 	ExtraArgs []string `yaml:"extra_args"`
 }
@@ -349,6 +357,17 @@ func (c *ClusterConfig) Validate() error {
 	}
 	if len(c.Models) == 0 {
 		return errors.New("cluster: at least one model is required")
+	}
+	for i, model := range c.Models {
+		if strings.TrimSpace(model.ID) == "" {
+			return fmt.Errorf("cluster: models[%d].id is required", i)
+		}
+		if model.MinMemoryGB <= 0 {
+			return fmt.Errorf("cluster: model %q requires a positive min_memory_gb_estimate; unknown-size models are not safe to schedule", model.ID)
+		}
+		if model.ContextTokens <= 0 {
+			return fmt.Errorf("cluster: model %q requires a positive context_tokens value for memory admission", model.ID)
+		}
 	}
 	if c.Runtime.PrivateClusterOnly && !isLoopback(c.Runtime.BindHost) {
 		return fmt.Errorf("cluster: private_cluster_only is set but bind_host %q is not loopback", c.Runtime.BindHost)

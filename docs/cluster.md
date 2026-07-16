@@ -88,10 +88,13 @@ or set `runtime.exo.endpoint` to the running service:
 The provider proxies to exo's `/v1/chat/completions` with SSE streaming, health
 checks, and retry/fallback.
 
-## Mode 3 — MLX/JACCL cluster
+## Mode 3 — MLX/JACCL cluster (unsafe opt-in)
 
 Requires MLX + mlx-lm on both nodes and a working distributed transport
-(Thunderbolt ring/RDMA on supported macOS):
+(Thunderbolt ring/RDMA on supported macOS). It is disabled by default because
+`mlx_lm.server` does not currently enforce a bounded context/KV cache; a long
+agent conversation can grow wired Metal memory until the host becomes
+unrecoverable. Prefer llama.cpp or exo.
 
 ```sh
 pip install mlx mlx-lm        # on both nodes
@@ -112,11 +115,14 @@ What happens:
    `runtime.mlx.fast_sync: true`).
 3. The sidecar serves `mlx_lm.server` on `127.0.0.1:8081`. For multiple nodes it
    re-launches under `mlx.launch --hostfile …`. **If `mlx.launch` or the
-   RDMA/ring transport is missing, the sidecar prints a clear diagnostic to the
-   logs and degrades to single-host serving instead of failing silently.**
+   RDMA/ring transport is missing, the sidecar fails closed; it never places the
+   whole distributed model on one host.**
 4. Go proxies chat to the sidecar endpoint.
 
 Pipeline parallelism instead of tensor split: `runtime.mlx.pipeline: true`.
+Running this experimental backend also requires the explicit acknowledgement
+`runtime.mlx.unsafe_allow_unbounded_kv: true`; this is not a safety bypass for
+the scheduler's per-node placement budget.
 
 ## Mode 4 — llama.cpp RPC (experimental, private only)
 
@@ -178,7 +184,8 @@ gets the identical augmentation pipeline as `ollama`/`openai`:
 - **Web grounding** — defaults **ON** for `cluster` (it serves local models, like Ollama), suppressing hallucination. Operator `--no-web-search` and the per-request flag still take precedence.
 - **Context7 docs** — unchanged; injected whenever `CONTEXT7_API_KEY` is set.
 
-CLI mode (`--prompt` / interactive) has no RAG by design — that was true before the cluster work and is unchanged.
+CLI mode (`--prompt` / interactive) uses the same augmentation pipeline unless
+the operator supplies the umbrella `--no-rag` kill switch.
 
 ## Failure behavior
 

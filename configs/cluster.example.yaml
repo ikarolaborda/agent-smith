@@ -91,6 +91,9 @@ runtime:
     port: 8081
     pipeline: false
     fast_sync: true        # sets MLX_METAL_FAST_SYNCH=1 in the sidecar env
+    # mlx_lm.server currently cannot enforce a KV/context memory bound. Keep
+    # false; setting true acknowledges an experimental Metal OOM/kernel risk.
+    unsafe_allow_unbounded_kv: false
 
   llama_cpp:
     server: llama-server   # build llama.cpp with -DGGML_RPC=ON

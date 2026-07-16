@@ -118,6 +118,13 @@ cluster:
 	})
 }
 
+func TestExampleClusterConfigLoads(t *testing.T) {
+	path := filepath.Join("..", "..", "configs", "cluster.example.yaml")
+	if _, err := LoadClusterConfig(path); err != nil {
+		t.Fatalf("example cluster config must remain valid: %v", err)
+	}
+}
+
 /* replaceBindHost swaps the loopback bind_host in the sample for a test value. */
 func replaceBindHost(body, host string) string {
 	return strings.Replace(body, "bind_host: 127.0.0.1", "bind_host: "+host, 1)
