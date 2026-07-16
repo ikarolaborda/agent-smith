@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -121,7 +122,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: read %s: %w", path, err)
 	}
 
-	expanded := os.ExpandEnv(string(raw))
+	expanded := expandEnvRefs(string(raw))
 
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
@@ -226,6 +227,30 @@ func validateLlamaCpp(cfg *LlamaCppConfig) error {
 		return fmt.Errorf("config: providers.llamacpp.llama_cpp.startup_timeout_seconds must be non-negative, got %d", cfg.StartupTimeoutSeconds)
 	}
 	return nil
+}
+
+/*
+envRefRe matches a $$ escape or a shell-style variable reference whose name
+starts with a letter or underscore. Requiring that start is what makes
+expandEnvRefs leave sequences like "$100" (a price in a system prompt) intact —
+os.ExpandEnv would have parsed "$1" as the positional variable and dropped it.
+*/
+var envRefRe = regexp.MustCompile(`\$\$|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*`)
+
+/*
+expandEnvRefs expands ${VAR}/$VAR references (undefined ones resolve to empty,
+matching the prior os.ExpandEnv behavior so optional keys like ${HF_TOKEN} still
+blank cleanly) but leaves non-variable dollar text untouched and supports $$ as
+a literal-dollar escape.
+*/
+func expandEnvRefs(s string) string {
+	return envRefRe.ReplaceAllStringFunc(s, func(m string) string {
+		if m == "$$" {
+			return "$"
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(m, "$"), "{"), "}")
+		return os.Getenv(name)
+	})
 }
 
 func isLoopbackHost(host string) bool {

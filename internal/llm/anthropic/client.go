@@ -57,7 +57,7 @@ func New(cfg Config) (*Client, error) {
 		cfg.BaseURL = DefaultBaseURL
 	}
 	if cfg.HTTP == nil {
-		cfg.HTTP = &http.Client{Timeout: 30 * time.Second}
+		cfg.HTTP = newStreamingClient()
 	}
 	return &Client{
 		apiKey:  cfg.APIKey,
@@ -65,6 +65,18 @@ func New(cfg Config) (*Client, error) {
 		model:   cfg.Model,
 		http:    cfg.HTTP,
 	}, nil
+}
+
+/*
+newStreamingClient returns an HTTP client safe for streaming. A fixed
+http.Client.Timeout covers the whole response body, so a 30s timeout aborted any
+generation longer than 30s mid-stream. Bound only the connect/handshake/
+first-byte phases and leave the streamed body to the per-request context.
+*/
+func newStreamingClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Transport: tr}
 }
 
 func init() {

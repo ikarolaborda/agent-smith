@@ -56,7 +56,7 @@ func New(cfg Config) (*Client, error) {
 		cfg.BaseURL = DefaultBaseURL
 	}
 	if cfg.HTTP == nil {
-		cfg.HTTP = &http.Client{Timeout: 30 * time.Second}
+		cfg.HTTP = newStreamingClient()
 	}
 	return &Client{
 		apiKey:  cfg.APIKey,
@@ -64,6 +64,20 @@ func New(cfg Config) (*Client, error) {
 		model:   cfg.Model,
 		http:    cfg.HTTP,
 	}, nil
+}
+
+/*
+newStreamingClient returns an HTTP client safe for streaming. A fixed
+http.Client.Timeout covers the ENTIRE response body, so a 30s timeout aborted
+any generation longer than 30s mid-stream (common for reasoning models and
+large local models behind the OpenAI-compatible client). Instead bound only the
+connect/handshake/first-byte phases via the transport and leave the streamed
+body ungoverned by a fixed deadline — per-request context still cancels it.
+*/
+func newStreamingClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Transport: tr}
 }
 
 /* init registers the OpenAI factory with the llm registry. */
