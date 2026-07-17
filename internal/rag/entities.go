@@ -50,7 +50,14 @@ const (
 	   The upper bound is generous enough for recurring acronyms yet still skips
 	   ubiquitous terms; the denylist above trims the worst offenders first. */
 	minEntityChunks = 2
-	maxEntityChunks = 40
+	/*
+		Widened 40 -> 64 as the single predefined densification follow-up of the
+		graph-salient benchmark (eval/fixtures/README.md): first-run coverage of
+		hand-labeled cross-source gold was ~4%, i.e. the needed edges mostly did
+		not exist. A wider band admits recurring domain acronyms shared by more
+		sources before the ubiquity cutoff.
+	*/
+	maxEntityChunks = 64
 )
 
 /*

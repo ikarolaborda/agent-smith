@@ -1,0 +1,32 @@
+[
+  {
+    "query": "What are the pitfalls of Go slices sharing a backing array?",
+    "relevant_chunk_ids": ["470d47a473cc0984"],
+    "justification": "Single section answers it: docs/go-lang/manual.md #Slice Pitfalls."
+  },
+  {
+    "query": "How do I generate an Eloquent model with artisan?",
+    "relevant_chunk_ids": ["f1c8885e0d85fe4f"],
+    "justification": "Single section answers it: docs/laravel/manual.md #Generating Eloquent Models with Artisan."
+  },
+  {
+    "query": "How do PHP enums use traits and interfaces?",
+    "relevant_chunk_ids": ["2f22f7b374f8b55a"],
+    "justification": "Single section answers it: docs/php/manual.md #Enums with Traits and Interfaces."
+  },
+  {
+    "query": "How does DNS resolution and caching work?",
+    "relevant_chunk_ids": ["5c54d0b97fd9c1db"],
+    "justification": "Single section answers it: docs/computer-networks/manual.md #DNS."
+  },
+  {
+    "query": "How do I set up a NestJS validation pipe with class-validator?",
+    "relevant_chunk_ids": ["c7b27b1c9623c35b"],
+    "justification": "Single section answers it: docs/nestjs/manual.md #Validation Pipe with class-validator."
+  },
+  {
+    "query": "What is opcache and how should it be configured in production?",
+    "relevant_chunk_ids": ["f1028c12dce7c04b"],
+    "justification": "Single section answers it: docs/cs-fundamentals/manual.md #Opcache."
+  }
+]

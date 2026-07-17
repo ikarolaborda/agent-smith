@@ -87,6 +87,14 @@ type Options struct {
 	*/
 	Agentic bool
 	/*
+		GraphExpand registers the knowledge-graph graph_expand tool alongside
+		rag_search. Off by default: the hand-labeled cross-source benchmark
+		(eval/fixtures/README.md) measured no recall lift over budget-matched
+		lexical widening and 2-4% precision of graph-added chunks, so by default
+		the tool only adds context the model must filter.
+	*/
+	GraphExpand bool
+	/*
 		WebSearchEnabled is the operator-level kill switch for the web
 		grounding gate. When false, the chat handler never injects web
 		results regardless of per-request or provider-default flags. When
@@ -143,6 +151,7 @@ type Server struct {
 	rag              *rag.Service
 	disableRAG       bool
 	agentic          bool
+	graphExpand      bool
 	webSearchEnabled bool
 	/*
 		answerVerifier is the shared post-answer advisory layer (NVD CVE check
@@ -236,6 +245,7 @@ func New(opts Options) (*Server, error) {
 		rag:              opts.RAG,
 		disableRAG:       opts.DisableRAG,
 		agentic:          opts.Agentic,
+		graphExpand:      opts.GraphExpand,
 		webSearchEnabled: opts.WebSearchEnabled,
 	}
 	s.answerVerifier = BuildAnswerVerifier(opts.Config, opts.VerifyCVE, opts.ValidateVuln, logger)
@@ -744,8 +754,10 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 		if err := reg.Register(builtin.NewRAGSearchTool(s.rag)); err != nil {
 			return nil, fmt.Errorf("register rag_search: %w", err)
 		}
-		if err := reg.Register(builtin.NewGraphExpandTool(s.rag)); err != nil {
-			return nil, fmt.Errorf("register graph_expand: %w", err)
+		if s.graphExpand {
+			if err := reg.Register(builtin.NewGraphExpandTool(s.rag)); err != nil {
+				return nil, fmt.Errorf("register graph_expand: %w", err)
+			}
 		}
 	}
 	a.Agentic = s.agentic && ragOn

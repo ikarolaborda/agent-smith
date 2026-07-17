@@ -1,0 +1,52 @@
+[
+  {
+    "query": "When modernizing a legacy PHP 5 application to PHP 8, which security vulnerability classes should the migration plan and code review specifically address?",
+    "relevant_chunk_ids": ["60cb9b7cbb34521d", "22c37d348ccd6d5f", "32fd6b4d424b1e37"],
+    "justification": "Requires combining migration hazards (removed mysql extension -> prepared statements, docs/php/legacy-modernization.md #PHP 5.x to PHP 7.x) with vulnerability classes and PHP secure patterns from a different file (docs/cybersecurity/secure-coding-and-vuln-classes.md #OWASP Top 10, #PHP-specific secure patterns). No single chunk answers it."
+  },
+  {
+    "query": "In an authorized pentest of a Laravel API, which input and interpreter boundaries should I test and which framework validation mechanisms should the code be using?",
+    "relevant_chunk_ids": ["67e0002e743fc001", "c0ae24a322f30307", "02ea736957279dbc"],
+    "justification": "Interpreter-boundary tracing method comes from docs/cybersecurity/offensive-assessment.md #Input and interpreter boundaries; the framework-side mechanisms (FormRequest rules, co-located authorization, thin controllers) come from docs/laravel/manual.md #Form Request Validation Rules and #Best Practices. Cross-file combination required."
+  },
+  {
+    "query": "Reviewing goroutine-heavy Go code: how do happens-before guarantees and the race detector work together, and which sync primitives establish ordering?",
+    "relevant_chunk_ids": ["29ae3929f9e56d69", "a12fdabdcd4b0a48", "db3cd9ce73822c44"],
+    "justification": "Needs the happens-before rules (docs/cs-fundamentals/manual.md #Go Memory Model Summary) plus race-detector usage (#The Race Detector, non-adjacent section) plus concrete sync primitives from a different file (docs/go-lang/manual.md #sync)."
+  },
+  {
+    "query": "How do PHP and Go each achieve bounded parallelism, and what constraint of PHP's runtime model drives the difference?",
+    "relevant_chunk_ids": ["d7817eeb2c9b4056", "92aa411059d60638", "c79397aa81291932"],
+    "justification": "Needs PHP's shared-nothing single-threaded model (docs/cs-fundamentals/manual.md #PHP's Concurrency Model) plus the pcntl_fork bounded pattern (#Bounded Parallelism Pattern, non-adjacent) plus Go's goroutine/channel counterpart from a different file (docs/go-lang/manual.md #Goroutines and Channels)."
+  },
+  {
+    "query": "Testing network segmentation and zero-trust enforcement during an authorized assessment: what should the firewall policy look like and how do I verify it is enforced?",
+    "relevant_chunk_ids": ["51aeeb5602df60ed", "06a3fdb257715a01", "ebc3e2208a09baa9"],
+    "justification": "Policy design principles (docs/computer-networks/manual.md #Firewalls, Zero Trust, and Segmentation) plus the assessment workflow (#Authorized Network-Security Assessment) plus the concrete source-destination-port verification matrix from a different file (docs/cybersecurity/offensive-assessment.md #Segmentation and egress)."
+  },
+  {
+    "query": "Structuring a NestJS service as a hexagonal architecture: what maps to ports and adapters, and where do modules and providers fit?",
+    "relevant_chunk_ids": ["06b9052c0e28a4a4", "d1802ea7ec0f4165", "aa2f00d3423035f2", "97dac84ffe19b16c"],
+    "justification": "Hexagonal ports/adapters definition (docs/architectural-patterns/manual.md), the NestJS module/controller/provider triad and constructor DI (docs/nestjs/manual.md, two sections), and the inward dependency rule (docs/software-engineering/manual.md #Dependency rule). Three files must be combined."
+  },
+  {
+    "query": "A sanitizer crash surfaced while fuzzing a PHP extension - when is it a real finding, and what must be true before disclosing it as a CVE?",
+    "relevant_chunk_ids": ["4687cad8c0a2a424", "3252887f7bd3266d", "e90eab9aaf27a850", "d45772e908857640"],
+    "justification": "Finding definition (docs/cybersecurity/memory-safety-vuln-research.md #0. What counts as a finding) plus sanitizer-report caveats (#4. Sanitizer-report interpretation) plus disclosure gates from the campaign casestudy (#Disclosure-readiness gates) plus CVE semantics (docs/cybersecurity/cve-and-defensive-workflow.md #What a CVE is). Three files."
+  },
+  {
+    "query": "During an authentication assessment of a web application, which TLS and PKI properties matter and which session and federation behaviors should be tested?",
+    "relevant_chunk_ids": ["3e234786c4922138", "d86c6f76f81b41e1"],
+    "justification": "TLS validation/forward-secrecy/0-RTT semantics (docs/computer-networks/manual.md #TLS 1.3 and PKI) plus the session/MFA/federation test list (docs/cybersecurity/offensive-assessment.md #Authentication). Cross-file pair; neither alone covers both halves."
+  },
+  {
+    "query": "Where should Eloquent models sit in a clean architecture, and what does dependency inversion imply for repositories in a Laravel application?",
+    "relevant_chunk_ids": ["72d4958f6f7a3cb4", "89ccb81756b57882", "bf339bd992cee128"],
+    "justification": "Eloquent model mechanics (docs/laravel/manual.md #Eloquent ORM Models) plus DIP guidance (docs/software-engineering/manual.md #Dependency Inversion Principle) plus the boundary rule that domain code must not import ORM types (#Boundary rules). Cross-file combination."
+  },
+  {
+    "query": "Modernizing a legacy PHP monolith: how do dependency seams enable moving toward a modular monolith, and when should splitting into services wait?",
+    "relevant_chunk_ids": ["6654e34b046bdbaf", "a43598568d5703c9", "a28a2166a1db3911"],
+    "justification": "Seam concept and typical legacy coupling (docs/php/legacy-modernization.md #4. Find and Create Dependency Seams) plus the seam-building sequence (#Seam-building sequence) plus the modular-monolith-vs-microservices decision from a different file (docs/software-engineering/manual.md #Modular monolith versus microservices)."
+  }
+]

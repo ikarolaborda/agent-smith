@@ -115,3 +115,42 @@ func TestGraphCoversEmbeddedCorpus(t *testing.T) {
 		t.Fatal("graph over the embedded corpus has no traversable edges")
 	}
 }
+
+func TestHeadingTopicEdgesConnectAcrossSources(t *testing.T) {
+	col := &Collection{Name: "docs", Chunks: []Chunk{
+		{ID: "t0", Source: "networks.md", Heading: "Firewalls and Segmentation", Ordinal: 0, Text: "x"},
+		{ID: "t1", Source: "assessment.md", Heading: "Segmentation and egress", Ordinal: 0, Text: "y"},
+		{ID: "t2", Source: "assessment.md", Heading: "Reporting", Ordinal: 1, Text: "z"},
+	}}
+	g := BuildGraph([]*Collection{col})
+
+	/* "segmentation" is shared by two chunks from different sources: topic edge. */
+	got := chunkIDs(g.Expand([]string{"t0"}, 1))
+	if !contains(got, "t1") {
+		t.Fatalf("expand from t0 = %v, want cross-source topic neighbor t1", got)
+	}
+	if contains(got, "t2") {
+		t.Fatalf("expand from t0 = %v, must not include unrelated t2", got)
+	}
+}
+
+func TestHeadingTopicEdgesSkipSameSourceAndGenericTokens(t *testing.T) {
+	col := &Collection{Name: "docs", Chunks: []Chunk{
+		{ID: "s0", Source: "a.md", Heading: "Caching Strategies", Ordinal: 0, Text: "x"},
+		{ID: "sMid", Source: "a.md", Heading: "Unrelated Middle", Ordinal: 3, Text: "m"},
+		{ID: "s1", Source: "a.md", Heading: "Caching Pitfalls", Ordinal: 5, Text: "y"},
+		{ID: "s2", Source: "b.md", Heading: "Best Practices", Ordinal: 0, Text: "z"},
+		{ID: "s3", Source: "c.md", Heading: "Best Practices", Ordinal: 0, Text: "w"},
+	}}
+	g := BuildGraph([]*Collection{col})
+
+	/* Same-source "caching" pair must rely on structure, not topic edges; the
+	   chunks are non-adjacent with distinct headings, so no edge exists. */
+	if got := chunkIDs(g.Expand([]string{"s0"}, 1)); contains(got, "s1") {
+		t.Fatalf("expand from s0 = %v, same-source topic edge must not exist", got)
+	}
+	/* "best"/"practices" are generic heading tokens: no cross-source hub edges. */
+	if got := chunkIDs(g.Expand([]string{"s2"}, 1)); contains(got, "s3") {
+		t.Fatalf("expand from s2 = %v, generic heading tokens must not link", got)
+	}
+}

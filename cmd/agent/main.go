@@ -118,8 +118,10 @@ func run(f flags) error {
 		if err := a.Tools.Register(builtin.NewRAGSearchTool(ragSvc)); err != nil {
 			return fmt.Errorf("register rag_search tool: %w", err)
 		}
-		if err := a.Tools.Register(builtin.NewGraphExpandTool(ragSvc)); err != nil {
-			return fmt.Errorf("register graph_expand tool: %w", err)
+		if f.graphExpand {
+			if err := a.Tools.Register(builtin.NewGraphExpandTool(ragSvc)); err != nil {
+				return fmt.Errorf("register graph_expand tool: %w", err)
+			}
 		}
 		a.Agentic = f.agentic || cfg.Agent.Agentic
 	}

@@ -13,6 +13,7 @@ possible later enrichment.
 package rag
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -23,13 +24,20 @@ const (
 	/* edgeEntity connects chunks (possibly across sources) that share a salient
 	   entity — the "reasoning across disconnected facts" relationship. */
 	edgeEntity = "entity"
+	/* edgeTopic connects chunks from DIFFERENT sources whose headings share a
+	   rare topical token (e.g. "Segmentation and egress" <-> "Firewalls, Zero
+	   Trust, and Segmentation") — part of the predefined densification follow-up
+	   of the graph-salient benchmark (eval/fixtures/README.md). */
+	edgeTopic = "topic"
 	/*
 		maxGraphExpand caps expansion output so a traversal cannot flood the model.
-		Kept deliberately small: a broad 12-topic retrieval eval measured graph
-		expansion adding ~6.5 chunks/query at only ~14% precision and no recall lift
-		over budget-matched lexical widening, so graph_expand is a sparse,
-		use-when-connected aid — not a bulk recall booster. Fewer, higher-signal
-		neighbors reduce the noise the reasoning model must filter.
+		Kept deliberately small: the hand-labeled cross-source benchmark
+		(eval/fixtures/README.md) measured no recall lift over budget-matched
+		lexical widening and near-zero precision of graph-added chunks, even after
+		the pre-registered edge densification. graph_expand is consequently
+		off-by-default (register behind --graph-expand / Options.GraphExpand); when
+		enabled it is a sparse, use-when-connected aid, and the small cap keeps the
+		noise the reasoning model must filter bounded.
 	*/
 	maxGraphExpand = 5
 )
@@ -99,10 +107,85 @@ func BuildGraph(collections []*Collection) *Graph {
 			}
 		}
 	}
-	/* Entity edges span sources, so they are derived once over the whole corpus
-	   after all structural edges are in place. */
+	/* Entity and heading-topic edges span sources, so they are derived once over
+	   the whole corpus after all structural edges are in place. */
 	g.addEntityEdges()
+	g.addHeadingTopicEdges()
 	return g
+}
+
+var headingTokenRE = regexp.MustCompile(`[a-z0-9]{4,}`)
+
+/*
+genericHeadingTokens are document-structure words that appear in headings across
+any tech corpus and would create hub edges rather than topical ones.
+*/
+var genericHeadingTokens = map[string]struct{}{
+	"best": {}, "practices": {}, "with": {}, "notes": {}, "summary": {},
+	"common": {}, "guide": {}, "manual": {}, "basics": {}, "highlights": {},
+	"selected": {}, "example": {}, "worked": {}, "overview": {}, "workflow": {},
+}
+
+const (
+	minTopicChunks = 2
+	/* A heading token shared by many chunks is a category word, not a topic;
+	   the band keeps topic edges rare and meaningful. */
+	maxTopicChunks = 12
+)
+
+/*
+addHeadingTopicEdges links chunks from DIFFERENT sources whose headings share a
+rare topical token. Within-source heading structure is already covered by
+sibling edges; this adds the cross-document conceptual hop (e.g. the php and
+software-engineering "dependency" sections) that entity extraction misses when
+the shared term never appears as a code span, proper noun, or acronym in the
+body. Added as the predefined densification follow-up of the graph-salient
+benchmark; deterministic like every other edge pass.
+*/
+func (g *Graph) addHeadingTopicEdges() {
+	ids := make([]string, 0, len(g.chunks))
+	for id := range g.chunks {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	tokenChunks := map[string][]string{}
+	for _, id := range ids {
+		heading := strings.ToLower(g.chunks[id].Heading)
+		seen := map[string]struct{}{}
+		for _, tok := range headingTokenRE.FindAllString(heading, -1) {
+			if _, generic := genericHeadingTokens[tok]; generic {
+				continue
+			}
+			if _, dup := seen[tok]; dup {
+				continue
+			}
+			seen[tok] = struct{}{}
+			tokenChunks[tok] = append(tokenChunks[tok], id)
+		}
+	}
+
+	tokens := make([]string, 0, len(tokenChunks))
+	for tok := range tokenChunks {
+		tokens = append(tokens, tok)
+	}
+	sort.Strings(tokens)
+
+	for _, tok := range tokens {
+		members := tokenChunks[tok]
+		if len(members) < minTopicChunks || len(members) > maxTopicChunks {
+			continue
+		}
+		for i := range members {
+			for j := i + 1; j < len(members); j++ {
+				if g.chunks[members[i]].Source == g.chunks[members[j]].Source {
+					continue
+				}
+				g.addEdge(members[i], members[j], edgeTopic)
+				g.addEdge(members[j], members[i], edgeTopic)
+			}
+		}
+	}
 }
 
 func (g *Graph) addEdge(from, to, kind string) {
