@@ -73,6 +73,12 @@ export interface Conversation {
    */
   webSearch?: boolean;
   /*
+   * Per-conversation override of the server-side agentic-RAG default. undefined
+   * means "use server default"; the model plans and runs its own retrieval via
+   * the rag_search/graph_expand tools instead of one-shot augmentation.
+   */
+  agentic?: boolean;
+  /*
    * Opt-in judge-in-the-loop refinement for this conversation. undefined/false
    * means a normal single-pass streamed answer.
    */
