@@ -181,7 +181,7 @@ func run(f flags) error {
 			A self-managing provider (llamacpp supervises a llama-server child)
 			exposes Close; stop the subprocess on exit so no server is orphaned.
 		*/
-		if c, ok := provider.(interface{ Close(context.Context) error }); ok {
+		if c, ok := provider.(llm.Closer); ok {
 			defer func() { _ = c.Close(context.Background()) }()
 		}
 	}
@@ -366,7 +366,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		if err != nil {
 			return fmt.Errorf("build llamacpp provider: %w", err)
 		}
-		if c, ok := prov.(interface{ Close(context.Context) error }); ok {
+		if c, ok := prov.(llm.Closer); ok {
 			defer func() { _ = c.Close(context.Background()) }()
 		}
 		extra = map[string]llm.Provider{prov.Name(): prov}

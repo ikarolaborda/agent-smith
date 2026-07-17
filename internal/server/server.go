@@ -247,7 +247,7 @@ func New(opts Options) (*Server, error) {
 				entry with an empty model — there is no way to pick the clustered model
 				from the web UI, and chat silently falls through to the local backend.
 			*/
-			if lister, ok := prov.(interface{ ListModels() []cluster.ModelInfo }); ok {
+			if lister, ok := prov.(clusterModelLister); ok {
 				for _, m := range lister.ListModels() {
 					s.models = append(s.models, modelEntry{
 						ID:       name + "/" + m.ID,
@@ -447,8 +447,19 @@ from its resolved artifacts (for example, a llama.cpp model with a validated
 mmproj) instead of guessing from the model name. Cloud clients do not expose
 this method, so they retain the conservative name-based fallback.
 */
+/*
+clusterModelLister is the consumer-side capability the server needs from a
+provider that fronts several named models (the cluster provider): the ability to
+enumerate them so each can be surfaced individually in the model list. It is
+defined here, at the point of use, rather than in internal/llm, so the provider
+contract does not take a dependency on cluster.ModelInfo.
+*/
+type clusterModelLister interface {
+	ListModels() []cluster.ModelInfo
+}
+
 func providerSupportsVision(prov llm.Provider, provider, model string) bool {
-	if capable, ok := prov.(interface{ SupportsVision() bool }); ok {
+	if capable, ok := prov.(llm.VisionReporter); ok {
 		return capable.SupportsVision()
 	}
 	return cloudModelSupportsVision(provider, model)

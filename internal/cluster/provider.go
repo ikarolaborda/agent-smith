@@ -33,6 +33,13 @@ type Provider struct {
 }
 
 /*
+Compile-time proof that Provider keeps satisfying llm.Closer: the composition
+root relies on Close to stop the background health refresh on shutdown, so
+dropping it must fail the build rather than leak the goroutine.
+*/
+var _ llm.Closer = (*Provider)(nil)
+
+/*
 New builds a cluster Provider from a loaded ClusterConfig. localProvider is the
 existing single-node provider that backs the local fallback (may be nil only if
 strict_cluster is set). On construction it discovers nodes so the scheduler's

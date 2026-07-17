@@ -48,6 +48,17 @@ type Provider struct {
 	closed bool
 }
 
+/*
+Compile-time proof that Provider keeps satisfying the optional capabilities the
+server and composition root type-assert for. Removing or changing the signature
+of Close or SupportsVision becomes a build error here rather than a silent
+capability loss that only surfaces as an orphaned subprocess at runtime.
+*/
+var (
+	_ llm.Closer         = (*Provider)(nil)
+	_ llm.VisionReporter = (*Provider)(nil)
+)
+
 func init() {
 	llm.Register(providerName, func(cfg any) (llm.Provider, error) {
 		c, ok := cfg.(Config)

@@ -91,7 +91,7 @@ func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx i
 	policy := DefaultFitPolicy()
 	artifacts := modelBytes + mmprojBytes
 	weights := artifacts + artifacts/100*15 // +15% mapping/runtime overhead
-	scratch := max64(policy.MinimumScratchBytes, artifacts/10)
+	scratch := max(policy.MinimumScratchBytes, artifacts/10)
 
 	ceiling := 32768
 	if maxCtx > 0 && maxCtx < ceiling {
@@ -146,7 +146,7 @@ func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx i
 	}
 
 	/* Discrete GPU: weights + KV must fit dedicated VRAM to offload fully. */
-	vramReserve := max64(512*1024*1024, host.GPU.VRAMBytes/16) // leave headroom for the driver/compute
+	vramReserve := max(512*1024*1024, host.GPU.VRAMBytes/16) // leave headroom for the driver/compute
 	vramBudget := saturatingSub(host.GPU.VRAMBytes, vramReserve)
 	if vramBudget >= weights+kvAt(2048) {
 		ctx := largestCtxWithin(vramBudget, weights)
@@ -189,11 +189,11 @@ func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx i
 
 /* ramSafeBudget mirrors the fit gate's system-memory budget for recommendations. */
 func ramSafeBudget(host HostProfile, policy FitPolicy) uint64 {
-	osReserve := max64(policy.MinimumOSReserveBytes, host.TotalMemoryBytes/8)
+	osReserve := max(policy.MinimumOSReserveBytes, host.TotalMemoryBytes/8)
 	totalBudget := saturatingSub(host.TotalMemoryBytes, osReserve)
-	headroom := max64(policy.MinimumFreeHeadroom, host.TotalMemoryBytes/32)
+	headroom := max(policy.MinimumFreeHeadroom, host.TotalMemoryBytes/32)
 	availBudget := saturatingSub(host.AvailableMemoryBytes, headroom)
-	return min64(totalBudget, availBudget)
+	return min(totalBudget, availBudget)
 }
 
 func humanGiB(b uint64) string {
