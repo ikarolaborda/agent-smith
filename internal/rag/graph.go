@@ -20,6 +20,9 @@ import (
 const (
 	edgeAdjacent = "adjacent"
 	edgeSibling  = "sibling"
+	/* edgeEntity connects chunks (possibly across sources) that share a salient
+	   entity — the "reasoning across disconnected facts" relationship. */
+	edgeEntity = "entity"
 	/* maxGraphExpand caps expansion output so a traversal cannot flood the model. */
 	maxGraphExpand = 8
 )
@@ -89,6 +92,9 @@ func BuildGraph(collections []*Collection) *Graph {
 			}
 		}
 	}
+	/* Entity edges span sources, so they are derived once over the whole corpus
+	   after all structural edges are in place. */
+	g.addEntityEdges()
 	return g
 }
 
