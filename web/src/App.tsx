@@ -207,7 +207,7 @@ export function App() {
     const refine = conv.refine ?? false;
     try {
       await streamChatCompletion(
-        { model: conv.model, messages: wireMessages, stream: true, profile_id: profileId, web_search: webSearch, refine },
+        { model: conv.model, messages: wireMessages, stream: true, profile_id: profileId, web_search: webSearch, agentic: conv.agentic, refine },
         {
           onRefineRound: (r) => {
             patchAssistant((m) => ({ ...m, refine_rounds: [...(m.refine_rounds ?? []), r] }));
@@ -320,6 +320,11 @@ export function App() {
     updateConversation(active.id, (c) => ({ ...c, webSearch: next }));
   }
 
+  function handleToggleAgentic(next: boolean) {
+    if (!active) return;
+    updateConversation(active.id, (c) => ({ ...c, agentic: next }));
+  }
+
   function handleToggleRefine(next: boolean) {
     if (!active) return;
     updateConversation(active.id, (c) => ({ ...c, refine: next }));
@@ -371,6 +376,15 @@ export function App() {
               disabled={!active}
             />
             <span>Ground with web</span>
+          </label>
+          <label className="web-toggle" title="Agentic-RAG: the model plans and runs its own retrieval (rag_search/graph_expand) and cites sources, instead of one-shot augmentation. Best with a tool-capable reasoning model (OpenAI/Anthropic).">
+            <input
+              type="checkbox"
+              checked={active?.agentic ?? false}
+              onChange={(e) => handleToggleAgentic(e.target.checked)}
+              disabled={!active}
+            />
+            <span>Agentic retrieval</span>
           </label>
           <label className="web-toggle" title="Judge-in-the-loop: regenerate and re-evaluate until the answer is grounded/usable. Evaluation-first; may take minutes; an honest negative is not upgraded to a confirmed result.">
             <input

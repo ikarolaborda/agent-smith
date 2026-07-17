@@ -66,6 +66,10 @@ func run(f flags) error {
 		return runBuildDataset(ctx, cfg, f, logger)
 	}
 
+	if f.evalRAG != "" {
+		return runEvalRAG(ctx, cfg, f, logger)
+	}
+
 	if f.serve {
 		return runServe(ctx, cfg, f, logger)
 	}

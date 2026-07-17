@@ -64,6 +64,7 @@ export async function streamChatCompletion(
     stream: true;
     profile_id?: string;
     web_search?: boolean;
+    agentic?: boolean;
     refine?: boolean;
     refine_max_iters?: number;
   },
