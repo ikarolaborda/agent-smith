@@ -171,3 +171,26 @@ type Provider interface {
 	*/
 	ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error)
 }
+
+/*
+Closer is the optional capability of a Provider that owns a resource which must
+be released on shutdown — for example a provider that supervises a llama-server
+subprocess. It mirrors io.Closer but is context-aware. A provider that owns
+nothing simply does not implement it; callers type-assert and skip the call when
+the assertion fails. Keeping this off Provider means adding a resource-owning
+provider never forces a no-op Close on the stateless ones.
+*/
+type Closer interface {
+	Close(ctx context.Context) error
+}
+
+/*
+VisionReporter is the optional capability of a Provider that can authoritatively
+report whether its active model accepts image input. Providers that cannot
+introspect the model do not implement it, and callers fall back to a name-based
+heuristic. It is a capability signal, not a guarantee that any given request
+carries images.
+*/
+type VisionReporter interface {
+	SupportsVision() bool
+}

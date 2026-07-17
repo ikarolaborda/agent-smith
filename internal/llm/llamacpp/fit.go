@@ -207,7 +207,7 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 	// Weight mappings and runtime structures frequently exceed file size. Add
 	// 15% before backend scratch and KV allocations.
 	weightOverhead := artifacts / 100 * 15
-	scratch := max64(policy.MinimumScratchBytes, artifacts/10)
+	scratch := max(policy.MinimumScratchBytes, artifacts/10)
 	/*
 		The KV reserve scales with the cache element type. policy.KVBytesPerToken
 		is the combined K+V per-token reserve at f16; kvBytesPerToken applies the
@@ -228,10 +228,10 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 	}
 	r.EstimatedRuntimeBytes = runtimeBytes
 
-	osReserve := max64(policy.MinimumOSReserveBytes, host.TotalMemoryBytes/8)
+	osReserve := max(policy.MinimumOSReserveBytes, host.TotalMemoryBytes/8)
 	r.OSReserveBytes = osReserve
 	totalBudget := saturatingSub(host.TotalMemoryBytes, osReserve)
-	currentHeadroom := max64(policy.MinimumFreeHeadroom, host.TotalMemoryBytes/32)
+	currentHeadroom := max(policy.MinimumFreeHeadroom, host.TotalMemoryBytes/32)
 	/*
 		Stage 2: credit memory the agent will free from its own prior model to the
 		AVAILABLE term only. That memory is resident now (so absent from Available)
@@ -244,7 +244,7 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 		effectiveAvailable = math.MaxUint64
 	}
 	availableBudget := saturatingSub(effectiveAvailable, currentHeadroom)
-	r.AvailableMemoryBudget = min64(totalBudget, availableBudget)
+	r.AvailableMemoryBudget = min(totalBudget, availableBudget)
 	if runtimeBytes > r.AvailableMemoryBudget {
 		r.Reasons = append(r.Reasons, fmt.Sprintf(
 			"estimated runtime memory %d bytes exceeds safe currently available budget %d bytes",
@@ -273,7 +273,7 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 
 	if req.GPULayers > 0 && req.VRAMBytes > 0 && !req.GPUUnified {
 		r.GPUOffload = true
-		vramReserve := max64(512*byteGiB/1024, req.VRAMBytes/16) // 512 MiB or 1/16 of VRAM
+		vramReserve := max(512*byteGiB/1024, req.VRAMBytes/16) // 512 MiB or 1/16 of VRAM
 		r.VRAMBudgetBytes = saturatingSub(req.VRAMBytes, vramReserve)
 		if req.GPULayers >= fullOffloadLayers {
 			weightOnGPU, wOverflow := add64(artifacts, weightOverhead)
@@ -290,7 +290,7 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 	}
 
 	if req.DownloadBytes > 0 {
-		diskReserve := max64(policy.MinimumDiskReserve, artifacts/20)
+		diskReserve := max(policy.MinimumDiskReserve, artifacts/20)
 		requiredDisk, diskOverflow := add64(req.DownloadBytes, diskReserve)
 		if diskOverflow {
 			r.Reasons = append(r.Reasons, "disk requirement overflow")
@@ -336,20 +336,6 @@ func mul64(a, b uint64) (uint64, bool) {
 		return 0, true
 	}
 	return a * b, false
-}
-
-func min64(a, b uint64) uint64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max64(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func saturatingSub(a, b uint64) uint64 {
