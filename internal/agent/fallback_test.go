@@ -105,3 +105,27 @@ func TestNoFallbackWhenNoRAG(t *testing.T) {
 		t.Fatalf("no-RAG agentic must not fall back: calls=%d out=%q", p.calls, out)
 	}
 }
+
+/*
+	When the classic fallback pass returns empty, Run must keep the original
+
+answer (ok=false path) rather than emit a blank response.
+*/
+func TestFallbackEmptyKeepsOriginal(t *testing.T) {
+	p := &scriptedProvider{responses: []llm.Message{
+		{Role: llm.RoleAssistant, Content: "ungrounded"},
+		{Role: llm.RoleAssistant, Content: "   "},
+	}}
+	a := newAgentFor(p, true, emptyRAG(t))
+
+	out, err := a.Run(context.Background(), NewSession(), "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.calls != 2 {
+		t.Fatalf("fallback should be attempted exactly once, calls=%d", p.calls)
+	}
+	if out != "ungrounded" {
+		t.Fatalf("empty fallback must preserve the original answer, got %q", out)
+	}
+}

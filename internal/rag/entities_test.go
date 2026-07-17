@@ -49,3 +49,25 @@ func TestNoEntityEdgeWithoutSharedEntity(t *testing.T) {
 		t.Error("chunks sharing no salient entity must not be connected")
 	}
 }
+
+/*
+	An entity that appears in more chunks than maxEntityChunks is stop-word-like
+
+and must produce no entity edges, keeping the graph from over-connecting.
+*/
+func TestEntityEdgesCapEnforced(t *testing.T) {
+	chunks := make([]Chunk, maxEntityChunks+5)
+	for i := range chunks {
+		chunks[i] = Chunk{
+			ID:      "c" + string(rune('A'+i%26)) + string(rune('a'+i/26)),
+			Source:  "s" + string(rune('a'+i)),
+			Ordinal: 0,
+			Text:    "Mentions the Payment Gateway here.",
+		}
+	}
+	g := BuildGraph([]*Collection{{Name: "docs", Chunks: chunks}})
+	/* The shared entity exceeds the band, so no chunk gains an entity neighbor. */
+	if got := g.Expand([]string{chunks[0].ID}, 1); len(got) != 0 {
+		t.Fatalf("over-frequent entity must not create edges, got %v", chunkIDs(got))
+	}
+}
