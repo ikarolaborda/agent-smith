@@ -188,6 +188,7 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 
 	session.Append(llm.Message{Role: llm.RoleUser, Content: userInput})
 
+	usedRetrieval := false
 	for i := 0; i < a.MaxIters; i++ {
 		req := llm.ChatRequest{
 			Messages: a.composeMessages(ctx, session),
@@ -208,10 +209,25 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 		session.Append(resp.Message)
 
 		if len(resp.Message.ToolCalls) == 0 {
-			return resp.Message.Content + a.verifyNote(ctx, resp.Message.Content), nil
+			answer := resp.Message.Content
+			/*
+				No-tool-call fallback: agentic mode skipped the one-shot Augment, so
+				a model that answered without ever retrieving is ungrounded. Run a
+				single classic grounded pass and return that instead. It never
+				recurses — the classic pass has Agentic off, so it cannot re-trigger.
+			*/
+			if a.Agentic && a.RAG != nil && !usedRetrieval {
+				if grounded, ok := a.classicFallback(ctx, session); ok {
+					return grounded + a.verifyNote(ctx, grounded), nil
+				}
+			}
+			return answer + a.verifyNote(ctx, answer), nil
 		}
 
 		for _, call := range resp.Message.ToolCalls {
+			if isRetrievalTool(call.Name) {
+				usedRetrieval = true
+			}
 			result, toolErr := a.dispatch(ctx, call)
 			session.Append(llm.Message{
 				Role:       llm.RoleTool,
@@ -225,6 +241,45 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 }
 
 /*
+isRetrievalTool reports whether a dispatched tool actually queried the knowledge
+base, so the no-tool-call fallback fires only when the model ignored retrieval
+entirely — not merely because it used some other tool.
+*/
+func isRetrievalTool(name string) bool {
+	return name == "rag_search" || name == "graph_expand"
+}
+
+/*
+classicFallback answers with one classic grounded pass when an agentic turn
+produced a tool-free answer without retrieving. It composes over the conversation
+MINUS the just-appended ungrounded answer (so that answer cannot bias the grounded
+one), with Agentic forced off so it cannot recurse, and does a single Chat. It
+returns ok=false on a provider error or empty content, leaving the original
+answer in place. It does not mutate the session, so no conversation entry is
+duplicated.
+*/
+func (a *Agent) classicFallback(ctx context.Context, session *Session) (string, bool) {
+	prev := a.Agentic
+	a.Agentic = false
+	defer func() { a.Agentic = prev }()
+
+	msgs := session.Messages()
+	if len(msgs) == 0 {
+		return "", false
+	}
+	req := llm.ChatRequest{Messages: a.composeFrom(ctx, msgs[:len(msgs)-1]), Model: a.Model}
+	if a.MaxTokens > 0 {
+		limit := a.MaxTokens
+		req.MaxTokens = &limit
+	}
+	resp, err := a.Provider.Chat(ctx, req)
+	if err != nil || strings.TrimSpace(resp.Message.Content) == "" {
+		return "", false
+	}
+	return resp.Message.Content, true
+}
+
+/*
 composeMessages prepends the system message to the session history. The system
 content joins the configured system prompt, the always-on coding-paradigm
 directive (prefer OOP; see pkg/prompt), and — when RAG is configured and the
@@ -232,7 +287,15 @@ latest user message yields a retrieval hit — a "## Relevant documentation"
 block. The directive makes the system content non-empty on every request.
 */
 func (a *Agent) composeMessages(ctx context.Context, session *Session) []llm.Message {
-	msgs := session.Messages()
+	return a.composeFrom(ctx, session.Messages())
+}
+
+/*
+composeFrom builds the provider messages from an explicit conversation slice.
+The no-tool-call fallback uses it to re-compose a classic grounded pass over the
+turns preceding an ungrounded answer, without that answer polluting context.
+*/
+func (a *Agent) composeFrom(ctx context.Context, msgs []llm.Message) []llm.Message {
 	var aug string
 	agenticSection := ""
 	if a.Agentic {
