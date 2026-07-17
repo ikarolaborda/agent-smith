@@ -515,6 +515,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/v1/workspace", s.handleWorkspace)
 	s.mux.HandleFunc("/v1/workspace/tree", s.handleWorkspaceTree)
 	s.mux.HandleFunc("/v1/models", s.handleModels)
+	s.mux.HandleFunc("/v1/models/search", s.handleModelSearch)
+	s.mux.HandleFunc("/v1/system", s.handleSystem)
 	s.mux.HandleFunc("/v1/providers", s.handleProviders)
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("/v1/title", s.handleTitle)

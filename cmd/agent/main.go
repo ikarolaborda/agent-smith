@@ -692,6 +692,25 @@ func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logg
 		rc.Downloader.Parallel = rc.Parallel
 	}
 
+	/*
+		Auto-tune when the operator has set neither gpu_layers nor ctx_size:
+		detect the host (GPU/VRAM/RAM) and pick a launch profile that makes the
+		most of it — full GPU offload with a generous context when the accelerator
+		has room, CPU-bounded otherwise. Explicit config always wins.
+	*/
+	if lc.GPULayers == 0 && lc.CtxSize == 0 {
+		if rec, ok := autoTuneLlama(ctx, lc, rc); ok {
+			rc.GPULayers = rec.GPULayers
+			rc.CtxSize = rec.CtxSize
+			if rc.Downloader != nil {
+				rc.Downloader.ContextTokens = rc.CtxSize
+			}
+			logger.Info("llamacpp: auto-tuned for detected hardware",
+				"gpu_layers", rec.GPULayers, "ctx_size", rec.CtxSize, "backend", rec.Backend,
+				"rationale", strings.Join(rec.Rationale, "; "))
+		}
+	}
+
 	rt := llamacpp.NewRuntime(rc)
 	if err := rt.Start(ctx); err != nil {
 		return nil, err
@@ -702,6 +721,46 @@ func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logg
 		return nil, err
 	}
 	return prov, nil
+}
+
+/*
+autoTuneLlama derives a hardware-aware launch profile (GPU layers + context)
+from the detected host and the model's artifact sizes. For a repo it reuses the
+downloader's manifest inspection (no download); for a local model_path it stats
+the file. Returns false when sizes or the host cannot be determined, so the
+caller keeps its defaults.
+*/
+func autoTuneLlama(ctx context.Context, lc *config.LlamaCppConfig, rc llamacpp.RuntimeConfig) (llamacpp.Recommendation, bool) {
+	if rc.Ref != nil && rc.Downloader != nil {
+		plan, err := rc.Downloader.Inspect(ctx, *rc.Ref)
+		if err != nil {
+			return llamacpp.Recommendation{}, false
+		}
+		return llamacpp.RecommendRuntime(plan.Host, plan.Manifest.ModelBytes(), plan.Manifest.MMProjBytes(), 0), true
+	}
+	if lc.ModelPath != "" {
+		host, err := llamacpp.SystemProfiler{}.Profile(ctx, filepath.Dir(lc.ModelPath))
+		if err != nil {
+			return llamacpp.Recommendation{}, false
+		}
+		modelBytes := statSize(lc.ModelPath)
+		if modelBytes == 0 {
+			return llamacpp.Recommendation{}, false
+		}
+		return llamacpp.RecommendRuntime(host, modelBytes, statSize(lc.MMProjPath), 0), true
+	}
+	return llamacpp.Recommendation{}, false
+}
+
+func statSize(path string) uint64 {
+	if path == "" {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return 0
+	}
+	return uint64(info.Size())
 }
 
 /*
