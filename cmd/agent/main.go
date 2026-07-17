@@ -21,6 +21,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/logging"
 	"github.com/ikarolaborda/agent-smith/internal/server"
+	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
 )
 
 func main() {
@@ -105,6 +106,15 @@ func run(f flags) error {
 		}
 		a.RAG = ragSvc
 		a.WebSearch = !f.disableWeb && isLocalProvider(provider.Name())
+		/*
+			Agentic-RAG needs the rag_search tool registered so the model can drive
+			its own retrieval. Register it whenever RAG is live; enabling the loop
+			itself is gated by --agentic (or config) so the classic path is default.
+		*/
+		if err := a.Tools.Register(builtin.NewRAGSearchTool(ragSvc)); err != nil {
+			return fmt.Errorf("register rag_search tool: %w", err)
+		}
+		a.Agentic = f.agentic || cfg.Agent.Agentic
 	}
 
 	if f.refineLoop {

@@ -74,6 +74,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		Logger:           logger,
 		RAG:              ragSvc,
 		DisableRAG:       f.disableRAG,
+		Agentic:          f.agentic || serverCfg.Agent.Agentic,
 		WebSearchEnabled: !f.disableWeb,
 		VerifyCVE:        f.verifyCVE,
 		ValidateVuln:     f.validateVuln,

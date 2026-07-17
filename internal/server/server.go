@@ -80,6 +80,13 @@ type Options struct {
 	/* DisableRAG, when true, suppresses augmentation regardless of RAG presence. */
 	DisableRAG bool
 	/*
+		Agentic enables agentic-RAG by default: the reasoning model plans and runs
+		its own retrieval via the rag_search tool and self-evaluates, instead of the
+		one-shot Augment. Per-request `agentic` in the chat body overrides it. Only
+		takes effect when RAG is live and the provider supports tools.
+	*/
+	Agentic bool
+	/*
 		WebSearchEnabled is the operator-level kill switch for the web
 		grounding gate. When false, the chat handler never injects web
 		results regardless of per-request or provider-default flags. When
@@ -135,6 +142,7 @@ type Server struct {
 	writeTimeout     time.Duration
 	rag              *rag.Service
 	disableRAG       bool
+	agentic          bool
 	webSearchEnabled bool
 	/*
 		answerVerifier is the shared post-answer advisory layer (NVD CVE check
@@ -227,6 +235,7 @@ func New(opts Options) (*Server, error) {
 		writeTimeout:     opts.WriteTimeout,
 		rag:              opts.RAG,
 		disableRAG:       opts.DisableRAG,
+		agentic:          opts.Agentic,
 		webSearchEnabled: opts.WebSearchEnabled,
 	}
 	s.answerVerifier = BuildAnswerVerifier(opts.Config, opts.VerifyCVE, opts.ValidateVuln, logger)
@@ -614,6 +623,21 @@ func buildProvider(name string, p config.ProviderConfig) (llm.Provider, error) {
 }
 
 /*
+shouldAgentic resolves agentic-RAG for one request: never on when RAG is
+unavailable (there would be no rag_search tool to drive), otherwise the
+per-request override wins over the operator default.
+*/
+func (s *Server) shouldAgentic(requested *bool) bool {
+	if s.rag == nil || s.disableRAG {
+		return false
+	}
+	if requested != nil {
+		return *requested
+	}
+	return s.agentic
+}
+
+/*
 shouldWebSearch applies the precedence rules: operator kill switch first,
 then per-request override, then the local/refusal-removed provider default.
 */
@@ -709,9 +733,19 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 	}
 	reg := builtin.NewDefaultRegistryWithExec(s.getWorkspace(), s.allowExec, execOpts...)
 	a := agent.New(prov, reg, s.cfg.Agent.SystemPrompt, s.cfg.Agent.MaxIterations, s.logger)
-	if s.rag != nil && !s.disableRAG {
+	ragOn := s.rag != nil && !s.disableRAG
+	if ragOn {
 		a.RAG = s.rag
+		/*
+			Expose retrieval as a tool so an agentic-RAG turn can plan its own
+			searches. Registered only when RAG is live; without it agentic mode has
+			nothing to call, so the default below also gates on ragOn.
+		*/
+		if err := reg.Register(builtin.NewRAGSearchTool(s.rag)); err != nil {
+			return nil, fmt.Errorf("register rag_search: %w", err)
+		}
 	}
+	a.Agentic = s.agentic && ragOn
 	a.Verifier = s.answerVerifier
 	return a, nil
 }

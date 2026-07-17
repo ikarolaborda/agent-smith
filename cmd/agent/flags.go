@@ -25,6 +25,7 @@ type flags struct {
 	disableRAG      bool
 	disableWeb      bool
 	disableC7       bool
+	agentic         bool
 	clusterCfg      string
 	workspace       string
 	ragMaxChunks    int
@@ -62,6 +63,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.embedModel, "embed-model", "", "embedding model override (defaults: text-embedding-3-small / nomic-embed-text)")
 	flag.StringVar(&f.ragDir, "rag-dir", "data/rag/collections", "directory holding RAG collection JSON files")
 	flag.BoolVar(&f.disableRAG, "no-rag", false, "disable RAG augmentation (still loads collections for /v1/rag endpoints)")
+	flag.BoolVar(&f.agentic, "agentic", false, "enable agentic-RAG: the model plans and runs its own retrieval via the rag_search tool and self-evaluates (best with a tool-capable OpenAI/Anthropic provider)")
 	flag.BoolVar(&f.disableWeb, "no-web-search", false, "operator kill switch for the web-grounding gate (overrides all per-request flags)")
 	flag.BoolVar(&f.disableC7, "no-context7", false, "operator kill switch for Context7 documentation augmentation (otherwise on when CONTEXT7_API_KEY is set)")
 	flag.StringVar(&f.clusterCfg, "cluster-config", "", "path to a cluster YAML config; enables clusterized inference (exo/MLX/llama.cpp RPC) with local fallback")

@@ -30,6 +30,12 @@ type chatCompletionRequest struct {
 	*/
 	WebSearch *bool `json:"web_search,omitempty"`
 	/*
+		Agentic overrides the operator default for agentic-RAG on this request. A
+		nil pointer means "use the server default"; non-nil lets the UI toggle the
+		reasoning-driven retrieval loop per conversation. Ignored when RAG is off.
+	*/
+	Agentic *bool `json:"agentic,omitempty"`
+	/*
 		Refine enables opt-in judge-in-the-loop mode: the answer is regenerated with
 		the strict judge's critique until USABLE or the iteration budget is spent,
 		streaming per-round progress. Evaluation-first and may take minutes; it never
@@ -284,6 +290,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	a.ProfileID = req.ProfileID
 	a.Model = modelID
 	a.WebSearch = s.shouldWebSearch(provName, req.WebSearch)
+	a.Agentic = s.shouldAgentic(req.Agentic)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
