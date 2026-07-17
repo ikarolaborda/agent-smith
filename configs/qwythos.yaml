@@ -1,0 +1,23 @@
+# Local run config for the agent's own llama.cpp provider (Go supervisor of
+# llama-server). Downloads the GGUF from Hugging Face itself, then serves it on
+# loopback. Model: huihui-ai abliterated Qwythos-9B (closest GGUF to the linked
+# Ollama model richardyoung/qwythos-9b-abliterated, which has no HF GGUF mirror).
+default_provider: llamacpp
+
+agent:
+  max_iterations: 6
+
+providers:
+  llamacpp:
+    model: qwythos-9b-abliterated-q4
+    llama_cpp:
+      repo: huihui-ai/Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-GGUF
+      file: Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-Q4_K.gguf
+      quant: Q4_K
+      revision: main
+      binary: llama-server
+      ctx_size: 4096
+      gpu_layers: 99
+      parallel: 1
+      jinja: true
+      startup_timeout_seconds: 300
