@@ -5,6 +5,7 @@ import { Composer } from './components/Composer';
 import { ProviderSelector } from './components/ProviderSelector';
 import { ClusterBadge } from './components/ClusterBadge';
 import { WorkspaceBar } from './components/WorkspaceBar';
+import { ModelExplorer } from './components/ModelExplorer';
 import { CorrectionDialog } from './components/CorrectionDialog';
 import {
   deriveTitle,
@@ -24,6 +25,7 @@ export function App() {
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
   const [activeId, setActiveId] = useState<string | null>(null);
   const [models, setModels] = useState<ModelsResponse['data']>([]);
+  const [showModels, setShowModels] = useState(false);
   const [defaultProvider, setDefaultProvider] = useState<string>('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [transientError, setTransientError] = useState<string | null>(null);
@@ -379,6 +381,9 @@ export function App() {
             />
             <span>Refine &amp; evaluate</span>
           </label>
+          <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => setShowModels(true)} title="Explore models and see detected system resources">
+            <i className="bi bi-cpu" /> Models
+          </button>
           <WorkspaceBar />
           <ClusterBadge />
         </header>
@@ -426,6 +431,7 @@ export function App() {
           onCancel={() => setCorrectionTarget(null)}
         />
       )}
+      <ModelExplorer show={showModels} onClose={() => setShowModels(false)} />
     </div>
   );
 }

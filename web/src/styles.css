@@ -656,3 +656,11 @@ body {
 .refine-verdict-usable { background: rgba(46,204,113,.12); color: #2ecc71; }
 .refine-verdict-least_fabricated { background: rgba(224,168,0,.14); color: #e0a800; }
 .refine-verdict-error { background: rgba(231,76,60,.14); color: #e74c3c; }
+
+/* Model explorer / system panel */
+.system-card .system-facts { list-style: none; padding: 0; margin: 0 0 .5rem; }
+.system-card .system-facts li { padding: .15rem 0; font-size: .9rem; }
+.system-card .system-facts .k { display: inline-block; min-width: 3.5rem; font-weight: 600; color: var(--bs-secondary-color, #6c757d); }
+.model-results { list-style: none; padding: 0; margin: 0 0 .75rem; max-height: 40vh; overflow-y: auto; }
+.model-results li { padding: .3rem 0; border-bottom: 1px solid rgba(128,128,128,.15); }
+.model-results li a { font-family: var(--bs-font-monospace, monospace); }
