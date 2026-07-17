@@ -30,6 +30,16 @@ type FitRequest struct {
 	DownloadBytes uint64 `json:"download_bytes,omitempty"`
 	ContextTokens int    `json:"context_tokens"`
 	Parallel      int    `json:"parallel"`
+	/*
+		GPULayers > 0 means weights/KV are offloaded to a discrete GPU, so they
+		are admitted against VRAMBytes instead of only system RAM. A full offload
+		(GPULayers >= fullOffloadLayers) must fit weights+KV in the VRAM budget.
+		GPUUnified marks Apple-style shared memory, where the GPU has no separate
+		bank and the existing system-RAM path already applies.
+	*/
+	GPULayers  int    `json:"gpu_layers,omitempty"`
+	VRAMBytes  uint64 `json:"vram_bytes,omitempty"`
+	GPUUnified bool   `json:"gpu_unified,omitempty"`
 }
 
 // FitPolicy holds deliberately conservative approximation constants. GGUF
@@ -69,6 +79,8 @@ type FitReport struct {
 	EstimatedRuntimeBytes uint64      `json:"estimated_runtime_bytes"`
 	OSReserveBytes        uint64      `json:"os_reserve_bytes"`
 	AvailableMemoryBudget uint64      `json:"available_memory_budget"`
+	VRAMBudgetBytes       uint64      `json:"vram_budget_bytes,omitempty"`
+	GPUOffload            bool        `json:"gpu_offload,omitempty"`
 	RequiredDownloadBytes uint64      `json:"required_download_bytes"`
 	RequiredDiskBytes     uint64      `json:"required_disk_bytes"`
 	FreeDiskBytes         uint64      `json:"free_disk_bytes"`
@@ -159,6 +171,32 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 			"estimated runtime memory %d bytes exceeds safe currently available budget %d bytes",
 			runtimeBytes, r.AvailableMemoryBudget,
 		))
+	}
+
+	/*
+		Discrete-GPU offload admission. When weights/KV are placed on a dedicated
+		GPU (non-unified), a full offload must fit weights + KV inside the VRAM
+		budget (device memory minus a driver/compute reserve). This is what makes
+		a discrete accelerator usable: the system-RAM gate above still applies to
+		host-side scratch and any non-offloaded remainder, but the weights no
+		longer have to fit in system RAM.
+	*/
+	if req.GPULayers > 0 && req.VRAMBytes > 0 && !req.GPUUnified {
+		r.GPUOffload = true
+		vramReserve := max64(512*byteGiB/1024, req.VRAMBytes/16) // 512 MiB or 1/16 of VRAM
+		r.VRAMBudgetBytes = saturatingSub(req.VRAMBytes, vramReserve)
+		if req.GPULayers >= fullOffloadLayers {
+			weightOnGPU, wOverflow := add64(artifacts, weightOverhead)
+			needVRAM, nOverflow := add64(weightOnGPU, kv)
+			if wOverflow || nOverflow {
+				r.Reasons = append(r.Reasons, "VRAM requirement overflow")
+			} else if needVRAM > r.VRAMBudgetBytes {
+				r.Reasons = append(r.Reasons, fmt.Sprintf(
+					"full GPU offload needs %d bytes of VRAM (weights+KV) but the safe VRAM budget is %d bytes",
+					needVRAM, r.VRAMBudgetBytes,
+				))
+			}
+		}
 	}
 
 	if req.DownloadBytes > 0 {

@@ -210,16 +210,25 @@ func (r *Runtime) Start(ctx context.Context) error {
 		MMProjPath:    local.MMProj,
 		ContextTokens: r.cfg.CtxSize,
 		Parallel:      r.cfg.Parallel,
+		GPULayers:     r.cfg.GPULayers,
 		FitPolicy:     r.cfg.FitPolicy,
 	})
 	if err != nil {
 		return r.failStart(err)
 	}
+	/*
+		Discrete-GPU offload is now admitted by the fit gate against detected VRAM
+		(see fit.go), so a requested offload either passes the report or is
+		rejected with a VRAM reason — no blanket non-Apple refusal. A GPU layer
+		count with no detected accelerator still runs (llama.cpp clamps -ngl and
+		falls back to CPU), but we surface it so the operator can tell.
+	*/
 	if !report.Fits {
 		return r.failStart(&FitError{Report: report})
 	}
-	if r.cfg.GPULayers > 0 && !report.Host.AppleUnifiedMemory {
-		return r.failStart(errors.New("llamacpp: GPU offload was requested, but discrete-GPU VRAM admission is not implemented; use gpu_layers: 0 or an Apple unified-memory host"))
+	if r.cfg.GPULayers > 0 && !report.Host.GPU.HasUsableGPU() && !report.Host.AppleUnifiedMemory {
+		r.logger.Warn("llamacpp: gpu_layers requested but no accelerator with known VRAM was detected; llama.cpp will fall back to CPU for unplaced layers",
+			"gpu_layers", r.cfg.GPULayers, "gpu_backend", report.Host.GPU.Backend)
 	}
 	if err := startCtx.Err(); err != nil {
 		return r.failStart(err)
@@ -414,6 +423,7 @@ type LocalPreflightRequest struct {
 	MMProjPath    string
 	ContextTokens int
 	Parallel      int
+	GPULayers     int
 	FitPolicy     FitPolicy
 }
 
@@ -464,6 +474,9 @@ func InspectLocal(ctx context.Context, profiler Profiler, req LocalPreflightRequ
 		MMProjBytes:   mmprojBytes,
 		ContextTokens: req.ContextTokens,
 		Parallel:      req.Parallel,
+		GPULayers:     req.GPULayers,
+		VRAMBytes:     host.GPU.VRAMBytes,
+		GPUUnified:    host.GPU.Unified,
 	}, policy), nil
 }
 

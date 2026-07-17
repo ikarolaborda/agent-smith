@@ -28,6 +28,41 @@ type HostProfile struct {
 	FreeDiskBytes        uint64 `json:"free_disk_bytes"`
 	DiskPath             string `json:"disk_path"`
 	AppleUnifiedMemory   bool   `json:"apple_unified_memory"`
+	GPU                  GPUInfo `json:"gpu"`
+}
+
+/*
+GPUInfo is a best-effort, point-in-time view of the accelerator the local
+llama.cpp build can offload to. Detection is advisory: a zero-value GPU (Backend
+GPUBackendNone) means "no usable accelerator was detected", never an error — the
+CPU path always remains available. VRAMBytes is the dedicated device memory for
+a discrete GPU; on Apple unified-memory hosts Unified is true and the GPU shares
+the system memory pool, so VRAMBytes mirrors total RAM rather than a separate
+bank.
+*/
+type GPUInfo struct {
+	Vendor    string     `json:"vendor,omitempty"` // nvidia | amd | apple | intel
+	Name      string     `json:"name,omitempty"`
+	VRAMBytes uint64     `json:"vram_bytes"`
+	Backend   GPUBackend `json:"backend"`
+	Unified   bool       `json:"unified"`
+	Detection string     `json:"detection,omitempty"` // tool that produced the reading
+}
+
+/* GPUBackend names the llama.cpp offload backend a host can use. */
+type GPUBackend string
+
+const (
+	GPUBackendNone   GPUBackend = "none"
+	GPUBackendMetal  GPUBackend = "metal"
+	GPUBackendCUDA   GPUBackend = "cuda"
+	GPUBackendROCm   GPUBackend = "rocm"
+	GPUBackendVulkan GPUBackend = "vulkan"
+)
+
+/* HasUsableGPU reports whether an accelerator with known VRAM was detected. */
+func (g GPUInfo) HasUsableGPU() bool {
+	return g.Backend != "" && g.Backend != GPUBackendNone && g.VRAMBytes > 0
 }
 
 // Profiler makes host inspection injectable. Production callers normally use
@@ -78,6 +113,13 @@ func (SystemProfiler) Profile(ctx context.Context, diskPath string) (HostProfile
 	if p.FreeDiskBytes == 0 {
 		return HostProfile{}, errors.New("llamacpp: host reported zero free disk space")
 	}
+
+	/*
+		GPU detection is advisory and must never fail the profile: a host with no
+		accelerator still runs on CPU. On Apple the GPU shares unified memory, so
+		mirror the system pool rather than reporting a separate VRAM bank.
+	*/
+	p.GPU = detectGPU(ctx, p.TotalMemoryBytes)
 	return p, nil
 }
 
