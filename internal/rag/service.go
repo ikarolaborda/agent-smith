@@ -56,6 +56,15 @@ type Service struct {
 
 	/* memoryMu serializes the load/mutate/save/index transaction for memory. */
 	memoryMu sync.Mutex
+
+	/*
+		The structural knowledge graph is built lazily on first use (from the
+		on-disk collections) and cached, so ordinary chat that never expands the
+		graph pays nothing and the build cost is amortized.
+	*/
+	graphOnce sync.Once
+	graph     *Graph
+	graphErr  error
 	/*
 		WebSearch, when non-nil and enabled by the caller, augments each
 		chat turn with a quoted third-party snippets section. Failures
@@ -328,6 +337,37 @@ func (s *Service) Search(ctx context.Context, query string, opts SearchOpts) ([]
 		}
 	}
 	return fuseSearchResults(k, denseHits, lexicalHits), nil
+}
+
+/*
+ExpandGraph returns passages structurally related to the given chunk ids (the
+continuation of a passage and its same-section siblings), as SearchResults so the
+tool layer can cite them exactly like search hits. The graph is built once and
+cached; a build failure is returned rather than silently yielding nothing.
+*/
+func (s *Service) ExpandGraph(seedIDs []string, hops int) ([]SearchResult, error) {
+	g, err := s.graphIndex()
+	if err != nil {
+		return nil, err
+	}
+	chunks := g.Expand(seedIDs, hops)
+	out := make([]SearchResult, 0, len(chunks))
+	for _, ch := range chunks {
+		out = append(out, SearchResult{Collection: g.CollectionOf(ch.ID), Chunk: ch})
+	}
+	return out, nil
+}
+
+func (s *Service) graphIndex() (*Graph, error) {
+	s.graphOnce.Do(func() {
+		cols, err := s.Store.LoadAll()
+		if err != nil {
+			s.graphErr = err
+			return
+		}
+		s.graph = BuildGraph(cols)
+	})
+	return s.graph, s.graphErr
 }
 
 /* boundedSearchK applies the default and hard cap shared by chat and debug search. */

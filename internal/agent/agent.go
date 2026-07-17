@@ -56,6 +56,16 @@ type Agent struct {
 	*/
 	WebSearch bool
 	/*
+		Agentic switches retrieval from one-shot Augment to an agentic-RAG loop:
+		the model plans and runs its own retrieval through the rag_search (and any
+		graph) tools, self-evaluates sufficiency, and answers with citations. When
+		true, composeMessages skips Augment (to avoid double-injecting context) and
+		attaches the agentic directive instead. Requires the rag_search tool to be
+		registered and a tool-capable provider; defaults false so the classic,
+		offline-friendly path is unchanged.
+	*/
+	Agentic bool
+	/*
 		Verifier, when non-nil, post-processes the final tool-free answer and
 		returns a non-destructive advisory note (e.g. a CVE check against the NVD
 		primary source) that is appended to the response. A nil Verifier disables
@@ -224,7 +234,16 @@ block. The directive makes the system content non-empty on every request.
 func (a *Agent) composeMessages(ctx context.Context, session *Session) []llm.Message {
 	msgs := session.Messages()
 	var aug string
-	if a.RAG != nil {
+	agenticSection := ""
+	if a.Agentic {
+		/*
+			Agentic mode drives retrieval through the rag_search/graph tools inside
+			the loop, so a pre-injected Augment block would only duplicate context
+			and pull the two strategies against each other. Attach the directive and
+			leave retrieval to the model.
+		*/
+		agenticSection = prompt.AgenticRAGDirective
+	} else if a.RAG != nil {
 		if q := latestUserMessage(msgs); q != "" {
 			aug = a.RAG.Augment(ctx, q, a.ProfileID, a.WebSearch)
 		}
@@ -239,7 +258,7 @@ func (a *Agent) composeMessages(ctx context.Context, session *Session) []llm.Mes
 		and the remote abliteration model — regardless of the configured system
 		prompt.
 	*/
-	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, aug)
+	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, agenticSection, aug)
 	if system == "" {
 		return msgs
 	}

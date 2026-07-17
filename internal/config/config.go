@@ -72,6 +72,14 @@ type AgentConfig struct {
 	SystemPrompt  string  `yaml:"system_prompt"`
 	MaxIterations int     `yaml:"max_iterations"`
 	Temperature   float64 `yaml:"temperature"`
+	/*
+		Agentic enables agentic-RAG by default: the model plans and runs its own
+		retrieval via the rag_search tool and self-evaluates, rather than the
+		one-shot Augment. Best paired with a tool-capable reasoning provider
+		(OpenAI/Anthropic). Per-request `agentic` overrides it; off by default so
+		the offline-friendly classic path is unchanged.
+	*/
+	Agentic bool `yaml:"agentic"`
 }
 
 /* LoggingConfig controls the slog handler chosen at startup. */
