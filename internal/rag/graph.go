@@ -23,8 +23,15 @@ const (
 	/* edgeEntity connects chunks (possibly across sources) that share a salient
 	   entity — the "reasoning across disconnected facts" relationship. */
 	edgeEntity = "entity"
-	/* maxGraphExpand caps expansion output so a traversal cannot flood the model. */
-	maxGraphExpand = 8
+	/*
+		maxGraphExpand caps expansion output so a traversal cannot flood the model.
+		Kept deliberately small: a broad 12-topic retrieval eval measured graph
+		expansion adding ~6.5 chunks/query at only ~14% precision and no recall lift
+		over budget-matched lexical widening, so graph_expand is a sparse,
+		use-when-connected aid — not a bulk recall booster. Fewer, higher-signal
+		neighbors reduce the noise the reasoning model must filter.
+	*/
+	maxGraphExpand = 5
 )
 
 type graphEdge struct {
