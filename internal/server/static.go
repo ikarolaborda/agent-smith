@@ -62,23 +62,69 @@ func staticHandler(logger *slog.Logger) http.Handler {
 			return
 		}
 
+		/*
+			index.html names the current content-hashed asset files, so it must
+			never be cached: a stale cached copy would point at asset hashes the
+			server no longer has after a rebuild, reproducing the blank page.
+			Serve it through one no-cache path for both the direct "/" request
+			and the SPA client-side-route fallback.
+		*/
+		serveIndex := func() {
+			if indexErr != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(indexBytes)
+		}
+
 		clean := strings.TrimPrefix(r.URL.Path, "/")
-		if clean == "" {
-			clean = "index.html"
+		if clean == "" || clean == "index.html" {
+			serveIndex()
+			return
 		}
 		if _, err := fs.Stat(sub, clean); err == nil {
+			/* Build assets are content-hashed, so they are safe to cache hard. */
+			if strings.HasPrefix(r.URL.Path, "/assets/") {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			}
 			fileServer.ServeHTTP(w, r)
 			return
 		}
 
-		/* SPA fallback to index.html */
-		if indexErr != nil {
+		/*
+			A missing asset must 404 — never fall back to index.html for it.
+			Returning HTML for a .js/.css module makes the browser reject it on a
+			MIME mismatch ("Expected a JavaScript module … responded with text/html")
+			and blanks the whole SPA, while a 200 masks the real cause (a stale or
+			incomplete embedded build). Only genuine client-side routes fall back.
+		*/
+		if isAssetPath(r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(indexBytes)
+
+		serveIndex()
 	})
+}
+
+/*
+isAssetPath reports whether a request path names a static build file (by
+extension) rather than a client-side SPA route. Such a path must 404 when
+absent instead of falling back to HTML.
+*/
+func isAssetPath(p string) bool {
+	for _, ext := range []string{
+		".js", ".mjs", ".css", ".map", ".json", ".webmanifest",
+		".woff", ".woff2", ".ttf", ".otf", ".eot",
+		".svg", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp",
+	} {
+		if strings.HasSuffix(p, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 /* isPlaceholder reports whether dist/index.html is the committed placeholder. */
