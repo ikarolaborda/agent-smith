@@ -744,6 +744,9 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 		if err := reg.Register(builtin.NewRAGSearchTool(s.rag)); err != nil {
 			return nil, fmt.Errorf("register rag_search: %w", err)
 		}
+		if err := reg.Register(builtin.NewGraphExpandTool(s.rag)); err != nil {
+			return nil, fmt.Errorf("register graph_expand: %w", err)
+		}
 	}
 	a.Agentic = s.agentic && ragOn
 	a.Verifier = s.answerVerifier
