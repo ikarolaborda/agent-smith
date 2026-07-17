@@ -365,6 +365,14 @@ func (s *Service) graphIndex() (*Graph, error) {
 			s.graphErr = err
 			return
 		}
+		/*
+			Include the embedded lexical corpus so the graph covers the same chunks
+			retrieval actually serves; otherwise a fresh install (no on-disk
+			collections) yields an empty graph and graph_expand can never help.
+		*/
+		if s.Lexical != nil {
+			cols = append(cols, s.Lexical.Collections()...)
+		}
 		s.graph = BuildGraph(cols)
 	})
 	return s.graph, s.graphErr

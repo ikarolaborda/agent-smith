@@ -71,3 +71,28 @@ func TestEntityEdgesCapEnforced(t *testing.T) {
 		t.Fatalf("over-frequent entity must not create edges, got %v", chunkIDs(got))
 	}
 }
+
+func TestExtractEntitiesAcronyms(t *testing.T) {
+	ents := extractEntities("Mitigate XSS and CSRF; use PDO per OWASP guidance. The API returns JSON over HTTP.")
+	for _, want := range []string{"xss", "csrf", "pdo", "owasp"} {
+		if !contains(ents, want) {
+			t.Errorf("security acronym %q must be extracted: %v", want, ents)
+		}
+	}
+	for _, generic := range []string{"api", "json", "http"} {
+		if contains(ents, generic) {
+			t.Errorf("generic acronym %q must be denied: %v", generic, ents)
+		}
+	}
+}
+
+func TestEntityEdgesConnectViaAcronym(t *testing.T) {
+	col := &Collection{Name: "docs", Chunks: []Chunk{
+		{ID: "a0", Source: "a.md", Ordinal: 0, Text: "XSS is a client-side injection flaw."},
+		{ID: "b0", Source: "b.md", Ordinal: 0, Text: "Prevent XSS by output-encoding untrusted data."},
+	}}
+	g := BuildGraph([]*Collection{col})
+	if !contains(chunkIDs(g.Expand([]string{"a0"}, 1)), "b0") {
+		t.Fatal("chunks sharing the XSS acronym should connect across sources")
+	}
+}

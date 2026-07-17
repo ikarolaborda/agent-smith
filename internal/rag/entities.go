@@ -24,14 +24,33 @@ var (
 	/* Capitalized multi-word proper nouns, e.g. "Bearer Token", "Knowledge Graph".
 	   Requiring at least two words avoids the sentence-start / single-word noise. */
 	properNounRE = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]+(?: [A-Z][A-Za-z0-9]+){1,3}\b`)
+	/* All-caps acronyms, e.g. SQL, XSS, CSRF, PDO, OWASP — the domain terms that
+	   link security and code docs across sources and that the proper-noun and
+	   code-span heuristics both miss. Anchored to a letter so "2024" is excluded;
+	   the word boundary trims hyphenated ids (CVE-2024 -> CVE). */
+	acronymRE = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,7}\b`)
 )
 
+/*
+genericAcronyms are protocol/format acronyms so ubiquitous in a tech corpus that
+linking on them creates hubs, not signal. Security-relevant acronyms (SQL, XSS,
+CSRF, SSRF, RCE, PDO, OWASP, CVE, …) are deliberately NOT listed — they are the
+edges worth having.
+*/
+var genericAcronyms = map[string]struct{}{
+	"api": {}, "http": {}, "https": {}, "json": {}, "xml": {}, "html": {},
+	"css": {}, "url": {}, "uri": {}, "rest": {}, "sdk": {}, "cli": {},
+	"dns": {}, "tcp": {}, "udp": {}, "ssl": {}, "tls": {}, "yaml": {}, "csv": {},
+}
+
 const (
-	maxEntitiesPerChunk = 12
+	maxEntitiesPerChunk = 16
 	/* An entity in only one chunk relates nothing; one in very many is a stop-word
-	   masquerading as an entity. Edges are built only for entities in this band. */
+	   masquerading as an entity. Edges are built only for entities in this band.
+	   The upper bound is generous enough for recurring acronyms yet still skips
+	   ubiquitous terms; the denylist above trims the worst offenders first. */
 	minEntityChunks = 2
-	maxEntityChunks = 24
+	maxEntityChunks = 40
 )
 
 /*
@@ -51,6 +70,12 @@ func extractEntities(text string) []string {
 		add(m[1])
 	}
 	for _, m := range properNounRE.FindAllString(text, -1) {
+		add(m)
+	}
+	for _, m := range acronymRE.FindAllString(text, -1) {
+		if _, generic := genericAcronyms[strings.ToLower(m)]; generic {
+			continue
+		}
 		add(m)
 	}
 	out := make([]string, 0, len(set))

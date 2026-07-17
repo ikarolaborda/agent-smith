@@ -77,3 +77,41 @@ func TestGraphSkipsMemoryCollections(t *testing.T) {
 		t.Fatalf("memory chunks must not be graphed, got %v", chunkIDs(got))
 	}
 }
+
+/*
+Regression: the knowledge graph must be built over the SAME corpus retrieval
+serves (the embedded lexical corpus), not only on-disk collections — otherwise a
+fresh install has an empty graph and graph_expand can never help.
+*/
+func TestGraphCoversEmbeddedCorpus(t *testing.T) {
+	lx, err := loadBuiltinLexicalIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := lx.Collections()
+	total := 0
+	for _, c := range cols {
+		total += len(c.Chunks)
+	}
+	if total < 50 {
+		t.Fatalf("embedded corpus should feed the graph; got %d chunks in %d collections", total, len(cols))
+	}
+	g := BuildGraph(cols)
+	/* Any multi-chunk source yields adjacency edges, so at least one chunk must
+	   have a graph neighbor — proving the graph is populated. */
+	neighbors := false
+	for _, c := range cols {
+		for _, ch := range c.Chunks {
+			if len(g.Expand([]string{ch.ID}, 1)) > 0 {
+				neighbors = true
+				break
+			}
+		}
+		if neighbors {
+			break
+		}
+	}
+	if !neighbors {
+		t.Fatal("graph over the embedded corpus has no traversable edges")
+	}
+}
