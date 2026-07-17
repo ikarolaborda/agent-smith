@@ -135,6 +135,36 @@ func newLexicalIndex(chunks []SearchResult) *LexicalIndex {
 }
 
 /*
+Collections reconstructs the embedded corpus as rag Collections, grouped by
+source collection in first-seen order, so the knowledge graph can be built over
+the SAME chunks the lexical search serves. Without this the graph would be built
+only from on-disk collections — empty on a fresh install — leaving graph_expand
+with nothing to traverse even though rag_search returns results from here.
+*/
+func (l *LexicalIndex) Collections() []*Collection {
+	if l == nil {
+		return nil
+	}
+	byName := map[string]*Collection{}
+	var order []string
+	for _, d := range l.documents {
+		name := d.result.Collection
+		c, ok := byName[name]
+		if !ok {
+			c = &Collection{Name: name}
+			byName[name] = c
+			order = append(order, name)
+		}
+		c.Chunks = append(c.Chunks, d.result.Chunk)
+	}
+	out := make([]*Collection, 0, len(order))
+	for _, name := range order {
+		out = append(out, byName[name])
+	}
+	return out
+}
+
+/*
 Search returns deterministic BM25-style matches. Scores are mapped into [0,1]
 so they remain usable by the existing confidence-band and hybrid merge logic;
 raw BM25 remains the primary ordering key.

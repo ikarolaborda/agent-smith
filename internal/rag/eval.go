@@ -19,18 +19,30 @@ type EvalCase struct {
 
 /* CaseResult is the per-query recall of each retrieval strategy. */
 type CaseResult struct {
-	Query       string  `json:"query"`
-	BaseRecall  float64 `json:"base_recall"`
-	GraphRecall float64 `json:"graph_recall"`
+	Query             string  `json:"query"`
+	BaseRecall        float64 `json:"base_recall"`
+	GraphRecall       float64 `json:"graph_recall"`
+	BaseMatchedRecall float64 `json:"base_matched_recall"`
+	GraphAdded        int     `json:"graph_added"`
+	GraphAddedHits    int     `json:"graph_added_hits"`
 }
 
-/* EvalReport aggregates a retrieval evaluation run. */
+/*
+EvalReport aggregates a retrieval evaluation run. BaseMatchedRecall is the budget
+control: plain search widened to the SAME candidate count the graph hop produced
+(k + graph_added), so graph lift over base_matched is real signal, not just more
+candidates. GraphAddedPrecision is the fraction of graph-added chunks that were
+actually relevant — a low value means the graph added noise, not evidence.
+*/
 type EvalReport struct {
-	K           int          `json:"k"`
-	Cases       int          `json:"cases"`
-	BaseRecall  float64      `json:"base_recall_mean"`
-	GraphRecall float64      `json:"graph_recall_mean"`
-	PerCase     []CaseResult `json:"per_case"`
+	K                   int          `json:"k"`
+	Cases               int          `json:"cases"`
+	BaseRecall          float64      `json:"base_recall_mean"`
+	GraphRecall         float64      `json:"graph_recall_mean"`
+	BaseMatchedRecall   float64      `json:"base_matched_recall_mean"`
+	GraphAdded          float64      `json:"graph_added_mean"`
+	GraphAddedPrecision float64      `json:"graph_added_precision"`
+	PerCase             []CaseResult `json:"per_case"`
 }
 
 /*
@@ -57,8 +69,14 @@ no model call.
 */
 func (s *Service) EvalRetrieval(ctx context.Context, cases []EvalCase, k int) (EvalReport, error) {
 	rep := EvalReport{K: k, Cases: len(cases)}
-	var baseSum, graphSum float64
+	var baseSum, graphSum, matchedSum float64
+	var addedSum, addedHitsSum int
 	for _, c := range cases {
+		relevant := make(map[string]bool, len(c.RelevantChunkIDs))
+		for _, id := range c.RelevantChunkIDs {
+			relevant[id] = true
+		}
+
 		hits, err := s.Search(ctx, c.Query, SearchOpts{K: k})
 		if err != nil {
 			return EvalReport{}, err
@@ -78,19 +96,53 @@ func (s *Service) EvalRetrieval(ctx context.Context, cases []EvalCase, k int) (E
 		if err != nil {
 			return EvalReport{}, err
 		}
+		added, addedHits := 0, 0
 		for _, e := range expanded {
+			if graph[e.Chunk.ID] {
+				continue
+			}
 			graph[e.Chunk.ID] = true
+			added++
+			if relevant[e.Chunk.ID] {
+				addedHits++
+			}
+		}
+
+		/* Budget-matched control: plain search at the same candidate count the
+		   graph produced, so lift over this is genuine, not just more candidates. */
+		matched := base
+		if added > 0 {
+			wideHits, err := s.Search(ctx, c.Query, SearchOpts{K: k + added})
+			if err != nil {
+				return EvalReport{}, err
+			}
+			matched = make(map[string]bool, len(wideHits))
+			for _, h := range wideHits {
+				matched[h.Chunk.ID] = true
+			}
 		}
 
 		br := recallAt(base, c.RelevantChunkIDs)
 		gr := recallAt(graph, c.RelevantChunkIDs)
+		bmr := recallAt(matched, c.RelevantChunkIDs)
 		baseSum += br
 		graphSum += gr
-		rep.PerCase = append(rep.PerCase, CaseResult{Query: c.Query, BaseRecall: br, GraphRecall: gr})
+		matchedSum += bmr
+		addedSum += added
+		addedHitsSum += addedHits
+		rep.PerCase = append(rep.PerCase, CaseResult{
+			Query: c.Query, BaseRecall: br, GraphRecall: gr, BaseMatchedRecall: bmr,
+			GraphAdded: added, GraphAddedHits: addedHits,
+		})
 	}
-	if len(cases) > 0 {
-		rep.BaseRecall = baseSum / float64(len(cases))
-		rep.GraphRecall = graphSum / float64(len(cases))
+	if n := len(cases); n > 0 {
+		rep.BaseRecall = baseSum / float64(n)
+		rep.GraphRecall = graphSum / float64(n)
+		rep.BaseMatchedRecall = matchedSum / float64(n)
+		rep.GraphAdded = float64(addedSum) / float64(n)
+	}
+	if addedSum > 0 {
+		rep.GraphAddedPrecision = float64(addedHitsSum) / float64(addedSum)
 	}
 	return rep, nil
 }
