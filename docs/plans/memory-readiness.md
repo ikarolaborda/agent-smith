@@ -7,6 +7,12 @@ system-essential process**, so local models load and run with the best chat UX.
 Target hosts: macOS/arm64 (Metal, unified memory) dev box; Linux/amd64 + AMD
 RX 7800 XT (ROCm) production box.
 
+**Implementation status:** Stage 0 (instrumentation) and Stage 1 (self-reclamation)
+landed in `reclaim.go` (merge c9d490f). Stages 2 (self-memory accounting), 3
+(KV-quant shrink-to-fit), and 5 (macOS purgeable) are implemented in
+`fit.go`/`tune.go`/`runtime.go`/`host.go`. Stage 4 (pressure-aware retry) and
+Stage 6 (Free-memory UI) remain — Stage 4 pairs with ROCm-box validation.
+
 ---
 
 ## TL;DR
