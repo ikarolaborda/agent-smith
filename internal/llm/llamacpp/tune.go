@@ -35,6 +35,21 @@ launch — the fit gate is the final authority, but the recommendation aims to
 already satisfy it.
 */
 func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx int) Recommendation {
+	/*
+		Never speculate on missing evidence: with an unknown model size or host
+		memory, fall back to a conservative CPU profile rather than an aggressive
+		offload the fit gate might then reject or that could OOM. The caller
+		treats gpu_layers=0 as "no offload".
+	*/
+	if modelBytes == 0 || host.TotalMemoryBytes == 0 || host.AvailableMemoryBytes == 0 {
+		return Recommendation{
+			GPULayers: 0,
+			CtxSize:   defaultContextTokens,
+			Backend:   GPUBackendNone,
+			Rationale: []string{"insufficient host or model information; conservative CPU default (no auto-offload)"},
+		}
+	}
+
 	policy := DefaultFitPolicy()
 	artifacts := modelBytes + mmprojBytes
 	weights := artifacts + artifacts/100*15 // +15% mapping/runtime overhead

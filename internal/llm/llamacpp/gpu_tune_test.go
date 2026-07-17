@@ -88,6 +88,28 @@ func TestRecommendRuntime_CPUOnly(t *testing.T) {
 	}
 }
 
+func TestRecommendRuntime_NoInfoIsConservative(t *testing.T) {
+	host := HostProfile{OS: "linux", TotalMemoryBytes: 0, AvailableMemoryBytes: 0}
+	rec := RecommendRuntime(host, 0, 0, 0)
+	if rec.GPULayers != 0 || rec.Backend != GPUBackendNone {
+		t.Fatalf("unknown host/model must not auto-offload, got layers=%d backend=%s", rec.GPULayers, rec.Backend)
+	}
+}
+
+func TestEstimateFit_DiscreteFullOffloadWithUnknownVRAMRejects(t *testing.T) {
+	host := HostProfile{
+		OS: "linux", TotalMemoryBytes: 128 * gib, AvailableMemoryBytes: 120 * gib, FreeDiskBytes: 8000 * gib,
+		GPU: GPUInfo{Vendor: "amd", Backend: GPUBackendVulkan}, // detected card, no VRAM reading
+	}
+	r := EstimateFit(host, FitRequest{
+		ModelBytes: 6 * gib, ContextTokens: 4096, Parallel: 1,
+		GPULayers: fullOffloadLayers, VRAMBytes: 0, // unknown VRAM
+	})
+	if r.Fits {
+		t.Fatalf("full offload with unknown VRAM on a discrete GPU must fail closed: %v", r.Reasons)
+	}
+}
+
 func TestEstimateFit_DiscreteGPUAdmitsWhatRAMWouldReject(t *testing.T) {
 	/*
 		A model whose weights exceed system RAM but fit VRAM must be admitted for

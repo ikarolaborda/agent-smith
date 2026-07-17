@@ -181,6 +181,17 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 		host-side scratch and any non-offloaded remainder, but the weights no
 		longer have to fit in system RAM.
 	*/
+	/*
+		A full offload requested for a discrete GPU whose VRAM could not be
+		detected must fail closed: without a VRAM budget there is no evidence the
+		weights fit the device, and admitting it on RAM alone would let a model
+		too large for the card start and then thrash or crash at runtime.
+	*/
+	if req.GPULayers >= fullOffloadLayers && !req.GPUUnified && req.VRAMBytes == 0 {
+		r.GPUOffload = true
+		r.Reasons = append(r.Reasons, "full GPU offload requested but no VRAM was detected for the discrete GPU; refusing without a VRAM budget")
+	}
+
 	if req.GPULayers > 0 && req.VRAMBytes > 0 && !req.GPUUnified {
 		r.GPUOffload = true
 		vramReserve := max64(512*byteGiB/1024, req.VRAMBytes/16) // 512 MiB or 1/16 of VRAM
