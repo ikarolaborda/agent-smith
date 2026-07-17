@@ -53,7 +53,14 @@ type RuntimeConfig struct {
 	APIKey string
 	/* AdmissionLockDir overrides the per-user runtime lock directory (primarily for tests). */
 	AdmissionLockDir string
-	Logger           *slog.Logger
+	/*
+		ReclaimBeforeStart is the Stage-1 pre-admission self-reclamation hook. It
+		runs before the host is measured, so a caller can release agent-owned
+		memory (a superseded llama-server via Reclaim, plus in-memory caches) and
+		have the fit decision measure the freed host. Nil means nothing to reclaim.
+	*/
+	ReclaimBeforeStart ReclaimFunc
+	Logger             *slog.Logger
 }
 
 // RuntimeState is observable by a control plane without exposing exec.Cmd.
@@ -89,6 +96,12 @@ type Runtime struct {
 	lastErr     error
 	startCancel context.CancelFunc
 	admission   *fileLock
+	/*
+		admittedBytes is the runtime memory estimate the currently-loaded model was
+		admitted against. Reclaim reports it as the best-effort amount a supersede
+		returns to the host. Zero until a successful admission.
+	*/
+	admittedBytes uint64
 }
 
 func NewRuntime(cfg RuntimeConfig) *Runtime {
@@ -161,6 +174,14 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return r.failStart(fmt.Errorf("llamacpp: %q not found on PATH (install llama.cpp / build llama-server): %w", binary, err))
 	}
 
+	// Stage 1: release agent-owned memory before the admission lock and the host
+	// measurement, so a superseded model's resident set is gone by the time the
+	// fit gate reads available memory. This must precede lock acquisition: a prior
+	// agent-owned llama-server holds the global runtime lock until it is reaped.
+	if err := r.runReclaimHook(startCtx); err != nil {
+		return r.failStart(err)
+	}
+
 	local, err := r.resolveArtifacts(startCtx)
 	if err != nil {
 		return r.failStart(err)
@@ -216,6 +237,8 @@ func (r *Runtime) Start(ctx context.Context) error {
 	if err != nil {
 		return r.failStart(err)
 	}
+	/* Stage 0: record the memory picture behind this decision before acting on it. */
+	r.logAdmission(report)
 	/*
 		Discrete-GPU offload is now admitted by the fit gate against detected VRAM
 		(see fit.go), so a requested offload either passes the report or is
@@ -226,6 +249,9 @@ func (r *Runtime) Start(ctx context.Context) error {
 	if !report.Fits {
 		return r.failStart(&FitError{Report: report})
 	}
+	r.mu.Lock()
+	r.admittedBytes = report.EstimatedRuntimeBytes
+	r.mu.Unlock()
 	if r.cfg.GPULayers > 0 && !report.Host.GPU.HasUsableGPU() && !report.Host.AppleUnifiedMemory {
 		r.logger.Warn("llamacpp: gpu_layers requested but no accelerator with known VRAM was detected; llama.cpp will fall back to CPU for unplaced layers",
 			"gpu_layers", r.cfg.GPULayers, "gpu_backend", report.Host.GPU.Backend)
@@ -783,6 +809,17 @@ func (r *Runtime) BaseURL() string {
 	return r.baseURL
 }
 
+/*
+AdmittedRuntimeBytes returns the runtime memory estimate the currently-loaded
+model was admitted against, or zero before a successful admission. Reclaim uses
+it as the best-effort amount a supersede returns to the host.
+*/
+func (r *Runtime) AdmittedRuntimeBytes() uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.admittedBytes
+}
+
 /* APIKey returns the per-launch credential for the supervised loopback API. */
 func (r *Runtime) APIKey() string {
 	r.mu.RLock()
@@ -861,12 +898,15 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 	err := stopCommand(ctx, cmd, done)
 	r.mu.Lock()
+	freed := r.admittedBytes
 	r.state = RuntimeStopped
 	r.started = false
 	r.baseURL = ""
+	r.admittedBytes = 0
 	r.mu.Unlock()
 	if err == nil {
-		r.logger.Info("llamacpp: llama-server stopped", "pid", cmd.Process.Pid)
+		/* Stage 0: report the resident set returned to the host on teardown. */
+		r.logger.Info("llamacpp: llama-server stopped", "pid", cmd.Process.Pid, "freed_estimate_bytes", freed)
 	}
 	return err
 }
