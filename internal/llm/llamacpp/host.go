@@ -253,9 +253,26 @@ func darwinMemory(ctx context.Context) (uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("vm_stat: %w", err)
 	}
+	available, _ := parseDarwinAvailablePages(string(vmRaw))
+	if total == 0 || available == 0 {
+		return 0, 0, errors.New("unable to determine total or available Darwin memory")
+	}
+	return total, available, nil
+}
+
+/*
+parseDarwinAvailablePages sums the reclaimable page classes from `vm_stat` output
+and returns their byte total plus the detected page size. Free, inactive, and
+speculative pages are reclaimable, and so are purgeable pages (Stage 5) — the
+kernel can drop them on demand without swapping, yet the earlier formula omitted
+them and undercounted what the fit gate could safely use. Active, wired, and
+compressor pages are deliberately not counted: they are not reclaimable without
+paging out live working sets.
+*/
+func parseDarwinAvailablePages(vmStat string) (uint64, uint64) {
 	pageSize := uint64(4096)
 	var pages uint64
-	for i, line := range strings.Split(string(vmRaw), "\n") {
+	for i, line := range strings.Split(vmStat, "\n") {
 		if i == 0 {
 			if fields := strings.Fields(line); len(fields) >= 8 {
 				if v, parseErr := strconv.ParseUint(fields[7], 10, 64); parseErr == nil {
@@ -269,18 +286,14 @@ func darwinMemory(ctx context.Context) (uint64, uint64, error) {
 			continue
 		}
 		switch strings.TrimSpace(name) {
-		case "Pages free", "Pages inactive", "Pages speculative":
+		case "Pages free", "Pages inactive", "Pages speculative", "Pages purgeable":
 			v := strings.TrimSuffix(strings.TrimSpace(value), ".")
 			if n, parseErr := strconv.ParseUint(v, 10, 64); parseErr == nil {
 				pages += n
 			}
 		}
 	}
-	available := pages * pageSize
-	if total == 0 || available == 0 {
-		return 0, 0, errors.New("unable to determine total or available Darwin memory")
-	}
-	return total, available, nil
+	return pages * pageSize, pageSize
 }
 
 func darwinTotalMemory(ctx context.Context) (uint64, error) {

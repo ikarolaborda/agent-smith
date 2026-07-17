@@ -702,11 +702,13 @@ func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logg
 		if rec, ok := autoTuneLlama(ctx, lc, rc); ok {
 			rc.GPULayers = rec.GPULayers
 			rc.CtxSize = rec.CtxSize
+			rc.KVCacheType = rec.KVCacheType
 			if rc.Downloader != nil {
 				rc.Downloader.ContextTokens = rc.CtxSize
 			}
 			logger.Info("llamacpp: auto-tuned for detected hardware",
 				"gpu_layers", rec.GPULayers, "ctx_size", rec.CtxSize, "backend", rec.Backend,
+				"kv_cache_type", rec.KVCacheType,
 				"rationale", strings.Join(rec.Rationale, "; "))
 		}
 	}

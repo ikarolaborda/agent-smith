@@ -11,11 +11,12 @@ generous context when the accelerator has room, a partial offload when it does
 not, and a RAM-bounded CPU profile when there is no usable GPU.
 */
 type Recommendation struct {
-	GPULayers int        `json:"gpu_layers"`
-	CtxSize   int        `json:"ctx_size"`
-	Backend   GPUBackend `json:"backend"`
-	FullGPU   bool       `json:"full_gpu_offload"`
-	Rationale []string   `json:"rationale"`
+	GPULayers   int         `json:"gpu_layers"`
+	CtxSize     int         `json:"ctx_size"`
+	Backend     GPUBackend  `json:"backend"`
+	FullGPU     bool        `json:"full_gpu_offload"`
+	KVCacheType KVCacheType `json:"kv_cache_type,omitempty"`
+	Rationale   []string    `json:"rationale"`
 }
 
 /*
@@ -26,6 +27,43 @@ const fullOffloadLayers = 99
 
 /* ctxLadder is the set of context sizes the tuner will pick from, largest-first. */
 var ctxLadder = []int{32768, 16384, 8192, 4096, 2048}
+
+/*
+kvTypeLadder is tried least-aggressive first so full-precision KV is preferred;
+the cache is only quantized when a higher-precision type cannot reach the minimum
+context within the budget. Quality-first, and f16-first keeps the zero value and
+all existing hosts on their current behavior.
+*/
+var kvTypeLadder = []KVCacheType{KVCacheF16, KVCacheQ8_0, KVCacheQ4_0}
+
+/* minRecommendedCtx is the floor the tuner will not drop below; a config that
+cannot reach it is left for the fit gate to refuse with a clear reason rather
+than silently served at an unusably small context. */
+const minRecommendedCtx = 2048
+
+/*
+fitCtxAndKV picks the least-aggressive KV cache type whose largest fitting ladder
+context still meets minRecommendedCtx, then returns that context. base is the
+fixed cost (weights+scratch, or weights alone on a GPU where KV lives in VRAM).
+It returns (0, f16) when nothing fits, leaving the final refusal to the fit gate.
+*/
+func fitCtxAndKV(budget, base uint64, ceiling int, policy FitPolicy) (int, KVCacheType) {
+	for _, kt := range kvTypeLadder {
+		perToken := kvBytesPerToken(policy.KVBytesPerToken, kt)
+		for _, c := range ctxLadder {
+			if c > ceiling {
+				continue
+			}
+			if base+uint64(c)*perToken <= budget {
+				if c >= minRecommendedCtx {
+					return c, kt
+				}
+				break /* ladder is largest-first: a sub-minimum first fit means this type cannot do better */
+			}
+		}
+	}
+	return 0, KVCacheF16
+}
 
 /*
 RecommendRuntime picks GPU layers and context size for a model on this host.
@@ -80,28 +118,30 @@ func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx i
 	/* CPU-only or no usable GPU: bound context by the system-RAM safe budget. */
 	if !host.GPU.HasUsableGPU() {
 		ramBudget := ramSafeBudget(host, policy)
-		ctx := largestCtxWithin(ramBudget, weights+scratch)
+		ctx, kt := fitCtxAndKV(ramBudget, weights+scratch, ceiling, policy)
 		if ctx == 0 {
-			ctx = 2048
+			ctx, kt = 2048, KVCacheF16
 		}
 		rec.GPULayers = 0
 		rec.CtxSize = ctx
 		rec.Backend = GPUBackendNone
-		rec.Rationale = append(rec.Rationale, fmt.Sprintf("no usable GPU detected; CPU inference with ctx=%d bounded by the system-RAM safe budget", ctx))
+		rec.KVCacheType = kt
+		rec.Rationale = append(rec.Rationale, fmt.Sprintf("no usable GPU detected; CPU inference with ctx=%d%s bounded by the system-RAM safe budget", ctx, kvNote(kt)))
 		return rec
 	}
 
 	/* Apple / unified memory: offload fully; the GPU shares the RAM budget. */
 	if host.GPU.Unified {
 		ramBudget := ramSafeBudget(host, policy)
-		ctx := largestCtxWithin(ramBudget, weights+scratch)
+		ctx, kt := fitCtxAndKV(ramBudget, weights+scratch, ceiling, policy)
 		if ctx == 0 {
-			ctx = 2048
+			ctx, kt = 2048, KVCacheF16
 		}
 		rec.GPULayers = fullOffloadLayers
 		rec.CtxSize = ctx
 		rec.FullGPU = true
-		rec.Rationale = append(rec.Rationale, fmt.Sprintf("unified-memory GPU (%s): full offload, ctx=%d bounded by shared RAM budget", host.GPU.Backend, ctx))
+		rec.KVCacheType = kt
+		rec.Rationale = append(rec.Rationale, fmt.Sprintf("unified-memory GPU (%s): full offload, ctx=%d%s bounded by shared RAM budget", host.GPU.Backend, ctx, kvNote(kt)))
 		return rec
 	}
 
@@ -158,4 +198,12 @@ func ramSafeBudget(host HostProfile, policy FitPolicy) uint64 {
 
 func humanGiB(b uint64) string {
 	return fmt.Sprintf("%.1f GiB", float64(b)/float64(byteGiB))
+}
+
+/* kvNote annotates the rationale only when the KV cache was quantized to fit. */
+func kvNote(t KVCacheType) string {
+	if t == "" || t == KVCacheF16 {
+		return ""
+	}
+	return fmt.Sprintf(" with KV cache %s", t)
 }

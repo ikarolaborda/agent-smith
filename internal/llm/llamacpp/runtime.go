@@ -46,7 +46,14 @@ type RuntimeConfig struct {
 	CtxSize        int
 	Parallel       int
 	GPULayers      int
-	Jinja          bool
+	/*
+		KVCacheType quantizes the KV cache (--cache-type-k/-v) to shrink the runtime
+		footprint (Stage 3). Empty means the f16 default. It is threaded into the
+		preflight fit estimate so the gate reserves what the server will actually
+		allocate.
+	*/
+	KVCacheType KVCacheType
+	Jinja       bool
 	ExtraArgs      []string
 	StartupTimeout time.Duration
 	/* APIKey is optional; an ephemeral high-entropy key is generated when empty. */
@@ -232,6 +239,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		ContextTokens: r.cfg.CtxSize,
 		Parallel:      r.cfg.Parallel,
 		GPULayers:     r.cfg.GPULayers,
+		KVCacheType:   r.cfg.KVCacheType,
 		FitPolicy:     r.cfg.FitPolicy,
 	})
 	if err != nil {
@@ -348,7 +356,20 @@ func validateRuntimeConfig(cfg RuntimeConfig) error {
 	if cfg.StartupTimeout < 0 {
 		return fmt.Errorf("llamacpp: startup timeout must be non-negative, got %s", cfg.StartupTimeout)
 	}
+	if !validKVCacheType(cfg.KVCacheType) {
+		return fmt.Errorf("llamacpp: unsupported KV cache type %q (want f16, q8_0, or q4_0)", cfg.KVCacheType)
+	}
 	return validateExtraArgs(cfg.ExtraArgs)
+}
+
+/* validKVCacheType accepts the empty default plus the types the tuner emits. */
+func validKVCacheType(t KVCacheType) bool {
+	switch t {
+	case "", KVCacheF16, KVCacheQ8_0, KVCacheQ4_0:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Runtime) failStart(err error) error {
@@ -450,6 +471,7 @@ type LocalPreflightRequest struct {
 	ContextTokens int
 	Parallel      int
 	GPULayers     int
+	KVCacheType   KVCacheType
 	FitPolicy     FitPolicy
 }
 
@@ -503,6 +525,7 @@ func InspectLocal(ctx context.Context, profiler Profiler, req LocalPreflightRequ
 		GPULayers:     req.GPULayers,
 		VRAMBytes:     host.GPU.VRAMBytes,
 		GPUUnified:    host.GPU.Unified,
+		KVCacheType:   req.KVCacheType,
 	}, policy), nil
 }
 
@@ -584,6 +607,15 @@ func (r *Runtime) buildArgsArtifacts(local LocalArtifacts, host string, port int
 	}
 	if r.cfg.Parallel > 0 {
 		args = append(args, "--parallel", strconv.Itoa(r.cfg.Parallel))
+	}
+	/*
+		Emit the KV cache type only when it was quantized to fit (Stage 3). It MUST
+		match the KVCacheType the fit gate estimated with (EstimateFit), or the
+		reserved budget and the server's actual KV allocation would diverge. Empty
+		and f16 are the default and need no flag.
+	*/
+	if kt := r.cfg.KVCacheType; kt != "" && kt != KVCacheF16 {
+		args = append(args, "--cache-type-k", string(kt), "--cache-type-v", string(kt))
 	}
 	/* Zero is meaningful: never inherit llama.cpp's evolving auto-offload default. */
 	args = append(args, "-ngl", strconv.Itoa(r.cfg.GPULayers))

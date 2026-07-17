@@ -12,6 +12,49 @@ const (
 	defaultKVBytesPerToken  = uint64(512 * 1024)
 )
 
+/*
+KVCacheType selects the llama.cpp KV cache element type (--cache-type-k/-v). An
+empty value means the f16 default, so the zero value preserves current behavior.
+Quantizing the KV cache is a Stage-3 shrink-to-fit lever: it lowers the per-token
+KV reserve so a larger context — or a model that would otherwise be refused —
+fits the memory budget, at a small quality cost.
+*/
+type KVCacheType string
+
+const (
+	KVCacheF16  KVCacheType = "f16"
+	KVCacheQ8_0 KVCacheType = "q8_0"
+	KVCacheQ4_0 KVCacheType = "q4_0"
+)
+
+/*
+kvCacheSixteenths returns the per-element KV size of a cache type as a fraction
+of f16, in sixteenths. Derived from llama.cpp block sizes (context7-verified):
+f16 is 2 B/elem; q8_0 is 34 B/32 = 1.0625 B/elem (0.531×); q4_0 is 18 B/32 =
+0.5625 B/elem (0.281×). Each ratio is rounded UP to the nearest sixteenth so the
+safety gate can only over-reserve, never under-reserve: q8_0→9/16, q4_0→5/16.
+*/
+func kvCacheSixteenths(t KVCacheType) uint64 {
+	switch t {
+	case KVCacheQ8_0:
+		return 9
+	case KVCacheQ4_0:
+		return 5
+	default:
+		/* f16 and the empty (unset) value both use the full-precision baseline. */
+		return 16
+	}
+}
+
+/*
+kvBytesPerToken scales the combined K+V f16 per-token reserve (base) by the cache
+type. Callers MUST feed the same KVCacheType here that they pass to buildArgs, or
+the fit estimate and the launched server would disagree on KV size.
+*/
+func kvBytesPerToken(base uint64, t KVCacheType) uint64 {
+	return base * kvCacheSixteenths(t) / 16
+}
+
 // FitDecision is deliberately binary. Unknown sizes or host capacity are a
 // rejection; callers must never interpret missing data as permission to run.
 type FitDecision string
@@ -40,6 +83,20 @@ type FitRequest struct {
 	GPULayers  int    `json:"gpu_layers,omitempty"`
 	VRAMBytes  uint64 `json:"vram_bytes,omitempty"`
 	GPUUnified bool   `json:"gpu_unified,omitempty"`
+	/*
+		KVCacheType selects the KV cache element type used both for the reserve
+		estimate here and for the launched --cache-type-k/-v. Empty means f16.
+	*/
+	KVCacheType KVCacheType `json:"kv_cache_type,omitempty"`
+	/*
+		ReclaimableSelfBytes is memory the agent can free from its own prior model
+		before this one loads (Stage 2). It is credited to the available budget
+		because it is currently resident (not counted as available) yet is part of
+		total RAM. It is a PREVIEW / model-swap-before-reclaim input: the live
+		Start path reclaims and then re-measures, so it passes zero here to avoid
+		double-counting freed memory the fresh measurement already reflects.
+	*/
+	ReclaimableSelfBytes uint64 `json:"reclaimable_self_bytes,omitempty"`
 }
 
 // FitPolicy holds deliberately conservative approximation constants. GGUF
@@ -79,6 +136,8 @@ type FitReport struct {
 	EstimatedRuntimeBytes uint64      `json:"estimated_runtime_bytes"`
 	OSReserveBytes        uint64      `json:"os_reserve_bytes"`
 	AvailableMemoryBudget uint64      `json:"available_memory_budget"`
+	ReclaimableSelfBytes  uint64      `json:"reclaimable_self_bytes,omitempty"`
+	KVCacheType           KVCacheType `json:"kv_cache_type,omitempty"`
 	VRAMBudgetBytes       uint64      `json:"vram_budget_bytes,omitempty"`
 	GPUOffload            bool        `json:"gpu_offload,omitempty"`
 	RequiredDownloadBytes uint64      `json:"required_download_bytes"`
@@ -118,6 +177,8 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 		FreeDiskBytes:         host.FreeDiskBytes,
 		ContextTokens:         ctx,
 		Parallel:              parallel,
+		ReclaimableSelfBytes:  req.ReclaimableSelfBytes,
+		KVCacheType:           req.KVCacheType,
 		EstimationLimitations: []string{
 			"KV size is a conservative architecture-independent estimate; layer count, GQA, KV type, and flash attention can change actual use",
 			"llama.cpp graph, allocator, driver, and backend versions can consume more memory than model file size",
@@ -147,9 +208,16 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 	// 15% before backend scratch and KV allocations.
 	weightOverhead := artifacts / 100 * 15
 	scratch := max64(policy.MinimumScratchBytes, artifacts/10)
+	/*
+		The KV reserve scales with the cache element type. policy.KVBytesPerToken
+		is the combined K+V per-token reserve at f16; kvBytesPerToken applies the
+		quantized fraction. This MUST match the --cache-type-k/-v the runtime
+		launches with (buildArgsArtifacts) or the gate and server disagree.
+	*/
+	perTokenKV := kvBytesPerToken(policy.KVBytesPerToken, req.KVCacheType)
 	kv, kvOverflow := mul64(uint64(ctx), uint64(parallel))
 	if !kvOverflow {
-		kv, kvOverflow = mul64(kv, policy.KVBytesPerToken)
+		kv, kvOverflow = mul64(kv, perTokenKV)
 	}
 	r.EstimatedKVBytes = kv
 	r.EstimatedScratchBytes = scratch
@@ -164,7 +232,18 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 	r.OSReserveBytes = osReserve
 	totalBudget := saturatingSub(host.TotalMemoryBytes, osReserve)
 	currentHeadroom := max64(policy.MinimumFreeHeadroom, host.TotalMemoryBytes/32)
-	availableBudget := saturatingSub(host.AvailableMemoryBytes, currentHeadroom)
+	/*
+		Stage 2: credit memory the agent will free from its own prior model to the
+		AVAILABLE term only. That memory is resident now (so absent from Available)
+		yet part of Total, so the min(totalBudget, …) cap below still bounds the
+		result by Total−osReserve — crediting it can never admit beyond physical
+		RAM. Crediting totalBudget instead would exceed physical memory.
+	*/
+	effectiveAvailable, availOverflow := add64(host.AvailableMemoryBytes, req.ReclaimableSelfBytes)
+	if availOverflow {
+		effectiveAvailable = math.MaxUint64
+	}
+	availableBudget := saturatingSub(effectiveAvailable, currentHeadroom)
 	r.AvailableMemoryBudget = min64(totalBudget, availableBudget)
 	if runtimeBytes > r.AvailableMemoryBudget {
 		r.Reasons = append(r.Reasons, fmt.Sprintf(
