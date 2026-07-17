@@ -9,28 +9,42 @@ import (
 )
 
 /*
+gpuToolRunner runs an external detection tool and returns its stdout. A missing
+binary surfaces as an error, which the detection logic treats the same as "not
+present". Injecting it lets the whole detection orchestration — not just the
+leaf parsers — run under test with real tool output on a host that has no such
+tool.
+*/
+type gpuToolRunner func(ctx context.Context, name string, args ...string) (string, error)
+
+func execGPUTool(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, name, args...).Output()
+	return string(out), err
+}
+
+/*
 detectGPU inspects the local accelerator without retaining state. It is
 best-effort and fail-open: any probe that is missing or errors simply advances
 to the next candidate, and an undetected GPU returns GPUBackendNone so the
 caller falls back to CPU. totalRAM is used only for Apple unified memory, where
 the GPU has no separate VRAM bank.
-
-Ordering on Linux prefers the vendor tool that also reports VRAM (nvidia-smi,
-rocm-smi) so auto-tuning has a real budget; it falls back to lspci for
-vendor/name identification (no VRAM) and to a Vulkan capability probe.
 */
 func detectGPU(ctx context.Context, totalRAM uint64) GPUInfo {
+	return detectGPUWith(ctx, totalRAM, execGPUTool)
+}
+
+func detectGPUWith(ctx context.Context, totalRAM uint64, run gpuToolRunner) GPUInfo {
 	switch runtime.GOOS {
 	case "darwin":
-		return detectDarwinGPU(ctx, totalRAM)
+		return detectDarwinGPU(ctx, totalRAM, run)
 	case "linux":
-		return detectLinuxGPU(ctx)
+		return detectLinuxGPU(ctx, run)
 	default:
 		return GPUInfo{Backend: GPUBackendNone}
 	}
 }
 
-func detectDarwinGPU(ctx context.Context, totalRAM uint64) GPUInfo {
+func detectDarwinGPU(ctx context.Context, totalRAM uint64, run gpuToolRunner) GPUInfo {
 	/*
 		Every modern Mac (Apple Silicon and the AMD-equipped Intel Macs llama.cpp
 		targets) offloads through Metal, and Apple Silicon shares one unified
@@ -38,7 +52,7 @@ func detectDarwinGPU(ctx context.Context, totalRAM uint64) GPUInfo {
 		already accounts for.
 	*/
 	g := GPUInfo{Vendor: "apple", Backend: GPUBackendMetal, Unified: true, VRAMBytes: totalRAM, Detection: "darwin"}
-	if out, err := runTool(ctx, "system_profiler", "SPDisplaysDataType"); err == nil {
+	if out, err := run(ctx, "system_profiler", "SPDisplaysDataType"); err == nil {
 		if name := parseSystemProfilerGPUName(out); name != "" {
 			g.Name = name
 		}
@@ -46,45 +60,38 @@ func detectDarwinGPU(ctx context.Context, totalRAM uint64) GPUInfo {
 	return g
 }
 
-func detectLinuxGPU(ctx context.Context) GPUInfo {
-	if _, err := exec.LookPath("nvidia-smi"); err == nil {
-		if out, err := runTool(ctx, "nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"); err == nil {
-			if g, ok := parseNvidiaSMI(out); ok {
-				return g
-			}
+/*
+detectLinuxGPU prefers the vendor tool that also reports VRAM (nvidia-smi,
+rocm-smi) so auto-tuning has a real budget, then falls back to lspci for
+vendor/name identification (no VRAM) plus a Vulkan capability probe. Every tool
+is invoked through run and a failure (including a missing binary) falls through
+to the next candidate.
+*/
+func detectLinuxGPU(ctx context.Context, run gpuToolRunner) GPUInfo {
+	if out, err := run(ctx, "nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"); err == nil {
+		if g, ok := parseNvidiaSMI(out); ok {
+			return g
 		}
 	}
-	if _, err := exec.LookPath("rocm-smi"); err == nil {
-		name := ""
-		if out, err := runTool(ctx, "rocm-smi", "--showproductname"); err == nil {
-			name = parseRocmProductName(out)
-		}
-		if out, err := runTool(ctx, "rocm-smi", "--showmeminfo", "vram", "--csv"); err == nil {
-			if g, ok := parseRocmVRAM(out); ok {
-				g.Name = name
-				return g
-			}
+	name := ""
+	if out, err := run(ctx, "rocm-smi", "--showproductname"); err == nil {
+		name = parseRocmProductName(out)
+	}
+	if out, err := run(ctx, "rocm-smi", "--showmeminfo", "vram", "--csv"); err == nil {
+		if g, ok := parseRocmVRAM(out); ok {
+			g.Name = name
+			return g
 		}
 	}
-	/*
-		No vendor VRAM tool: identify the card via lspci (vendor/name only, no
-		VRAM) and mark Vulkan as the offload backend when the loader is present,
-		since llama.cpp's Vulkan build runs on any modern GPU without a vendor SDK.
-	*/
-	if out, err := runTool(ctx, "lspci"); err == nil {
+	if out, err := run(ctx, "lspci"); err == nil {
 		if g, ok := parseLspciGPU(out); ok {
-			if _, verr := exec.LookPath("vulkaninfo"); verr == nil {
+			if _, verr := run(ctx, "vulkaninfo", "--summary"); verr == nil {
 				g.Backend = GPUBackendVulkan
 			}
 			return g
 		}
 	}
 	return GPUInfo{Backend: GPUBackendNone}
-}
-
-func runTool(ctx context.Context, name string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, name, args...).Output()
-	return string(out), err
 }
 
 /* parseNvidiaSMI reads "name, memory.total" CSV (MiB) from nvidia-smi. */
