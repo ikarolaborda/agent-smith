@@ -151,7 +151,18 @@ type LocalArtifacts struct {
 type FitError struct{ Report FitReport }
 
 func (e *FitError) Error() string {
-	return "llamacpp: model does not safely fit this host: " + strings.Join(e.Report.Reasons, "; ")
+	msg := "llamacpp: model does not safely fit this host: " + strings.Join(e.Report.Reasons, "; ")
+	if s := e.Report.Suggestion; s != nil {
+		fit := "should fit"
+		if !s.Fits {
+			fit = "smallest available, may still not fit"
+		}
+		msg += fmt.Sprintf(
+			"; try a smaller abliterated model: %s (~%.1fB params, %s)",
+			s.Model.Ref, s.Model.ParamsB, fit,
+		)
+	}
+	return msg
 }
 
 // Downloader resolves and transactionally installs one manifest at a time.

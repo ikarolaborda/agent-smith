@@ -162,3 +162,29 @@ models therefore receive the same computer-science, architecture, PHP/OOP,
 Clean Code/Clean Architecture, networking, and authorized cybersecurity
 grounding. Dense ingestion is optional; first-launch lexical retrieval is not.
 `--no-rag` remains an explicit operator kill switch.
+
+## Running fully independent of Ollama
+
+The `llamacpp` provider is self-contained: it downloads the GGUF from Hugging
+Face and supervises `llama-server` itself, with no Ollama and no cgo. The
+`internal/llm/llamacpp` package imports nothing from `internal/llm/ollama`. To
+run the app with no Ollama at all, set `default_provider: llamacpp` (see
+`configs/qwythos.yaml`) and use a non-Ollama embedder (`--embedder openai`) or
+rely on first-launch lexical retrieval, which needs no embedder. Ollama stays a
+first-class option — it is the default in `configs/config.example.yaml` — but it
+is never a hard dependency.
+
+## Abliterated model downgrade on resource exhaustion
+
+Abliterated models are this app's primary target. When the fit gate refuses the
+requested model on this host (not enough memory/VRAM/disk), the rejecting
+`FitReport` carries an advisory `suggestion`: a smaller abliterated model from a
+curated, offline ladder (`internal/llm/llamacpp/catalog.go`) that the fit gate
+re-checks and believes will run here. The suggestion appears in the
+`--inspect-model` / `--pull` JSON and in the human-readable error. It is
+advisory: the normal fit gate and downloader re-validate the suggested model
+(existence, real sizes, live host memory) when you actually pull it, so a stale
+ref fails safely with the ordinary error. The ladder is dense and text-only so
+its footprint math stays trustworthy; models bundling a vision projector
+(mmproj) are not cross-suggested. Override the ladder programmatically via
+`FitPolicy.FallbackLadder` (YAML wiring is a follow-up).

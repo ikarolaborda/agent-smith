@@ -110,6 +110,14 @@ type FitPolicy struct {
 	MinimumFreeHeadroom   uint64
 	MinimumScratchBytes   uint64
 	MinimumDiskReserve    uint64
+	/*
+		SuggestFallback, when true, makes a rejecting report carry an advisory
+		smaller-abliterated-model suggestion. FallbackLadder overrides the built-in
+		ladder; nil uses defaultAbliteratedLadder. The nested fit re-check disables
+		this so suggestion evaluation cannot recurse.
+	*/
+	SuggestFallback bool
+	FallbackLadder  []AbliteratedModel
 }
 
 // DefaultFitPolicy returns the production fail-safe sizing policy.
@@ -120,6 +128,7 @@ func DefaultFitPolicy() FitPolicy {
 		MinimumFreeHeadroom:   1 * byteGiB,
 		MinimumScratchBytes:   1 * byteGiB,
 		MinimumDiskReserve:    2 * byteGiB,
+		SuggestFallback:       true,
 	}
 }
 
@@ -147,6 +156,12 @@ type FitReport struct {
 	Parallel              int         `json:"parallel"`
 	Reasons               []string    `json:"reasons,omitempty"`
 	EstimationLimitations []string    `json:"estimation_limitations"`
+	/*
+		Suggestion is set only on a rejecting report when the policy enables it: a
+		smaller abliterated model the fit re-check believes will run here. Advisory —
+		re-validated by the fit gate and downloader at pull.
+	*/
+	Suggestion *Suggestion `json:"suggestion,omitempty"`
 }
 
 // EstimateFit applies DefaultFitPolicy.
@@ -308,6 +323,21 @@ func EstimateFitWithPolicy(host HostProfile, req FitRequest, policy FitPolicy) F
 	if len(r.Reasons) == 0 {
 		r.Decision = FitDecisionFit
 		r.Fits = true
+	}
+
+	/*
+		A rejected model gets an advisory smaller-abliterated suggestion so the
+		failure path still points somewhere runnable. Gated by policy and disabled
+		inside the nested re-check (see suggestSmaller) so it cannot recurse.
+	*/
+	if !r.Fits && policy.SuggestFallback {
+		ladder := policy.FallbackLadder
+		if ladder == nil {
+			ladder = defaultAbliteratedLadder
+		}
+		if s, ok := suggestSmaller(r, ladder, policy); ok {
+			r.Suggestion = &s
+		}
 	}
 	return r
 }
