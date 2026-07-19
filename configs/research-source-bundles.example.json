@@ -1,0 +1,13 @@
+[
+  {
+    "name": "authorized-upstream-mirror",
+    "repository": "https://github.com/example/authorized-project.git",
+    "bundles": [
+      {
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "url": "https://sources.example.org/authorized-project/0123456789abcdef0123456789abcdef01234567.tar",
+        "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  }
+]

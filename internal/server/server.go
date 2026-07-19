@@ -34,6 +34,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/novelty"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
+	"github.com/ikarolaborda/agent-smith/internal/research/sourcefetch"
 	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
 	"github.com/ikarolaborda/agent-smith/internal/validate"
 	"github.com/ikarolaborda/agent-smith/internal/verify"
@@ -154,6 +155,8 @@ type ResearchModeOptions struct {
 	CampaignConcurrency  int
 	NoveltySources       []novelty.Source
 	NoveltyHTTPClient    novelty.HTTPDoer
+	SourceBundles        []sourcefetch.Source
+	SourceHTTPClient     sourcefetch.HTTPDoer
 }
 
 /*

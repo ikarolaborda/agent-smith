@@ -16,6 +16,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/research/pipeline"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
 	"github.com/ikarolaborda/agent-smith/internal/research/service"
+	"github.com/ikarolaborda/agent-smith/internal/research/sourcefetch"
 	"github.com/ikarolaborda/agent-smith/internal/research/store"
 )
 
@@ -34,6 +35,7 @@ type researchRuntime struct {
 	broker         *runner.Broker
 	noveltyBroker  *novelty.Broker
 	noveltySources map[string]novelty.Source
+	sourceBroker   *sourcefetch.Broker
 }
 
 func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*researchRuntime, error) {
@@ -82,6 +84,22 @@ func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*resea
 		return nil, err
 	}
 	runtime.store, runtime.service = repository, svc
+	if len(opts.SourceBundles) > 0 {
+		doer := opts.SourceHTTPClient
+		if doer == nil {
+			doer = sourcefetch.NewHTTPClient()
+		}
+		acquisitionBroker, brokerErr := sourcefetch.NewBroker(doer, opts.SourceBundles, 0)
+		if brokerErr != nil {
+			repository.Close()
+			return nil, brokerErr
+		}
+		if err := svc.AttachSourceBroker(acquisitionBroker); err != nil {
+			repository.Close()
+			return nil, err
+		}
+		runtime.sourceBroker = acquisitionBroker
+	}
 	if len(opts.NoveltySources) > 0 {
 		doer := opts.NoveltyHTTPClient
 		if doer == nil {

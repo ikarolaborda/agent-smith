@@ -104,6 +104,7 @@ func (s *Server) capabilityStatus() map[string]any {
 		"research_branch_workflow":      researchEnabled,
 		"research_novelty_workflow":     researchEnabled,
 		"research_novelty_egress":       researchEnabled && s.research.noveltyBroker != nil,
+		"research_source_acquisition":   researchEnabled && s.research.sourceBroker != nil,
 		"research_remediation":          researchEnabled,
 		"research_private_reporting":    researchEnabled,
 		"research_remote_transport":     false,

@@ -343,7 +343,7 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 		if selectedTarget.ID != "" {
 			request.Job.SourceDir, err = acquisition.VerifiedCapture(
 				pipeline.WorkRoot(s.research.store.Root()), campaign.ID, selectedTarget.ID, selectedTarget.SourceSHA256,
-				acquisition.Limits{MaxBytes: campaign.Budget.MaxDiskBytes},
+				acquisition.Limits{MaxFiles: campaign.Budget.MaxInodes, MaxBytes: campaign.Budget.MaxDiskBytes},
 			)
 			if err != nil {
 				s.writeResearchError(w, err)
@@ -719,6 +719,8 @@ func (s *Server) writeResearchError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 	case strings.Contains(err.Error(), "runner unavailable"), strings.Contains(err.Error(), "broker not running"):
 		writeError(w, http.StatusServiceUnavailable, "runner_unavailable", err.Error())
+	case errors.Is(err, service.ErrSourceUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "source_acquisition_unavailable", err.Error())
 	case errors.Is(err, store.ErrVersionConflict):
 		writeError(w, http.StatusConflict, "version_conflict", err.Error())
 	default:

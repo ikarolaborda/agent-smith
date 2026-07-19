@@ -108,6 +108,17 @@ func TestCaptureDirectoryRejectsSymlinkEscapes(t *testing.T) {
 	})
 }
 
+func TestValidateSourcePathRejectsPortableAmbiguities(t *testing.T) {
+	for _, value := range []string{"../escape", "/absolute", `dir\\escape`, ".GIT/config", ".agent-smith/state", "CON", "com1.txt", "name:stream", "trailing.", "control\nname"} {
+		if _, err := ValidateSourcePath(value); err == nil {
+			t.Fatalf("unsafe path %q accepted", value)
+		}
+	}
+	if value, err := ValidateSourcePath("src/parser.cc"); err != nil || value != "src/parser.cc" {
+		t.Fatalf("ordinary source path rejected: value=%q err=%v", value, err)
+	}
+}
+
 func TestVerifyAndCaptureGitCheckout(t *testing.T) {
 	repository, commit := testGitRepository(t, map[string]testGitFile{
 		"README.md":      {content: "committed\n", mode: 0o600},

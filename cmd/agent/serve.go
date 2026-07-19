@@ -17,6 +17,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/novelty"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
+	"github.com/ikarolaborda/agent-smith/internal/research/sourcefetch"
 	"github.com/ikarolaborda/agent-smith/internal/server"
 )
 
@@ -116,6 +117,12 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 				return err
 			}
 		}
+		if strings.TrimSpace(f.researchSourceBundles) != "" {
+			researchMode.SourceBundles, err = loadSourceBundles(f.researchSourceBundles)
+			if err != nil {
+				return err
+			}
+		}
 		if f.allowExec {
 			researchMode.RunnerBackend = runner.NewDockerBackend(runner.DockerOptions{Runtime: f.researchRuntime, RequireRootless: true})
 		}
@@ -173,6 +180,36 @@ func loadNoveltySources(path string) ([]novelty.Source, error) {
 	}
 	if len(sources) == 0 || len(sources) > 64 {
 		return nil, errors.New("serve: research novelty sources must contain 1..64 entries")
+	}
+	return sources, nil
+}
+
+func loadSourceBundles(path string) ([]sourcefetch.Source, error) {
+	file, err := os.Open(strings.TrimSpace(path))
+	if err != nil {
+		return nil, fmt.Errorf("serve: open research source bundles: %w", err)
+	}
+	defer file.Close()
+	const maxSourceConfigBytes = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(file, maxSourceConfigBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("serve: read research source bundles: %w", err)
+	}
+	if len(body) > maxSourceConfigBytes {
+		return nil, errors.New("serve: research source bundle data exceeds 1 MiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var sources []sourcefetch.Source
+	if err := decoder.Decode(&sources); err != nil {
+		return nil, fmt.Errorf("serve: decode research source bundles: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("serve: trailing research source bundle data")
+	}
+	if len(sources) == 0 || len(sources) > 64 {
+		return nil, errors.New("serve: research source bundles must contain 1..64 entries")
 	}
 	return sources, nil
 }

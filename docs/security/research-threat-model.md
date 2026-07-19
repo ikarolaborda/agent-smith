@@ -79,8 +79,19 @@ rejects submodules, links, special modes, unsafe/reserved paths, and bounded Git
 output overruns, then exports regular-file bytes directly from verified commit
 objects. The read-only capture is atomically installed in a private campaign
 tree and rehashed before every worker mount. A production deployment still
-needs a curated image registry, signature verification/SBOM policy, and an
-explicit network acquisition broker before accepting third-party targets.
+needs a curated image registry and signature verification/SBOM policy.
+
+Optional network acquisition does not run `git fetch`, credential helpers, or
+target-controlled checkout filters. An operator-owned manifest pre-resolves a
+repository/commit to one credential-free HTTPS URL and SHA-256. Policy checks
+the repository, commit, operation, and hostname before egress. The dedicated
+transport disables proxies and redirects, rejects private/reserved DNS answers,
+pins each connection to the checked address, and caps time and response headers.
+Bundle bytes share the scope disk ceiling with extracted bytes; the parser
+accepts only uncompressed tar directories and regular files and rejects unsafe,
+reserved, case-colliding, linked, special, oversized, or over-inode entries.
+This trusts the locally installed manifest as an authorization root; production
+distribution should sign, review, rotate, and audit those manifests.
 
 Candidate fixes are bounded textual unified-diff artifacts tied to an approved
 finding correlation. The control-plane host never applies them. A read-only
@@ -144,10 +155,11 @@ privilege change, or cross-boundary impact.
 ## Beta blockers
 
 Before a beta claim, run live isolation tests on every supported backend;
-enforce kernel/filesystem disk and inode quotas; add an acquisition/egress
-deployment policy; complete repeated clean-corpus discovery/minimization on the
-real known-bug benchmark (the libpng replay calibration alone is not
-discovery); validate fix and branch workflows end to end; add encrypted
+enforce kernel/filesystem disk and inode quotas; sign and operationally govern
+source-bundle/egress manifests; complete repeated clean-corpus discovery and
+minimization on the real known-bug benchmark (the libpng replay calibration
+alone is not discovery); validate fix and branch workflows end to end; add
+encrypted
 retention/backup guidance; commission an independent review of authentication,
 container escape surface, artifact ingestion, supply chain, prompt injection,
 and multi-campaign isolation.

@@ -172,3 +172,28 @@ func TestLoadNoveltySourcesRejectsOversizedConfiguration(t *testing.T) {
 		t.Fatal("oversized novelty source configuration was accepted")
 	}
 }
+
+func TestLoadSourceBundlesIsBoundedAndStrict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bundles.json")
+	valid := `[{"name":"mirror","repository":"repo","bundles":[{"commit":"0123456789abcdef0123456789abcdef01234567","url":"https://sources.example.test/source.tar","sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}]`
+	if err := os.WriteFile(path, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := loadSourceBundles(path)
+	if err != nil || len(sources) != 1 || sources[0].Name != "mirror" || len(sources[0].Bundles) != 1 {
+		t.Fatalf("sources=%#v err=%v", sources, err)
+	}
+	unknown := strings.Replace(valid, `"repository":"repo"`, `"repository":"repo","credential":"secret"`, 1)
+	if err := os.WriteFile(path, []byte(unknown), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadSourceBundles(path); err == nil {
+		t.Fatal("unknown source-bundle configuration field accepted")
+	}
+	if err := os.WriteFile(path, []byte(valid+strings.Repeat(" ", 1<<20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadSourceBundles(path); err == nil {
+		t.Fatal("oversized source-bundle configuration accepted")
+	}
+}

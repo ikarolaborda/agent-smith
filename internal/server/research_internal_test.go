@@ -1,8 +1,11 @@
 package server
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,12 +23,19 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
+	"github.com/ikarolaborda/agent-smith/internal/research/sourcefetch"
 )
 
 const reviewerToken = "reviewer-token-0123456789-abcdef-0003"
 
 type researchToolCaptureProvider struct {
 	request llm.ChatRequest
+}
+
+type sourceHTTPDoerFunc func(*http.Request) (*http.Response, error)
+
+func (function sourceHTTPDoerFunc) Do(request *http.Request) (*http.Response, error) {
+	return function(request)
 }
 
 func (p *researchToolCaptureProvider) Name() string { return "capture" }
@@ -410,6 +420,95 @@ func initializeServerGitFixture(t *testing.T, root string) string {
 		t.Fatal(err)
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func TestResearchAPIAcquiresOnlyAuthorizedPinnedSourceBundles(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := privateDirForTest(workspace); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	content := []byte("int fetched = 1;\n")
+	if err := writer.WriteHeader(&tar.Header{Name: "source.c", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bundle := archive.Bytes()
+	digest := sha256.Sum256(bundle)
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	const repositoryURL = "https://example.test/authorized.git"
+	const bundleURL = "https://sources.example.test/authorized/source.tar"
+	requests := 0
+	doer := sourceHTTPDoerFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(bundle)), ContentLength: int64(len(bundle)), Request: request}, nil
+	})
+	srv, err := New(Options{
+		Config: &config.Config{DefaultProvider: "fake", Providers: map[string]config.ProviderConfig{"fake": {Model: "test"}}}, Providers: map[string]llm.Provider{},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ResearchMode: &ResearchModeOptions{Enabled: true, DataDir: filepath.Join(root, "state"), WorkspaceRoots: []string{workspace},
+			Credentials:   []ResearchCredential{{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}}},
+			SourceBundles: []sourcefetch.Source{{Name: "mirror", Repository: repositoryURL, Bundles: []sourcefetch.Bundle{{Commit: revision, URL: bundleURL, SHA256: "sha256:" + hex.EncodeToString(digest[:])}}}}, SourceHTTPClient: doer,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	createCampaign := func(name string, domains []string) domain.Campaign {
+		t.Helper()
+		budget := domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 30, MaxDiskBytes: 1 << 20, MaxInodes: 100, MaxPIDs: 8, MaxConcurrent: 1}
+		scopeRequest := domain.AuthorizationScope{Purpose: name, TargetRepository: repositoryURL, AllowedRevisions: []string{revision}, WorkspaceRoots: []string{workspace},
+			AllowedOperations: []domain.Operation{domain.OperationAcquire}, AllowedDomains: domains, Budget: budget, ExpiresAt: time.Now().UTC().Add(time.Hour)}
+		response := researchJSONRequest(srv, http.MethodPost, "/v1/research/scopes", operatorToken, scopeRequest)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("scope status=%d body=%s", response.Code, response.Body.String())
+		}
+		var scope domain.AuthorizationScope
+		_ = json.Unmarshal(response.Body.Bytes(), &scope)
+		response = researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns", operatorToken, domain.Campaign{ScopeID: scope.ID, Name: name})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("campaign status=%d body=%s", response.Code, response.Body.String())
+		}
+		var campaign domain.Campaign
+		_ = json.Unmarshal(response.Body.Bytes(), &campaign)
+		response = researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns/"+campaign.ID+"/transition", operatorToken, map[string]any{"state": domain.CampaignScoped})
+		if response.Code != http.StatusOK {
+			t.Fatalf("transition status=%d body=%s", response.Code, response.Body.String())
+		}
+		return campaign
+	}
+
+	request := map[string]any{"repository": repositoryURL, "revision": revision, "source_name": "mirror", "language": "c", "architecture": "amd64", "correlation_id": "fetch-source"}
+	deniedCampaign := createCampaign("denied egress", nil)
+	response := researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns/"+deniedCampaign.ID+"/target", operatorToken, request)
+	if response.Code != http.StatusForbidden || requests != 0 || !strings.Contains(response.Body.String(), "egress allowlist") {
+		t.Fatalf("denied fetch status=%d requests=%d body=%s", response.Code, requests, response.Body.String())
+	}
+
+	allowedCampaign := createCampaign("allowed egress", []string{"sources.example.test"})
+	request["correlation_id"] = "fetch-source-allowed"
+	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns/"+allowedCampaign.ID+"/target", operatorToken, request)
+	if response.Code != http.StatusCreated || requests != 1 {
+		t.Fatalf("fetch status=%d requests=%d body=%s", response.Code, requests, response.Body.String())
+	}
+	var target domain.TargetRevision
+	_ = json.Unmarshal(response.Body.Bytes(), &target)
+	if target.Commit != revision || target.Acquisition.Method != "https_pinned_tar" || target.Acquisition.SourceName != "mirror" || target.Acquisition.BundleSHA256 != "sha256:"+hex.EncodeToString(digest[:]) || target.SourceSHA256 == "" {
+		t.Fatalf("target=%#v", target)
+	}
+	captured, err := os.ReadFile(filepath.Join(srv.research.store.Root(), "worker-inputs", allowedCampaign.ID, "sources", target.ID, "source.c"))
+	if err != nil || !bytes.Equal(captured, content) {
+		t.Fatalf("captured=%q err=%v", captured, err)
+	}
 }
 
 func researchJSONRequest(srv *Server, method, path, token string, value any) *httptest.ResponseRecorder {

@@ -53,6 +53,16 @@ and ignored changes, links, submodules, and special entries, then exports bounde
 regular-file content directly from the commit object into the private campaign
 tree. Branch names and tags are not immutable acquisition revisions.
 
+Optional network acquisition accepts only operator-pinned, uncompressed tar
+bundles listed by exact commit, fixed HTTPS URL, repository identity, and
+SHA-256 in a strict configuration file. Redirects, URL credentials/query
+parameters, private/reserved DNS answers, digest mismatches, links, devices,
+unsafe paths, case collisions, and byte/inode overruns fail closed. Enable it
+with `--research-source-bundles configs/research-source-bundles.example.json`;
+the example values are placeholders and must be replaced with an authorized
+mirror manifest and independently computed bundle digest. Campaign scopes must
+also allow the repository, commit, `acquire` operation, and bundle hostname.
+
 ```sh
 export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"
 ./bin/agent --serve --research-mode \

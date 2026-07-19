@@ -46,6 +46,7 @@ type flags struct {
 	researchRuntime        string
 	researchWorkers        int
 	researchNoveltySources string
+	researchSourceBundles  string
 	refineLoop             bool
 	refineIters            int
 	refineTO               time.Duration
@@ -94,6 +95,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.researchRuntime, "research-container-runtime", "", "optional verified Docker runtime for research workers (for example runsc for gVisor)")
 	flag.IntVar(&f.researchWorkers, "research-workers", 1, "global research worker concurrency (per-campaign concurrency remains one)")
 	flag.StringVar(&f.researchNoveltySources, "research-novelty-sources", "", "path to a bounded JSON array of fixed HTTPS novelty lookup sources; empty disables lookup egress")
+	flag.StringVar(&f.researchSourceBundles, "research-source-bundles", "", "path to fixed HTTPS source-bundle manifests pinned by commit and SHA-256; empty disables network source acquisition")
 	flag.BoolVar(&f.refineLoop, "refine-loop", false, "OPT-IN single-shot refinement loop (requires --prompt + OpenAI judge): regenerate the answer with the gpt-5.x judge's critique until it is judged USABLE (grounded, feasible, honestly scoped) or the iteration budget is exhausted. Anti-fabrication: an honest negative passes; the loop never fakes a pass. CLI-only.")
 	flag.IntVar(&f.refineIters, "refine-max-iters", refine.DefaultMaxIters, "maximum refinement iterations when --refine-loop is set")
 	flag.DurationVar(&f.refineTO, "refine-timeout", refine.DefaultRoundTimeout, "per-round timeout (generate+judge) when --refine-loop is set")

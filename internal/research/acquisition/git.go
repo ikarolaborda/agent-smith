@@ -173,6 +173,7 @@ func gitTreeEntries(ctx context.Context, root, commit string, limits Limits) ([]
 	entries := make([]gitTreeEntry, 0)
 	var bytesTotal int64
 	seen := make(map[string]struct{})
+	directories := make(map[string]struct{})
 	for _, record := range bytes.Split(output, []byte{0}) {
 		if len(record) == 0 {
 			continue
@@ -189,7 +190,7 @@ func gitTreeEntries(ctx context.Context, root, commit string, limits Limits) ([]
 		if parseErr != nil || size < 0 {
 			return nil, errors.New("research acquisition: malformed Git blob size")
 		}
-		relative, pathErr := safeGitPath(string(parts[1]))
+		relative, pathErr := ValidateSourcePath(string(parts[1]))
 		if pathErr != nil {
 			return nil, pathErr
 		}
@@ -197,7 +198,12 @@ func gitTreeEntries(ctx context.Context, root, commit string, limits Limits) ([]
 			return nil, errors.New("research acquisition: duplicate Git tree path")
 		}
 		seen[relative] = struct{}{}
-		if size > limits.MaxBytes-bytesTotal || int64(len(entries)+1) > limits.MaxFiles {
+		parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(relative)))
+		for parent != "." {
+			directories[parent] = struct{}{}
+			parent = filepath.ToSlash(filepath.Dir(filepath.FromSlash(parent)))
+		}
+		if size > limits.MaxBytes-bytesTotal || int64(len(entries)+1+len(directories)) > limits.MaxFiles {
 			return nil, errors.New("research acquisition: Git tree exceeds configured limits")
 		}
 		bytesTotal += size
@@ -299,22 +305,6 @@ func gitObjectHash(object, kind string, size int64) (hash.Hash, error) {
 	}
 	_, _ = fmt.Fprintf(result, "%s %d%c", kind, size, byte(0))
 	return result, nil
-}
-
-func safeGitPath(value string) (string, error) {
-	if value == "" || strings.ContainsRune(value, '\\') || len(value) > 1<<20 {
-		return "", errors.New("research acquisition: unsafe Git tree path")
-	}
-	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(value)))
-	if clean != value || filepath.IsAbs(filepath.FromSlash(value)) || filepath.VolumeName(filepath.FromSlash(value)) != "" || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", errors.New("research acquisition: unsafe Git tree path")
-	}
-	for _, component := range strings.Split(clean, "/") {
-		if strings.EqualFold(component, ".git") || strings.EqualFold(component, ".agent-smith") {
-			return "", errors.New("research acquisition: Git tree contains a reserved control path")
-		}
-	}
-	return clean, nil
 }
 
 func runGit(ctx context.Context, root string, limit int64, arguments ...string) ([]byte, error) {

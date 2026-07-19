@@ -19,12 +19,14 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/research/apparatus"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/repository"
+	"github.com/ikarolaborda/agent-smith/internal/research/sourcefetch"
 	"github.com/ikarolaborda/agent-smith/internal/research/store"
 )
 
 var (
-	ErrForbidden       = errors.New("research service: forbidden")
-	ErrApprovalMissing = errors.New("research service: approved decision not found")
+	ErrForbidden         = errors.New("research service: forbidden")
+	ErrApprovalMissing   = errors.New("research service: approved decision not found")
+	ErrSourceUnavailable = errors.New("research service: source acquisition unavailable")
 )
 
 // Service coordinates policy, evidence transitions, durable objects, and audit.
@@ -33,18 +35,19 @@ type Service struct {
 	machine        domain.StateMachine
 	now            func() time.Time
 	broker         JobBroker
+	sourceBroker   *sourcefetch.Broker
 	workspaceRoots []string
 	internalRoot   string
 }
 
-// TargetRequest describes an operator-authorized local Git acquisition. The
-// revision must be an exact commit. The control plane exports committed bytes,
-// computes their source hash, and never accepts either evidence value from the
-// caller.
+// TargetRequest describes either an operator-authorized local Git acquisition
+// or a configured pinned-bundle acquisition. The revision must be an exact
+// commit. The control plane computes all source and provenance evidence.
 type TargetRequest struct {
 	Repository    string `json:"repository"`
 	Revision      string `json:"revision"`
 	SourceDir     string `json:"source_dir"`
+	SourceName    string `json:"source_name,omitempty"`
 	Language      string `json:"language"`
 	Architecture  string `json:"architecture"`
 	ApprovalID    string `json:"approval_id,omitempty"`
@@ -107,6 +110,15 @@ func (s *Service) AttachBroker(broker JobBroker) error {
 		return errors.New("research service: job broker required")
 	}
 	s.broker = broker
+	return nil
+}
+
+// AttachSourceBroker enables fixed-origin, digest-pinned HTTPS acquisition.
+func (s *Service) AttachSourceBroker(broker *sourcefetch.Broker) error {
+	if broker == nil {
+		return errors.New("research service: source acquisition broker required")
+	}
+	s.sourceBroker = broker
 	return nil
 }
 
@@ -241,8 +253,16 @@ func (s *Service) AcquireTarget(ctx context.Context, actor domain.Principal, cam
 	if err != nil {
 		return domain.TargetRevision{}, err
 	}
+	destinationHost, err := s.targetAcquisitionPolicy(request)
+	if err != nil {
+		if errors.Is(err, ErrSourceUnavailable) {
+			return domain.TargetRevision{}, err
+		}
+		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire", "campaign", campaignID, err.Error())
+	}
 	decision, err := s.AuthorizeAction(ctx, campaignID, domain.Action{Principal: actor, Operation: domain.OperationAcquire, Repository: request.Repository,
-		Revision: request.Revision, WorkspacePath: request.SourceDir, DiskBytes: scope.Budget.MaxDiskBytes, ApprovalID: request.ApprovalID}, request.CorrelationID)
+		Revision: request.Revision, WorkspacePath: request.SourceDir, DestinationHost: destinationHost, WallSeconds: scope.Budget.MaxWallSeconds,
+		DiskBytes: scope.Budget.MaxDiskBytes, Inodes: scope.Budget.MaxInodes, ApprovalID: request.ApprovalID}, request.CorrelationID)
 	if err != nil {
 		return domain.TargetRevision{}, err
 	}
@@ -252,7 +272,7 @@ func (s *Service) AcquireTarget(ctx context.Context, actor domain.Principal, cam
 	if request.CorrelationID == "" || request.Language == "" || request.Architecture == "" || s.internalRoot == "" {
 		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire", "campaign", campaignID, "correlation, language, architecture, and internal storage are required")
 	}
-	limits := acquisition.Limits{MaxBytes: scope.Budget.MaxDiskBytes}
+	limits := acquisition.Limits{MaxFiles: scope.Budget.MaxInodes, MaxBytes: scope.Budget.MaxDiskBytes}
 	targetID := deterministicID("target", campaignID, request.Repository, request.Revision)
 	destination, err := acquisition.CaptureDirectory(s.internalRoot, campaignID, targetID)
 	if err != nil {
@@ -260,15 +280,15 @@ func (s *Service) AcquireTarget(ctx context.Context, actor domain.Principal, cam
 	}
 	acquireCtx, cancelAcquire := acquisitionDeadline(ctx, scope.Budget.MaxWallSeconds)
 	defer cancelAcquire()
-	checkout, snapshot, err := acquisition.CaptureGitCheckout(acquireCtx, request.SourceDir, request.Revision, destination, limits)
+	requestedRef, commit, snapshot, provenance, err := s.captureTarget(acquireCtx, request, destination, limits)
 	if err != nil {
 		return domain.TargetRevision{}, err
 	}
 	now := s.now()
-	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: checkout.RequestedRef,
-		Commit: checkout.Commit, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, AcquiredAt: now}
+	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: requestedRef,
+		Commit: commit, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, Acquisition: provenance, AcquiredAt: now}
 	if existing, getErr := s.store.GetTarget(ctx, target.ID); getErr == nil {
-		if existing.SourceSHA256 != target.SourceSHA256 || existing.CampaignID != campaignID {
+		if !sameTargetIdentity(existing, target) {
 			return domain.TargetRevision{}, errors.New("research service: target identity collision")
 		}
 		target = existing
@@ -284,7 +304,8 @@ func (s *Service) AcquireTarget(ctx context.Context, actor domain.Principal, cam
 	if err := s.store.UpdateCampaign(ctx, updated, campaign.Version); err != nil {
 		return domain.TargetRevision{}, err
 	}
-	return target, s.allowedWithDetails(ctx, actor, "target.acquire", "target_revision", target.ID, request.CorrelationID, map[string]string{"campaign_id": campaignID, "requested_ref": target.RequestedRef, "commit": target.Commit, "source_sha256": target.SourceSHA256})
+	details := targetAcquisitionDetails(campaignID, "", target)
+	return target, s.allowedWithDetails(ctx, actor, "target.acquire", "target_revision", target.ID, request.CorrelationID, details)
 }
 
 // AcquireComparisonTarget captures another authorized supported revision after
@@ -315,8 +336,16 @@ func (s *Service) AcquireComparisonTarget(ctx context.Context, actor domain.Prin
 	if request.CorrelationID != expectedCorrelation {
 		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "finding", findingID, "comparison target correlation does not match finding and revision")
 	}
+	destinationHost, err := s.targetAcquisitionPolicy(request)
+	if err != nil {
+		if errors.Is(err, ErrSourceUnavailable) {
+			return domain.TargetRevision{}, err
+		}
+		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "campaign", campaignID, err.Error())
+	}
 	decision, err := s.AuthorizeAction(ctx, campaignID, domain.Action{Principal: actor, Operation: domain.OperationAcquire, Repository: request.Repository,
-		Revision: request.Revision, WorkspacePath: request.SourceDir, DiskBytes: scope.Budget.MaxDiskBytes, ApprovalID: request.ApprovalID}, request.CorrelationID)
+		Revision: request.Revision, WorkspacePath: request.SourceDir, DestinationHost: destinationHost, WallSeconds: scope.Budget.MaxWallSeconds,
+		DiskBytes: scope.Budget.MaxDiskBytes, Inodes: scope.Budget.MaxInodes, ApprovalID: request.ApprovalID}, request.CorrelationID)
 	if err != nil {
 		return domain.TargetRevision{}, err
 	}
@@ -326,7 +355,7 @@ func (s *Service) AcquireComparisonTarget(ctx context.Context, actor domain.Prin
 	if request.Language == "" || request.Architecture == "" || s.internalRoot == "" {
 		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "campaign", campaignID, "language, architecture, and internal storage are required")
 	}
-	limits := acquisition.Limits{MaxBytes: scope.Budget.MaxDiskBytes}
+	limits := acquisition.Limits{MaxFiles: scope.Budget.MaxInodes, MaxBytes: scope.Budget.MaxDiskBytes}
 	targetID := deterministicID("target", campaignID, request.Repository, request.Revision)
 	destination, err := acquisition.CaptureDirectory(s.internalRoot, campaignID, targetID)
 	if err != nil {
@@ -334,14 +363,14 @@ func (s *Service) AcquireComparisonTarget(ctx context.Context, actor domain.Prin
 	}
 	acquireCtx, cancelAcquire := acquisitionDeadline(ctx, scope.Budget.MaxWallSeconds)
 	defer cancelAcquire()
-	checkout, snapshot, err := acquisition.CaptureGitCheckout(acquireCtx, request.SourceDir, request.Revision, destination, limits)
+	requestedRef, commit, snapshot, provenance, err := s.captureTarget(acquireCtx, request, destination, limits)
 	if err != nil {
 		return domain.TargetRevision{}, err
 	}
-	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: checkout.RequestedRef,
-		Commit: checkout.Commit, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, AcquiredAt: s.now()}
+	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: requestedRef,
+		Commit: commit, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, Acquisition: provenance, AcquiredAt: s.now()}
 	if existing, getErr := s.store.GetTarget(ctx, target.ID); getErr == nil {
-		if existing.SourceSHA256 != target.SourceSHA256 || existing.CampaignID != campaignID {
+		if !sameTargetIdentity(existing, target) {
 			return domain.TargetRevision{}, errors.New("research service: target identity collision")
 		}
 		target = existing
@@ -350,7 +379,7 @@ func (s *Service) AcquireComparisonTarget(ctx context.Context, actor domain.Prin
 	} else if err := s.store.SaveTarget(ctx, target); err != nil {
 		return domain.TargetRevision{}, err
 	}
-	return target, s.allowedWithDetails(ctx, actor, "target.acquire_comparison", "target_revision", target.ID, request.CorrelationID, map[string]string{"campaign_id": campaignID, "finding_id": findingID, "revision": target.Commit, "source_sha256": target.SourceSHA256})
+	return target, s.allowedWithDetails(ctx, actor, "target.acquire_comparison", "target_revision", target.ID, request.CorrelationID, targetAcquisitionDetails(campaignID, findingID, target))
 }
 
 // Transition advances exactly one evidence-backed state and rejects stale writes.
@@ -627,7 +656,7 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 		}
 		selectedTarget = target
 		repository, revision = target.Repository, target.Commit
-		verifiedSource, verifyErr := acquisition.VerifiedCapture(s.internalRoot, campaign.ID, target.ID, target.SourceSHA256, acquisition.Limits{MaxBytes: scope.Budget.MaxDiskBytes})
+		verifiedSource, verifyErr := acquisition.VerifiedCapture(s.internalRoot, campaign.ID, target.ID, target.SourceSHA256, acquisition.Limits{MaxFiles: scope.Budget.MaxInodes, MaxBytes: scope.Budget.MaxDiskBytes})
 		if verifyErr != nil {
 			return domain.ExperimentRun{}, verifyErr
 		}
@@ -1006,6 +1035,62 @@ func acquisitionDeadline(ctx context.Context, seconds int64) (context.Context, c
 		seconds = maximum
 	}
 	return context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
+}
+
+func (s *Service) targetAcquisitionPolicy(request TargetRequest) (string, error) {
+	if request.SourceName == "" {
+		if strings.TrimSpace(request.SourceDir) == "" {
+			return "", errors.New("local source directory or fixed source name required")
+		}
+		return "", nil
+	}
+	if request.SourceName != strings.TrimSpace(request.SourceName) || strings.TrimSpace(request.SourceDir) != "" {
+		return "", errors.New("fixed source name and local source directory are mutually exclusive")
+	}
+	if s.sourceBroker == nil {
+		return "", fmt.Errorf("%w: fixed source acquisition is not configured", ErrSourceUnavailable)
+	}
+	descriptor, err := s.sourceBroker.Describe(request.SourceName, request.Revision)
+	if err != nil {
+		return "", err
+	}
+	if descriptor.Repository != request.Repository {
+		return "", errors.New("fixed source repository does not match request")
+	}
+	return descriptor.Host, nil
+}
+
+func (s *Service) captureTarget(ctx context.Context, request TargetRequest, destination string, limits acquisition.Limits) (string, string, acquisition.Snapshot, domain.AcquisitionProvenance, error) {
+	if request.SourceName == "" {
+		checkout, snapshot, err := acquisition.CaptureGitCheckout(ctx, request.SourceDir, request.Revision, destination, limits)
+		return checkout.RequestedRef, checkout.Commit, snapshot, domain.AcquisitionProvenance{Method: "local_git_object_export"}, err
+	}
+	result, err := s.sourceBroker.Fetch(ctx, request.SourceName, request.Revision, destination, limits)
+	if err != nil {
+		return "", "", acquisition.Snapshot{}, domain.AcquisitionProvenance{}, err
+	}
+	provenance := domain.AcquisitionProvenance{Method: "https_pinned_tar", SourceName: result.Descriptor.SourceName, SourceURL: result.Descriptor.URL,
+		BundleSHA256: result.Descriptor.SHA256, BundleBytes: result.BundleBytes, FetchedAt: result.FetchedAt}
+	return result.Descriptor.Commit, result.Descriptor.Commit, result.Snapshot, provenance, nil
+}
+
+func sameTargetIdentity(left, right domain.TargetRevision) bool {
+	return left.CampaignID == right.CampaignID && left.Repository == right.Repository && left.RequestedRef == right.RequestedRef && left.Commit == right.Commit &&
+		left.SourceSHA256 == right.SourceSHA256 && left.Language == right.Language && left.Architecture == right.Architecture &&
+		left.Acquisition.Method == right.Acquisition.Method && left.Acquisition.SourceName == right.Acquisition.SourceName && left.Acquisition.SourceURL == right.Acquisition.SourceURL &&
+		left.Acquisition.BundleSHA256 == right.Acquisition.BundleSHA256 && left.Acquisition.BundleBytes == right.Acquisition.BundleBytes
+}
+
+func targetAcquisitionDetails(campaignID, findingID string, target domain.TargetRevision) map[string]string {
+	details := map[string]string{"campaign_id": campaignID, "requested_ref": target.RequestedRef, "commit": target.Commit, "source_sha256": target.SourceSHA256, "acquisition_method": target.Acquisition.Method}
+	if findingID != "" {
+		details["finding_id"] = findingID
+	}
+	if target.Acquisition.SourceName != "" {
+		details["source_name"] = target.Acquisition.SourceName
+		details["bundle_sha256"] = target.Acquisition.BundleSHA256
+	}
+	return details
 }
 
 func campaignAllowsOperation(state domain.CampaignState, operation domain.Operation) bool {

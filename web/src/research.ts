@@ -39,6 +39,14 @@ export interface TargetRevision {
   source_sha256: string;
   language: string;
   architecture: string;
+	acquisition: {
+		method: string;
+		source_name?: string;
+		source_url?: string;
+		bundle_sha256?: string;
+		bundle_bytes?: number;
+		fetched_at?: string;
+	};
   acquired_at: string;
 }
 

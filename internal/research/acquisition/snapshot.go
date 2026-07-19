@@ -85,6 +85,7 @@ func HashTree(root string, limits Limits) (Snapshot, error) {
 	}
 	hash := sha256.New()
 	result := Snapshot{}
+	var treeEntries int64
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -103,6 +104,12 @@ func HashTree(root string, limits Limits) (Snapshot, error) {
 			}
 			return nil
 		}
+		if relative != "." {
+			treeEntries++
+			if treeEntries > limits.MaxFiles {
+				return errors.New("research acquisition: source tree exceeds configured limits")
+			}
+		}
 		if entry.IsDir() {
 			return nil
 		}
@@ -114,7 +121,7 @@ func HashTree(root string, limits Limits) (Snapshot, error) {
 			return err
 		}
 		result.Files++
-		if info.Size() > limits.MaxBytes-result.Bytes || result.Files > limits.MaxFiles {
+		if info.Size() > limits.MaxBytes-result.Bytes {
 			return errors.New("research acquisition: source tree exceeds configured limits")
 		}
 		result.Bytes += info.Size()
@@ -142,6 +149,31 @@ func HashTree(root string, limits Limits) (Snapshot, error) {
 	}
 	result.SourceSHA256 = "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	return result, nil
+}
+
+// ValidateSourcePath converts one archive/Git path into a portable relative
+// path. It rejects traversal, control characters, platform-ambiguous names,
+// and storage/control-plane reserved components before materialization.
+func ValidateSourcePath(value string) (string, error) {
+	if value == "" || strings.ContainsRune(value, '\\') || len(value) > 4096 {
+		return "", errors.New("research acquisition: unsafe source path")
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return "", errors.New("research acquisition: unsafe source path")
+		}
+	}
+	local := filepath.FromSlash(value)
+	clean := filepath.ToSlash(filepath.Clean(local))
+	if clean != value || filepath.IsAbs(local) || filepath.VolumeName(local) != "" || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", errors.New("research acquisition: unsafe source path")
+	}
+	for _, component := range strings.Split(clean, "/") {
+		if len(component) > 255 || strings.ContainsRune(component, ':') || strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") || reservedSourceComponent(component) {
+			return "", errors.New("research acquisition: unsafe or reserved source path")
+		}
+	}
+	return clean, nil
 }
 
 // Capture copies a source tree into destination and verifies that the captured
@@ -334,4 +366,16 @@ func existingPathWithin(root, candidate string) error {
 		return errors.New("research acquisition: capture path escapes internal storage")
 	}
 	return nil
+}
+
+func reservedSourceComponent(component string) bool {
+	lower := strings.ToLower(component)
+	if lower == ".git" || lower == ".agent-smith" {
+		return true
+	}
+	base := strings.SplitN(lower, ".", 2)[0]
+	if base == "con" || base == "prn" || base == "aux" || base == "nul" {
+		return true
+	}
+	return len(base) == 4 && (strings.HasPrefix(base, "com") || strings.HasPrefix(base, "lpt")) && base[3] >= '1' && base[3] <= '9'
 }

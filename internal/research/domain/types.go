@@ -153,16 +153,29 @@ type PlannedStep struct {
 
 /* TargetRevision is an immutable acquired source identity. */
 type TargetRevision struct {
-	SchemaVersion int       `json:"schema_version"`
-	ID            string    `json:"id"`
-	CampaignID    string    `json:"campaign_id"`
-	Repository    string    `json:"repository"`
-	RequestedRef  string    `json:"requested_ref"`
-	Commit        string    `json:"commit"`
-	SourceSHA256  string    `json:"source_sha256"`
-	Language      string    `json:"language"`
-	Architecture  string    `json:"architecture"`
-	AcquiredAt    time.Time `json:"acquired_at"`
+	SchemaVersion int                   `json:"schema_version"`
+	ID            string                `json:"id"`
+	CampaignID    string                `json:"campaign_id"`
+	Repository    string                `json:"repository"`
+	RequestedRef  string                `json:"requested_ref"`
+	Commit        string                `json:"commit"`
+	SourceSHA256  string                `json:"source_sha256"`
+	Language      string                `json:"language"`
+	Architecture  string                `json:"architecture"`
+	Acquisition   AcquisitionProvenance `json:"acquisition"`
+	AcquiredAt    time.Time             `json:"acquired_at"`
+}
+
+// AcquisitionProvenance records how target bytes crossed the acquisition
+// boundary. Bundle URLs are fixed operator configuration and never contain
+// credentials or caller-controlled query values.
+type AcquisitionProvenance struct {
+	Method       string    `json:"method"`
+	SourceName   string    `json:"source_name,omitempty"`
+	SourceURL    string    `json:"source_url,omitempty"`
+	BundleSHA256 string    `json:"bundle_sha256,omitempty"`
+	BundleBytes  int64     `json:"bundle_bytes,omitempty"`
+	FetchedAt    time.Time `json:"fetched_at,omitempty"`
 }
 
 /* ApparatusManifest describes a deterministic, versioned research adapter. */

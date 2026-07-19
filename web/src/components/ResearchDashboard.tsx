@@ -213,11 +213,13 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
 	async function captureComparisonTarget() {
 		const finding = firstFinding(); if (!finding) return;
 		const revision = window.prompt('Authorized supported revision'); if (!revision?.trim()) return;
-		const sourceDir = window.prompt('Existing local source snapshot directory'); if (!sourceDir?.trim()) return;
+		const sourceName = window.prompt('Configured pinned source name (leave blank for a local Git checkout)')?.trim() || '';
+		const sourceDir = sourceName ? '' : window.prompt('Existing clean local Git repository root')?.trim() || '';
+		if (!sourceName && !sourceDir) return;
 		const language = window.prompt('Language', target?.language || 'c++'); if (!language?.trim()) return;
 		const architecture = window.prompt('Architecture', target?.architecture || 'amd64'); if (!architecture?.trim()) return;
 		const approvalID = window.prompt(`Acquisition approval ID if required (correlation target:${finding.id}:${revision.trim()})`) ?? '';
-		await workflowPost('targets', { finding_id: finding.id, repository: selectedScope?.target_repository || target?.repository, revision, source_dir: sourceDir, language, architecture, approval_id: approvalID, correlation_id: `target:${finding.id}:${revision.trim()}` });
+		await workflowPost('targets', { finding_id: finding.id, repository: selectedScope?.target_repository || target?.repository, revision, source_dir: sourceDir, source_name: sourceName, language, architecture, approval_id: approvalID, correlation_id: `target:${finding.id}:${revision.trim()}` });
 	}
 
 	async function completeBranchReview() {
@@ -321,7 +323,7 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
                 ))}
               </Panel>
 			  <Panel title="Target provenance" icon="bi-git">
-				{!target ? <Empty text="No immutable target has been acquired." /> : <div className="target-provenance"><strong>{target.repository}</strong><small>{target.commit} · {target.language}/{target.architecture}</small><code>{target.source_sha256}</code></div>}
+				{!target ? <Empty text="No immutable target has been acquired." /> : <div className="target-provenance"><strong>{target.repository}</strong><small>{target.commit} · {target.language}/{target.architecture} · {target.acquisition?.method || 'legacy'}</small><code>{target.source_sha256}</code></div>}
 			  </Panel>
               <Panel title="Approvals" icon="bi-person-check">
                 {approvals.length === 0 ? <Empty text="No approval decisions." /> : approvals.map((approval) => (
