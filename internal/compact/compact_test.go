@@ -97,6 +97,37 @@ func TestCompact_CacheAvoidsResummarizing(t *testing.T) {
 	}
 }
 
+func TestCompactForce_CompactsBelowTrigger(t *testing.T) {
+	c := &Compactor{
+		Summarizer:    &fakeSummarizer{},
+		TriggerTokens: 100000, // deliberately huge: gated Compact will NOT fire
+		HeadTokens:    5,
+		TailTokens:    5,
+		ChunkChars:    1000,
+	}
+	content := strings.Repeat("filler sentence about the codebase. ", 400)
+
+	// Gated Compact no-ops because the content is under the (huge) trigger.
+	if res, _ := c.Compact(context.Background(), content, ""); res != nil {
+		t.Fatal("gated Compact should no-op under the trigger")
+	}
+	// CompactForce ignores the trigger and shrinks it (the total-budget path).
+	res, err := c.CompactForce(context.Background(), content, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil {
+		t.Fatal("CompactForce should compact content above the min floor")
+	}
+	if res.FinalTokens >= res.OrigTokens {
+		t.Errorf("did not shrink: %d -> %d", res.OrigTokens, res.FinalTokens)
+	}
+	// Tiny content is still left alone (overhead would not help).
+	if r, _ := c.CompactForce(context.Background(), "short", ""); r != nil {
+		t.Error("tiny content must not be force-compacted")
+	}
+}
+
 func TestCompact_SummaryFailureIsNonFatal(t *testing.T) {
 	c := &Compactor{
 		Summarizer:    failSummarizer{},

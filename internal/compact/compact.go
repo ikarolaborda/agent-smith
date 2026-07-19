@@ -93,12 +93,20 @@ to keep verbatim at each end; ChunkChars sizes the retrieval chunks. A zero
 Summarizer degrades gracefully to head+tail+index with no gist.
 */
 type Compactor struct {
-	Summarizer    Summarizer
-	TriggerTokens int
-	HeadTokens    int
-	TailTokens    int
-	ChunkChars    int
-	Logger        *slog.Logger
+	Summarizer Summarizer
+	/*
+		TriggerTokens is the per-message size at or above which a single message is
+		compacted proactively. MaxTotalTokens is the budget for ALL messages combined;
+		when the total exceeds it the caller compacts the largest messages (via
+		CompactForce) until the whole prompt fits, catching a pile-up of individually
+		sub-trigger messages. Zero MaxTotalTokens disables the total-budget pass.
+	*/
+	TriggerTokens  int
+	MaxTotalTokens int
+	HeadTokens     int
+	TailTokens     int
+	ChunkChars     int
+	Logger         *slog.Logger
 	/*
 		Cache, when non-nil, memoizes summaries by message content hash so a large
 		paste replayed on every conversation turn is summarized once. Shared by
@@ -128,6 +136,13 @@ func (c *Compactor) logger() *slog.Logger {
 }
 
 /*
+	minForceCompactTokens is the floor below which forced compaction is skipped:
+
+head+tail+summary overhead would not shrink a message that small.
+*/
+const minForceCompactTokens = 512
+
+/*
 Compact rewrites content when it exceeds TriggerTokens, returning (nil, nil) when
 it fits so callers can cheaply no-op. instruction is an optional hint (e.g. the
 preserved head/tail) that steers the summary. Summarization failure is non-fatal:
@@ -135,10 +150,28 @@ the head/tail and retrieval index still let the model work, so the error is logg
 and a summary-less Result is returned.
 */
 func (c *Compactor) Compact(ctx context.Context, content, instruction string) (*Result, error) {
-	orig := EstimateTokens(content)
-	if c.TriggerTokens <= 0 || orig < c.TriggerTokens {
+	if c.TriggerTokens <= 0 || EstimateTokens(content) < c.TriggerTokens {
 		return nil, nil
 	}
+	return c.compact(ctx, content, instruction)
+}
+
+/*
+CompactForce rewrites content regardless of the per-message trigger, so a caller
+reducing a TOTAL prompt that overflows can compact messages that are individually
+under the trigger but collectively too large. It still no-ops on content too small
+to shrink usefully.
+*/
+func (c *Compactor) CompactForce(ctx context.Context, content, instruction string) (*Result, error) {
+	if EstimateTokens(content) < minForceCompactTokens {
+		return nil, nil
+	}
+	return c.compact(ctx, content, instruction)
+}
+
+/* compact is the shared head/tail + map-reduce-summary + index rewrite. */
+func (c *Compactor) compact(ctx context.Context, content, instruction string) (*Result, error) {
+	orig := EstimateTokens(content)
 
 	headChars := c.HeadTokens * avgCharsPerToken
 	tailChars := c.TailTokens * avgCharsPerToken

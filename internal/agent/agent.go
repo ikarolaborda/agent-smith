@@ -360,17 +360,22 @@ func (a *Agent) compactSession(ctx context.Context, session *Session, prior []*c
 	msgs := session.Messages()
 	indexes := prior
 	changed := false
-	for i := range msgs {
-		if msgs[i].Content == "" {
-			continue
+	apply := func(i int, res *compact.Result) {
+		msgs[i].Content = res.Compacted
+		changed = true
+		if res.Index != nil {
+			indexes = append(indexes, res.Index)
 		}
-		/*
-			Compact oversized USER messages (a large paste) and TOOL results (e.g. a
-			read_dir that loaded a whole folder). The latter is appended mid-loop, so
-			this runs every iteration; an already-compacted message is now under the
-			trigger and is skipped, and the summary cache makes re-scanning cheap.
-		*/
-		if msgs[i].Role != llm.RoleUser && msgs[i].Role != llm.RoleTool {
+	}
+
+	/*
+		Pass 1 — proactively compact any single oversized USER message (a large paste)
+		or TOOL result (e.g. a read_dir that loaded a whole folder). Tool results are
+		appended mid-loop, so this runs every iteration; an already-compacted message
+		is under the trigger and skipped, and the summary cache makes re-scanning cheap.
+	*/
+	for i := range msgs {
+		if msgs[i].Content == "" || !compactableRole(msgs[i].Role) {
 			continue
 		}
 		res, err := a.Compactor.Compact(ctx, msgs[i].Content, "")
@@ -378,15 +383,44 @@ func (a *Agent) compactSession(ctx context.Context, session *Session, prior []*c
 			a.Logger.Warn("agent: input compaction failed; keeping original", "role", msgs[i].Role, "err", err)
 			continue
 		}
-		if res == nil {
-			continue
-		}
-		msgs[i].Content = res.Compacted
-		changed = true
-		if res.Index != nil {
-			indexes = append(indexes, res.Index)
+		if res != nil {
+			apply(i, res)
 		}
 	}
+
+	/*
+		Pass 2 — total budget. Several messages each under the per-message trigger can
+		still sum past the context window (e.g. a few read_dir calls plus history).
+		Compact the largest compactable message repeatedly until the whole prompt fits
+		or nothing compactable remains.
+	*/
+	if budget := a.Compactor.MaxTotalTokens; budget > 0 {
+		tried := make([]bool, len(msgs))
+		for totalMessageTokens(msgs) > budget {
+			bi, bt := -1, 0
+			for i := range msgs {
+				if tried[i] || !compactableRole(msgs[i].Role) {
+					continue
+				}
+				if tk := compact.EstimateTokens(msgs[i].Content); tk > bt {
+					bi, bt = i, tk
+				}
+			}
+			if bi < 0 {
+				break // nothing left to compact; the provider's own limit will apply
+			}
+			tried[bi] = true
+			res, err := a.Compactor.CompactForce(ctx, msgs[bi].Content, "")
+			if err != nil {
+				a.Logger.Warn("agent: budget compaction failed; keeping original", "role", msgs[bi].Role, "err", err)
+				continue
+			}
+			if res != nil {
+				apply(bi, res)
+			}
+		}
+	}
+
 	if changed {
 		session.Reset()
 		for _, m := range msgs {
@@ -398,6 +432,20 @@ func (a *Agent) compactSession(ctx context.Context, session *Session, prior []*c
 		reg = a.Tools.With(compact.NewContextSearchTool(merged))
 	}
 	return reg, indexes
+}
+
+/* compactableRole reports whether a message role may be rewritten by compaction. */
+func compactableRole(r llm.Role) bool {
+	return r == llm.RoleUser || r == llm.RoleTool
+}
+
+/* totalMessageTokens estimates the combined size of all messages (system prompt excluded). */
+func totalMessageTokens(msgs []llm.Message) int {
+	t := 0
+	for i := range msgs {
+		t += compact.EstimateTokens(msgs[i].Content)
+	}
+	return t
 }
 
 /*
