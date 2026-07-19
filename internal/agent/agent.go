@@ -194,26 +194,8 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 		return "", errors.New("agent: nil session")
 	}
 
-	/*
-		Compact oversized input before it reaches the provider: a message larger
-		than the context window is rewritten to head/tail + summary, and its full
-		text is indexed for a per-turn context_search tool so nothing is lost. A
-		compaction error is non-fatal — the original message is sent and the
-		provider's own context-size error (if any) still surfaces to the caller.
-	*/
-	content := userInput
-	reg := a.Tools
-	if a.Compactor != nil {
-		if res, err := a.Compactor.Compact(ctx, userInput, ""); err != nil {
-			a.Logger.Warn("agent: input compaction failed; sending original", "err", err)
-		} else if res != nil {
-			content = res.Compacted
-			if res.Index != nil && res.Index.Len() > 0 {
-				reg = a.Tools.With(compact.NewContextSearchTool(res.Index))
-			}
-		}
-	}
-	session.Append(llm.Message{Role: llm.RoleUser, Content: content})
+	session.Append(llm.Message{Role: llm.RoleUser, Content: userInput})
+	reg := a.compactSession(ctx, session)
 
 	usedRetrieval := false
 	for i := 0; i < a.MaxIters; i++ {
@@ -304,6 +286,55 @@ func (a *Agent) classicFallback(ctx context.Context, session *Session) (string, 
 		return "", false
 	}
 	return resp.Message.Content, true
+}
+
+/*
+compactSession rewrites every oversized user message in the session — the newly
+appended one AND any large paste replayed from an earlier turn — into head/tail +
+summary, in place, and returns a per-turn tool registry exposing a context_search
+index over all of their original text. Compacting the whole session (not just the
+latest message) is what keeps a multi-turn conversation whose big input arrived in
+an earlier turn from overflowing the context window. With no Compactor, or nothing
+oversized, it returns the shared registry unchanged. Compaction errors are
+non-fatal: the original message is kept and the provider's own context error (if
+any) still surfaces.
+*/
+func (a *Agent) compactSession(ctx context.Context, session *Session) *tools.Registry {
+	if a.Compactor == nil {
+		return a.Tools
+	}
+	msgs := session.Messages()
+	var indexes []*compact.Index
+	changed := false
+	for i := range msgs {
+		if msgs[i].Role != llm.RoleUser || msgs[i].Content == "" {
+			continue
+		}
+		res, err := a.Compactor.Compact(ctx, msgs[i].Content, "")
+		if err != nil {
+			a.Logger.Warn("agent: input compaction failed; keeping original", "err", err)
+			continue
+		}
+		if res == nil {
+			continue
+		}
+		msgs[i].Content = res.Compacted
+		changed = true
+		if res.Index != nil {
+			indexes = append(indexes, res.Index)
+		}
+	}
+	if changed {
+		session.Reset()
+		for _, m := range msgs {
+			session.Append(m)
+		}
+	}
+	reg := a.Tools
+	if merged := compact.MergeIndexes(indexes...); merged != nil && merged.Len() > 0 {
+		reg = a.Tools.With(compact.NewContextSearchTool(merged))
+	}
+	return reg
 }
 
 /*

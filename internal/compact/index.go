@@ -65,6 +65,25 @@ func (i *Index) Len() int {
 }
 
 /*
+MergeIndexes builds a single index over the chunks of all inputs, so one
+context_search tool can retrieve across every oversized message in a conversation
+(e.g. a large paste in an earlier turn plus another in the current one). Nil
+inputs are skipped; it returns nil when there is nothing to index.
+*/
+func MergeIndexes(idxs ...*Index) *Index {
+	var all []string
+	for _, i := range idxs {
+		if i != nil {
+			all = append(all, i.chunks...)
+		}
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	return BuildIndex(all)
+}
+
+/*
 Search returns the top-k chunks by TF-IDF overlap with query, highest first.
 Chunks with no overlapping term are omitted, so an off-topic query can return
 fewer than k (or zero) results rather than noise.
