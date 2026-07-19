@@ -95,6 +95,14 @@ active readers and new ingestion are serialized against deletion, and startup
 completes an approved unlink interrupted by a crash. Unlink is not a claim of
 physical erasure from snapshots, COW storage, SSD remapping, or backups.
 
+An offline restore verifier now emits machine-readable evidence after checking
+SQLite and foreign-key integrity, all stored JSON, the complete audit chain,
+every active artifact's authenticated plaintext identity, private blob modes,
+and missing/orphaned blob paths. It opens an isolated current-schema restore
+without migrations or key rotation. Executing recovery-point, media-expiry,
+and destruction exercises against a deployment's actual encrypted backup
+system remains an operational release gate.
+
 An opt-in hostile containment apparatus now exercises network denial, read-only
 mounts, control-plane secret isolation, cross-campaign visibility, device
 creation, orphan cleanup, hostile symlink output, and writable byte/inode

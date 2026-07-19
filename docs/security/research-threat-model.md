@@ -151,7 +151,13 @@ An OS-backed exclusive lock rejects a second process using the same custody
 directory; platforms without safe locking cannot open the research store.
 Filesystem unlink cannot prove physical erasure from SSDs, COW filesystems,
 snapshots, replicas, or backups; those require deployment-specific destruction
-and restore-test procedures.
+and restore-test procedures. The offline `--verify-research-store` command
+opens a current-schema restored copy without migration or key rotation, runs
+SQLite/foreign-key/JSON and audit-chain checks, authenticates and hashes every
+active artifact, and rejects malformed or orphaned blob-tree entries. A passing
+report proves logical consistency of that restored copy; it does not prove that
+the backup was current, that older media expired, or that deleted bytes are
+physically unrecoverable.
 
 ### Egress and novelty research
 

@@ -65,6 +65,17 @@ type Store struct {
 
 // Open initializes or migrates a private research store.
 func Open(ctx context.Context, cfg Config) (*Store, error) {
+	return openStore(ctx, cfg, false)
+}
+
+// OpenForVerification opens an existing current-schema store without running
+// migrations, completing purges, or rotating artifacts. It is intended for an
+// isolated restored copy, not the live store used by a server.
+func OpenForVerification(ctx context.Context, cfg Config) (*Store, error) {
+	return openStore(ctx, cfg, true)
+}
+
+func openStore(ctx context.Context, cfg Config, verifyOnly bool) (*Store, error) {
 	if strings.TrimSpace(cfg.Root) == "" {
 		return nil, errors.New("research store: root required")
 	}
@@ -72,18 +83,19 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("research store: resolve root: %w", err)
 	}
-	if err := privateDir(root); err != nil {
-		return nil, err
-	}
 	artifactRoot := filepath.Join(root, "artifacts")
-	if err := privateDir(artifactRoot); err != nil {
-		return nil, err
-	}
-	if err := privateDir(filepath.Join(artifactRoot, "blobs")); err != nil {
-		return nil, err
-	}
-	if err := privateDir(filepath.Join(artifactRoot, "tmp")); err != nil {
-		return nil, err
+	if verifyOnly {
+		for _, directory := range []string{root, artifactRoot, filepath.Join(artifactRoot, "blobs")} {
+			if err := existingPrivateDir(directory); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		for _, directory := range []string{root, artifactRoot, filepath.Join(artifactRoot, "blobs"), filepath.Join(artifactRoot, "tmp")} {
+			if err := privateDir(directory); err != nil {
+				return nil, err
+			}
+		}
 	}
 	instanceLock, err := acquireStoreFileLock(filepath.Join(root, ".custody.lock"))
 	if err != nil {
@@ -92,6 +104,14 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 
 	dbPath := filepath.Join(root, "research.sqlite")
 	dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	if verifyOnly {
+		info, statErr := os.Lstat(dbPath)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+			instanceLock.Close()
+			return nil, errors.New("research store: verification database must be a private regular file")
+		}
+		dsn = "file:" + filepath.ToSlash(dbPath) + "?mode=ro&_pragma=foreign_keys(1)&_pragma=query_only(1)&_pragma=busy_timeout(5000)"
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		instanceLock.Close()
@@ -105,10 +125,12 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		instanceLock.Close()
 		return nil, fmt.Errorf("research store: ping database: %w", err)
 	}
-	if err := os.Chmod(dbPath, 0o600); err != nil {
-		db.Close()
-		instanceLock.Close()
-		return nil, fmt.Errorf("research store: protect database: %w", err)
+	if !verifyOnly {
+		if err := os.Chmod(dbPath, 0o600); err != nil {
+			db.Close()
+			instanceLock.Close()
+			return nil, fmt.Errorf("research store: protect database: %w", err)
+		}
 	}
 
 	artifactKeys, activeKeyID, err := prepareArtifactKeys(cfg.ArtifactEncryptionKeys)
@@ -134,6 +156,9 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if s.maxArtifactBytes <= 0 {
 		s.maxArtifactBytes = defaultArtifactLimit
 	}
+	if verifyOnly {
+		return s, nil
+	}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		instanceLock.Close()
@@ -155,6 +180,14 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func existingPrivateDir(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("research store: verification directory %s must be a private real directory", path)
+	}
+	return nil
 }
 
 func privateDir(path string) error {

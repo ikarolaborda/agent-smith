@@ -132,6 +132,71 @@ func TestArtifactEncryptionMigratesLegacyAndRotatesKeys(t *testing.T) {
 	}
 }
 
+func TestOfflineIntegrityVerificationAuthenticatesWithoutRotatingCustody(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "restored")
+	oldKey := bytes.Repeat([]byte{0x41}, 32)
+	primary, err := Open(ctx, Config{Root: root, ArtifactEncryptionKeys: [][]byte{oldKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, campaign := seedCampaign(t, primary)
+	artifact, err := primary.PutArtifact(ctx, domain.Artifact{CampaignID: campaign.ID, Role: "crashing_input", MediaType: "application/octet-stream", Sensitivity: "embargoed"}, strings.NewReader("restored authenticated evidence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := primary.AppendAudit(ctx, domain.AuditEvent{ActorID: "operator", Action: "artifact.captured", ResourceType: "artifact", ResourceID: artifact.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := primary.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "artifacts", filepath.FromSlash(artifact.StoragePath))
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newKey := bytes.Repeat([]byte{0x52}, 32)
+	restored, err := OpenForVerification(ctx, Config{Root: root, ArtifactEncryptionKeys: [][]byte{newKey, oldKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := restored.VerifyIntegrity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Database != "ok" || report.ForeignKeys != "ok" || report.AuditEvents != 1 || report.ActiveArtifacts != 1 || report.ActiveBlobs != 1 || report.PlaintextBytes != int64(len("restored authenticated evidence")) || report.OrphanBlobs != 0 {
+		t.Fatalf("report=%#v", report)
+	}
+	if err := restored.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("offline verification rotated or rewrote artifact custody")
+	}
+}
+
+func TestIntegrityVerificationRejectsOrphanArtifactBlob(t *testing.T) {
+	s := openTestStore(t, t.TempDir(), 0)
+	defer s.Close()
+	digest := strings.Repeat("d", 64)
+	directory := filepath.Join(s.artifactRoot, "blobs", digest[:2])
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, digest), []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.VerifyIntegrity(context.Background()); err == nil || !strings.Contains(err.Error(), "unreferenced") {
+		t.Fatalf("orphan artifact accepted: %v", err)
+	}
+}
+
 func TestArtifactEncryptionHandlesEmptyObjectsAndKeyValidation(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

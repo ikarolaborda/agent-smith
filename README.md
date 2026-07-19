@@ -142,6 +142,27 @@ the OS-backed lock rather than racing migration or deletion.
 Filesystem unlink does not guarantee physical erasure on SSD, copy-on-write,
 snapshot, or backup media; deployment policy must cover those copies.
 
+Recovery acceptance has a dedicated offline verifier. Restore a storage- or
+SQLite-consistent encrypted backup into an isolated private directory (do not
+point this at the live server), provide the complete historical custody
+keyring, and retain the JSON result with the recovery exercise:
+
+```sh
+./bin/agent --verify-research-store \
+  --research-dir /absolute/path/to/restored-research \
+  --research-artifact-keys .agent-smith-artifact.key,.agent-smith-artifact.previous.key \
+  > restore-integrity.json
+```
+
+The command opens the current-schema restore without migrations or key
+rotation, runs SQLite and foreign-key integrity checks, validates stored JSON
+and the complete audit chain, decrypts and hashes every active artifact, and
+rejects missing, malformed, public, symlinked, or orphaned CAS blobs. Backup
+creation, encryption of the metadata database, recovery-point objectives,
+external audit anchors, media expiry, and physical destruction remain
+deployment controls; simply copying a live WAL database directory is not a
+supported backup procedure.
+
 The opt-in real-program calibration adapter is under `apparatus/libpng-known-bug`.
 After capturing clean source trees at the exact revisions documented there,
 build its pinned image and run the broker-level positive/negative control:
@@ -282,6 +303,7 @@ export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmen
 | `--research-token`   | Bootstrap bearer token (prefer `AGENT_SMITH_RESEARCH_TOKEN`; minimum 32 characters). |
 | `--research-artifact-keys` | Ordered comma-separated `0600` files containing hex AES-256 custody keys; the first key is active. |
 | `--research-artifact-retention` | Minimum evidence custody period before approved purge (default 90 days; range 24 hours–10 years). |
+| `--verify-research-store` | Verify an isolated current-schema restore and emit machine-readable integrity evidence; requires the complete custody keyring. |
 | `--research-apparatus-catalog` | Short-lived signed catalog of exact manifests, SPDX SBOMs, and SLSA provenance. |
 | `--research-apparatus-public-key` | Separately trusted Ed25519 public key for apparatus admission. |
 | `--research-container-runtime` | Optional required Docker runtime such as `runsc`; rootless Docker is mandatory for runner v2. |

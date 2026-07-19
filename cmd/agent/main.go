@@ -56,6 +56,9 @@ func run(f flags) error {
 	if f.signResearchApparatusCatalog != "" {
 		return runSignApparatusCatalog(f, os.Stdout)
 	}
+	if f.verifyResearchStore {
+		return runVerifyResearchStore(ctx, f, os.Stdout)
+	}
 
 	cfg, err := config.Load(f.configPath)
 	if err != nil {

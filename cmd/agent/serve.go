@@ -439,6 +439,36 @@ func loadArtifactEncryptionKeys(value string) ([][]byte, error) {
 	return keys, nil
 }
 
+func runVerifyResearchStore(ctx context.Context, f flags, output io.Writer) error {
+	if strings.TrimSpace(f.researchArtifactKeys) == "" {
+		return errors.New("--verify-research-store requires --research-artifact-keys with every historical custody key")
+	}
+	keys, err := loadArtifactEncryptionKeys(f.researchArtifactKeys)
+	if err != nil {
+		return err
+	}
+	repository, err := store.OpenForVerification(ctx, store.Config{
+		Root: f.researchDir, ArtifactEncryptionKeys: keys, ArtifactRetention: f.researchArtifactRetention,
+	})
+	if err != nil {
+		return fmt.Errorf("verify research store: open restored custody: %w", err)
+	}
+	report, verifyErr := repository.VerifyIntegrity(ctx)
+	closeErr := repository.Close()
+	if verifyErr != nil {
+		return fmt.Errorf("verify research store: %w", verifyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("verify research store: close: %w", closeErr)
+	}
+	encoder := json.NewEncoder(output)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(report); err != nil {
+		return fmt.Errorf("verify research store: write report: %w", err)
+	}
+	return nil
+}
+
 func splitNonEmpty(value string) []string {
 	var result []string
 	for _, item := range strings.Split(value, ",") {

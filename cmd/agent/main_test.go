@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/research/apparatus"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
+	"github.com/ikarolaborda/agent-smith/internal/research/store"
 )
 
 func TestConfiguredLlamaDownloadUsesSafeOperationalDefaults(t *testing.T) {
@@ -342,5 +344,38 @@ func TestSignAndLoadVerifiedApparatusAdmissionCatalog(t *testing.T) {
 	}
 	if _, err := loadVerifiedApparatusCatalog(signedPath, publicPath, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "signature mismatch") {
 		t.Fatalf("tampered apparatus catalog accepted: %v", err)
+	}
+}
+
+func TestVerifyResearchStoreCommandEmitsIntegrityEvidence(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	root := filepath.Join(directory, "restored-research")
+	key := bytes.Repeat([]byte{0x6a}, 32)
+	repository, err := store.Open(ctx, store.Config{Root: root, ArtifactEncryptionKeys: [][]byte{key}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.AppendAudit(ctx, domain.AuditEvent{ActorID: "restore-test", Action: "backup.restored", ResourceType: "custody_store", ResourceID: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(directory, "artifact.key")
+	if err := os.WriteFile(keyPath, []byte(hex.EncodeToString(key)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = runVerifyResearchStore(ctx, flags{verifyResearchStore: true, researchDir: root, researchArtifactKeys: keyPath, researchArtifactRetention: store.DefaultArtifactRetention}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report store.IntegrityReport
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Database != "ok" || report.ForeignKeys != "ok" || report.AuditEvents != 1 || report.OrphanBlobs != 0 {
+		t.Fatalf("integrity report=%#v", report)
 	}
 }

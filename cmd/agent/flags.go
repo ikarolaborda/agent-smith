@@ -54,6 +54,7 @@ type flags struct {
 	researchSourceManifestLifetime time.Duration
 	researchArtifactKeys           string
 	researchArtifactRetention      time.Duration
+	verifyResearchStore            bool
 	researchApparatusCatalog       string
 	researchApparatusPublicKey     string
 	researchApparatusPrivateKey    string
@@ -114,6 +115,7 @@ func parseFlags() flags {
 	flag.DurationVar(&f.researchSourceManifestLifetime, "research-source-manifest-lifetime", 30*24*time.Hour, "validity of a newly signed source-bundle manifest (maximum 90 days)")
 	flag.StringVar(&f.researchArtifactKeys, "research-artifact-keys", "", "comma-separated 0600 files containing hex AES-256 artifact keys; first key is active and remaining keys enable rotation")
 	flag.DurationVar(&f.researchArtifactRetention, "research-artifact-retention", store.DefaultArtifactRetention, "minimum artifact custody period before independently approved purge (24h minimum)")
+	flag.BoolVar(&f.verifyResearchStore, "verify-research-store", false, "exhaustively verify an offline restored research store and emit a JSON integrity report")
 	flag.StringVar(&f.researchApparatusCatalog, "research-apparatus-catalog", "", "signed apparatus catalog containing exact manifests, SPDX SBOMs, and SLSA provenance")
 	flag.StringVar(&f.researchApparatusPublicKey, "research-apparatus-public-key", "", "trusted PEM Ed25519 public key for apparatus admission")
 	flag.StringVar(&f.researchApparatusPrivateKey, "research-apparatus-private-key", "", "PEM Ed25519 private key used only with --sign-research-apparatus-catalog")
