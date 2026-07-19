@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"sync"
+	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
@@ -22,6 +24,14 @@ import (
 
 /* providerName is the registry key used to construct this provider. */
 const providerName = "llamacpp"
+
+/*
+localResponseHeaderTimeout bounds how long a non-streaming local generation may
+run before its first response byte. It is generous because a large model on
+partial GPU offload legitimately takes minutes to finish a non-streaming reply,
+yet a truly hung server still eventually errors instead of blocking forever.
+*/
+const localResponseHeaderTimeout = 10 * time.Minute
 
 /*
 Config constructs a Provider around an already-started Runtime. Model is the
@@ -89,7 +99,23 @@ func New(cfg Config) (*Provider, error) {
 	if cfg.APIKey != "" && cfg.APIKey != key {
 		return nil, errors.New("llamacpp: provider API key does not match the supervised runtime")
 	}
-	inner, err := openai.New(openai.Config{APIKey: key, BaseURL: base, Model: cfg.Model})
+	/*
+		A slow local model can take minutes to produce a NON-STREAMING response, and
+		for non-streaming the HTTP headers do not arrive until generation finishes.
+		The shared openai default caps that header wait at 60s — fine for fast cloud
+		models, but it trips "timeout awaiting response headers" on refine and other
+		non-streaming calls to llama-server. Give the local client a generous header
+		timeout; streaming is unaffected (its headers arrive immediately) and the
+		per-request context still bounds cancellation.
+	*/
+	localTransport := http.DefaultTransport.(*http.Transport).Clone()
+	localTransport.ResponseHeaderTimeout = localResponseHeaderTimeout
+	inner, err := openai.New(openai.Config{
+		APIKey:  key,
+		BaseURL: base,
+		Model:   cfg.Model,
+		HTTP:    &http.Client{Transport: localTransport},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("llamacpp: build inner client: %w", err)
 	}
