@@ -155,6 +155,7 @@ export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmen
 | `--cluster-config`   | Path to a cluster YAML; enables clustered inference (exo/MLX/llama.cpp-RPC) with local fallback. |
 | `--inspect-model`    | Resolve GGUF metadata and print the live host-fit report without downloading artifacts. |
 | `--pull`             | Preflight, download, verify, and commit an exact GGUF model/projector set.          |
+| `--install-runtime`  | Detect this host's OS/GPU and install the matching prebuilt `llama-server` (Vulkan by default), then link it onto `PATH`. |
 | `--workspace`        | Directory the agent may modify via `file_write`/`file_edit` (sandboxed). Unset = read-only. |
 | `--ingest`           | Ingest markdown into a RAG collection and exit (with `--collection` + `--source`). |
 | `--collection`       | Collection name when `--ingest` is set.                                            |

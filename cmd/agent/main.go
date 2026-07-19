@@ -42,6 +42,15 @@ func run(f flags) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	/*
+		Runtime bootstrap runs before config load: a fresh host may not have a
+		usable config yet, and installing llama-server is exactly what makes the
+		default llamacpp provider runnable in the first place.
+	*/
+	if f.installRuntime {
+		return runInstallRuntime(ctx, f)
+	}
+
 	cfg, err := config.Load(f.configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)

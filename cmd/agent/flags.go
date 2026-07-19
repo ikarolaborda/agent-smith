@@ -43,6 +43,7 @@ type flags struct {
 	refineTO        time.Duration
 	pull            string
 	inspectModel    string
+	installRuntime  bool
 }
 
 /* parseFlags reads CLI flags. */
@@ -82,6 +83,7 @@ func parseFlags() flags {
 	flag.DurationVar(&f.refineTO, "refine-timeout", refine.DefaultRoundTimeout, "per-round timeout (generate+judge) when --refine-loop is set")
 	flag.StringVar(&f.pull, "pull", "", "download a GGUF model from Hugging Face and exit (e.g. hf.co/ggml-org/gemma-3-1b-it-GGUF:Q4_K_M). Uses the llamacpp provider's models_dir/hf_token when configured.")
 	flag.StringVar(&f.inspectModel, "inspect-model", "", "resolve a GGUF artifact manifest, inspect this host, print the fit report as JSON, and exit without downloading model data")
+	flag.BoolVar(&f.installRuntime, "install-runtime", false, "detect this host's OS/GPU, download the matching prebuilt llama.cpp llama-server (Vulkan by default), link it onto PATH, and exit. Bootstraps the llamacpp provider's runtime dependency.")
 	flag.Parse()
 	return f
 }
