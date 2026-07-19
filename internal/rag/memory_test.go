@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -107,12 +105,14 @@ func TestRemember_DynamicEmbedderPersistsDetectedDimension(t *testing.T) {
 	if _, err := svc.Remember(context.Background(), rag.MemoryWrite{ProfileID: "p1", Text: "dynamic fact"}); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := svc.Store.Load(rag.MemoryCollectionName)
+	// A dynamic-dimension embedder's vector is captured and the write is retrievable;
+	// dimension pinning/enforcement is covered by the convomem MemoryStore tests.
+	items, err := svc.ListMemory("p1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Dim != 3 {
-		t.Fatalf("memory collection dim = %d, want 3", stored.Dim)
+	if len(items) != 1 {
+		t.Fatalf("stored memory items = %d, want 1", len(items))
 	}
 }
 
@@ -136,14 +136,7 @@ func TestRemember_UsesConfiguredMemoryEmbedderAndFailsClosedWhenAmbiguous(t *tes
 		t.Fatal(err)
 	}
 	if local.callCount() != 1 || remote.callCount() != 0 {
-		t.Fatalf("embedding calls local=%d remote=%d, want 1 and 0", local.callCount(), remote.callCount())
-	}
-	stored, err := preferred.Store.Load(rag.MemoryCollectionName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.EmbedderID != local.Identity() {
-		t.Fatalf("memory embedder = %q, want %q", stored.EmbedderID, local.Identity())
+		t.Fatalf("embedding calls local=%d remote=%d, want 1 and 0 (configured embedder used)", local.callCount(), remote.callCount())
 	}
 
 	ambiguousLocal := &recordingEmbedder{id: "ollama:other"}
@@ -203,15 +196,7 @@ func TestRemember_ConcurrentWritesArePersistedWithoutLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(items) != writes {
-		t.Fatalf("in-memory writes = %d, want %d", len(items), writes)
-	}
-	persisted, err := svc.Store.Load(rag.MemoryCollectionName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	indexed := svc.Index.Get(rag.MemoryCollectionName)
-	if !reflect.DeepEqual(persisted, indexed) {
-		t.Fatal("persisted memory and in-memory index diverged")
+		t.Fatalf("writes = %d, want %d (no concurrent write lost)", len(items), writes)
 	}
 
 	reloaded, err := rag.NewService(dir, embedders, nil)
@@ -283,35 +268,54 @@ func TestMemory_ConcurrentRememberAndForgetStayConsistent(t *testing.T) {
 			t.Fatalf("forgotten memory survived: %q", item.Text)
 		}
 	}
-	persisted, err := svc.Store.Load(rag.MemoryCollectionName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(persisted, svc.Index.Get(rag.MemoryCollectionName)) {
-		t.Fatal("persisted memory and in-memory index diverged")
-	}
 }
 
-func TestRemember_DoesNotOverwriteCorruptMemoryStore(t *testing.T) {
-	svc := newMemoryService(t)
-	path, err := svc.Store.Path(rag.MemoryCollectionName)
+func TestMemory_MigratesLegacyJSONToSQLite(t *testing.T) {
+	dir := t.TempDir()
+	e := fakeEmbedder{id: "fake:test"}
+	embs := map[string]llm.Embedder{e.Identity(): e}
+	ctx := context.Background()
+
+	// Seed a legacy JSON memory collection directly, before any SQLite store exists.
+	st, err := rag.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	corrupt := []byte("{not-json")
-	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+	vecs, err := e.EmbedTexts(ctx, []string{"legacy project fact"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = svc.Remember(context.Background(), rag.MemoryWrite{ProfileID: "p1", Text: "new fact"})
-	if err == nil || !strings.Contains(err.Error(), "decode") {
-		t.Fatalf("expected corrupt-store error, got %v", err)
+	legacy := &rag.Collection{
+		Version:    rag.CollectionVersion,
+		Name:       rag.MemoryCollectionName,
+		Kind:       rag.CollectionKindMemory,
+		EmbedderID: e.Identity(),
+		Dim:        len(vecs[0]),
+		Chunks: []rag.Chunk{{
+			ID: "legacy-1", Subject: "p1", Kind: rag.KindProjectFact,
+			Text: "legacy project fact", Vector: vecs[0], Importance: 0.4,
+			CreatedAt: "2026-01-01T00:00:00Z", LastAccessed: "2026-01-01T00:00:00Z",
+		}},
 	}
-	after, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatal(readErr)
+	if err := st.Save(legacy); err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(after, corrupt) {
-		t.Fatalf("corrupt store was overwritten: %q", after)
+
+	// Opening the service migrates the JSON memory into SQLite (once).
+	svc, err := rag.NewService(dir, embs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := svc.ListMemory("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Text != "legacy project fact" {
+		t.Fatalf("migration did not import legacy memory: %+v", items)
+	}
+	// Migration is non-destructive: the legacy JSON file remains as a backup.
+	if _, err := svc.Store.Load(rag.MemoryCollectionName); err != nil {
+		t.Errorf("legacy JSON should remain after migration: %v", err)
 	}
 }
 

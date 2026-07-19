@@ -6,12 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
 	"math"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ikarolaborda/agent-smith/internal/convomem"
 )
 
 /* MemoryCollectionName is the conventional name for the per-binary memory store. */
@@ -88,20 +89,17 @@ func (s *Service) Remember(ctx context.Context, w MemoryWrite) (*Chunk, error) {
 		return nil, errors.New("rag: memory text matches instruction-injection pattern; refused")
 	}
 
+	if s.memStore == nil {
+		return nil, errors.New("rag: memory store unavailable")
+	}
 	/*
-		The memory collection is one persisted read/modify/write document. Keep
-		selection, embedding, persistence, and index replacement in one critical
-		section so concurrent HTTP writes cannot discard one another.
+		Serialize memory writes: pick+enforce the embedder, embed, and INSERT as one
+		critical section so a concurrent embedder-identity change cannot interleave.
 	*/
 	s.memoryMu.Lock()
 	defer s.memoryMu.Unlock()
 
-	embedder, err := s.pickAnyEmbedder()
-	if err != nil {
-		return nil, err
-	}
-
-	col, err := s.openOrCreateMemoryCollection(embedder)
+	embedder, err := s.pickAnyEmbedder(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -110,16 +108,11 @@ func (s *Service) Remember(ctx context.Context, w MemoryWrite) (*Chunk, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rag: embed memory: %w", err)
 	}
-	if len(vectors) != 1 {
+	if len(vectors) != 1 || len(vectors[0]) == 0 {
 		return nil, errors.New("rag: embedder returned no vector for memory text")
 	}
-	if len(vectors[0]) == 0 {
-		return nil, errors.New("rag: embedder returned an empty vector for memory text")
-	}
-	if col.Dim == 0 {
-		col.Dim = len(vectors[0])
-	} else if col.Dim != len(vectors[0]) {
-		return nil, fmt.Errorf("rag: memory vector dim %d != collection dim %d", len(vectors[0]), col.Dim)
+	if err := s.memStore.SetEmbedder(ctx, embedder.Identity(), len(vectors[0])); err != nil {
+		return nil, err
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -128,12 +121,11 @@ func (s *Service) Remember(ctx context.Context, w MemoryWrite) (*Chunk, error) {
 		imp = defaultImportance(kind, w.Pinned)
 	}
 
-	ordinal := len(col.Chunks)
+	/* Nanosecond CreatedAt keeps the deterministic ID unique without an ordinal. */
 	chunk := Chunk{
-		ID:           memoryChunkID(w.ProfileID, kind, now, w.Text, ordinal),
+		ID:           memoryChunkID(w.ProfileID, kind, now, w.Text, 0),
 		Source:       "user-input",
 		Heading:      kind,
-		Ordinal:      ordinal,
 		Text:         w.Text,
 		Vector:       vectors[0],
 		Kind:         kind,
@@ -143,12 +135,13 @@ func (s *Service) Remember(ctx context.Context, w MemoryWrite) (*Chunk, error) {
 		CreatedAt:    now,
 		LastAccessed: now,
 	}
-	col.Chunks = append(col.Chunks, chunk)
-
-	if err := s.Store.Save(col); err != nil {
+	if err := s.memStore.Put(ctx, convomem.MemoryRecord{
+		ID: chunk.ID, Subject: chunk.Subject, Kind: chunk.Kind, Text: chunk.Text,
+		Vector: chunk.Vector, Importance: chunk.Importance, Pinned: chunk.Pinned,
+		CreatedAt: chunk.CreatedAt, LastAccessed: chunk.LastAccessed,
+	}); err != nil {
 		return nil, err
 	}
-	s.Index.Replace(col)
 	s.Logger.Info("rag: memory stored",
 		"profile", profileHash(w.ProfileID),
 		"kind", kind,
@@ -166,32 +159,22 @@ func (s *Service) Forget(ctx context.Context, profileID, chunkID string) error {
 	if profileID == "" || chunkID == "" {
 		return errors.New("rag: profileID and chunkID required")
 	}
+	if s.memStore == nil {
+		return errors.New("rag: memory store unavailable")
+	}
 	s.memoryMu.Lock()
 	defer s.memoryMu.Unlock()
-	col, err := s.Store.Load(MemoryCollectionName)
+	deleted, err := s.memStore.Delete(ctx, profileID, chunkID)
 	if err != nil {
 		return err
 	}
-	idx := -1
-	for i, c := range col.Chunks {
-		if c.ID == chunkID && c.Subject == profileID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
+	if !deleted {
 		return fmt.Errorf("rag: memory %s not found for profile", chunkID)
 	}
-	col.Chunks = append(col.Chunks[:idx], col.Chunks[idx+1:]...)
-	if err := s.Store.Save(col); err != nil {
-		return err
-	}
-	s.Index.Replace(col)
 	s.Logger.Info("rag: memory forgotten",
 		"profile", profileHash(profileID),
 		"id", chunkID,
 	)
-	_ = ctx
 	return nil
 }
 
@@ -203,18 +186,20 @@ func (s *Service) ListMemory(profileID string) ([]Chunk, error) {
 	if profileID == "" {
 		return nil, errors.New("rag: profileID required")
 	}
-	col := s.Index.Get(MemoryCollectionName)
-	if col == nil {
+	if s.memStore == nil {
 		return nil, nil
 	}
-	out := make([]Chunk, 0, len(col.Chunks))
-	for _, c := range col.Chunks {
-		if c.Subject != profileID {
-			continue
-		}
-		copy := c
-		copy.Vector = nil
-		out = append(out, copy)
+	recs, err := s.memStore.Candidates(context.Background(), profileID, false)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Chunk, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, Chunk{
+			ID: r.ID, Source: "user-input", Heading: r.Kind, Text: r.Text,
+			Kind: r.Kind, Subject: r.Subject, Importance: r.Importance,
+			Pinned: r.Pinned, CreatedAt: r.CreatedAt, LastAccessed: r.LastAccessed,
+		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	return out, nil
@@ -229,11 +214,17 @@ func (s *Service) SearchMemory(ctx context.Context, query, profileID string, k i
 	if profileID == "" || strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
-	col := s.Index.Get(MemoryCollectionName)
-	if col == nil || len(col.Chunks) == 0 {
+	if s.memStore == nil {
 		return nil, nil
 	}
-	embedder, err := s.pickAnyEmbedder()
+	candidates, err := s.memStore.Candidates(ctx, profileID, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	embedder, err := s.pickAnyEmbedder(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -254,14 +245,11 @@ func (s *Service) SearchMemory(ctx context.Context, query, profileID string, k i
 	}
 	now := time.Now().UTC()
 	type scored struct {
-		idx   int
+		rec   convomem.MemoryRecord
 		score float32
 	}
 	var pool []scored
-	for i, c := range col.Chunks {
-		if c.Subject != profileID {
-			continue
-		}
+	for _, c := range candidates {
 		if len(c.Vector) != len(qv) {
 			continue
 		}
@@ -270,51 +258,27 @@ func (s *Service) SearchMemory(ctx context.Context, query, profileID string, k i
 			continue
 		}
 		score := base + 0.10*c.Importance + 0.05*recencyFactor(c.LastAccessed, now)
-		pool = append(pool, scored{idx: i, score: score})
+		pool = append(pool, scored{rec: c, score: score})
 	}
 	sort.SliceStable(pool, func(a, b int) bool { return pool[a].score > pool[b].score })
 	if len(pool) > k {
 		pool = pool[:k]
 	}
 	out := make([]SearchResult, 0, len(pool))
-	for _, s := range pool {
+	for _, sc := range pool {
+		r := sc.rec
 		out = append(out, SearchResult{
 			Collection: MemoryCollectionName,
-			Chunk:      col.Chunks[s.idx],
-			Score:      s.score,
+			Chunk: Chunk{
+				ID: r.ID, Source: "user-input", Heading: r.Kind, Text: r.Text,
+				Vector: r.Vector, Kind: r.Kind, Subject: r.Subject,
+				Importance: r.Importance, Pinned: r.Pinned,
+				CreatedAt: r.CreatedAt, LastAccessed: r.LastAccessed,
+			},
+			Score: sc.score,
 		})
 	}
 	return out, nil
-}
-
-/* openOrCreateMemoryCollection returns the memory collection, creating it on first call. */
-func (s *Service) openOrCreateMemoryCollection(embedder embedderShim) (*Collection, error) {
-	existing, err := s.Store.Load(MemoryCollectionName)
-	if err == nil {
-		if existing.Kind == "" {
-			existing.Kind = CollectionKindMemory
-		}
-		if existing.EmbedderID != embedder.Identity() {
-			return nil, fmt.Errorf(
-				"rag: memory collection embedder %q != requested %q",
-				existing.EmbedderID, embedder.Identity(),
-			)
-		}
-		return existing, nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-	now := time.Now().UTC()
-	return &Collection{
-		Version:    CollectionVersion,
-		Name:       MemoryCollectionName,
-		Kind:       CollectionKindMemory,
-		EmbedderID: embedder.Identity(),
-		Dim:        embedder.Dim(),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}, nil
 }
 
 /* embedderShim is the subset of llm.Embedder this file needs. */
@@ -325,29 +289,32 @@ type embedderShim interface {
 }
 
 /*
-pickAnyEmbedder resolves the private-memory embedding backend. An existing
-collection's embedding space remains authoritative but must agree with an
-explicit operator preference. A new collection uses MemoryEmbedderID; without
-one, exactly one registered embedder is required. Multiple candidates fail
-closed so memory text is never sent to a random local or remote backend.
+pickAnyEmbedder resolves the private-memory embedding backend. Once the SQLite
+store has pinned an embedder (first write or migration), that space is
+authoritative and any explicit operator preference must agree. Before anything is
+pinned, MemoryEmbedderID chooses; without one, exactly one registered embedder is
+required — multiple candidates fail closed so memory text is never sent to a
+random local or remote backend.
 */
-func (s *Service) pickAnyEmbedder() (embedderShim, error) {
-	existing, err := s.Store.Load(MemoryCollectionName)
-	if err == nil {
-		if s.MemoryEmbedderID != "" && existing.EmbedderID != s.MemoryEmbedderID {
-			return nil, fmt.Errorf(
-				"rag: memory collection embedder %q != configured memory embedder %q",
-				existing.EmbedderID, s.MemoryEmbedderID,
-			)
+func (s *Service) pickAnyEmbedder(ctx context.Context) (embedderShim, error) {
+	if s.memStore != nil {
+		id, _, ok, err := s.memStore.Embedder(ctx)
+		if err != nil {
+			return nil, err
 		}
-		e, ok := s.Embedders[existing.EmbedderID]
-		if !ok {
-			return nil, fmt.Errorf("rag: memory collection requires unavailable embedder %q", existing.EmbedderID)
+		if ok {
+			if s.MemoryEmbedderID != "" && id != s.MemoryEmbedderID {
+				return nil, fmt.Errorf(
+					"rag: memory embedder %q != configured memory embedder %q",
+					id, s.MemoryEmbedderID,
+				)
+			}
+			e, avail := s.Embedders[id]
+			if !avail {
+				return nil, fmt.Errorf("rag: memory requires unavailable embedder %q", id)
+			}
+			return e, nil
 		}
-		return e, nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
 	}
 
 	if s.MemoryEmbedderID != "" {

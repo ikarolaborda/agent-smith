@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/context7"
+	"github.com/ikarolaborda/agent-smith/internal/convomem"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/web"
 )
@@ -54,8 +55,16 @@ type Service struct {
 	MemoryEmbedderID string
 	Logger           *slog.Logger
 
-	/* memoryMu serializes the load/mutate/save/index transaction for memory. */
+	/* memoryMu serializes memory writes so concurrent HTTP writes cannot race. */
 	memoryMu sync.Mutex
+
+	/*
+		memStore backs per-profile memory in SQLite: one INSERT per write and a
+		per-profile read, replacing the load-whole-JSON-file model so memory scales.
+		Nil only when the data dir could not be opened, in which case memory is
+		disabled (chat still works) rather than failing the whole service.
+	*/
+	memStore *convomem.MemoryStore
 
 	/*
 		The structural knowledge graph is built lazily on first use (from the
@@ -115,7 +124,8 @@ func NewService(dir string, embedders map[string]llm.Embedder, logger *slog.Logg
 		return nil, fmt.Errorf("rag: load required embedded knowledge corpus: %w", lexicalErr)
 	}
 	logger.Info("rag: embedded lexical corpus loaded", "chunks", len(lexical.documents))
-	return &Service{
+
+	svc := &Service{
 		Store:        st,
 		Index:        idx,
 		Router:       DefaultTopicRouter(),
@@ -126,7 +136,68 @@ func NewService(dir string, embedders map[string]llm.Embedder, logger *slog.Logg
 		MaxBytes:     DefaultMaxBytesInjected,
 		Threshold:    DefaultThreshold,
 		StrictThresh: DefaultStrictThreshold,
-	}, nil
+	}
+	/*
+		Memory is SQLite-backed. Opening it is best-effort: a data dir that cannot
+		host a database disables memory rather than failing chat. On first open we
+		migrate any pre-existing JSON memory collection non-destructively (the JSON
+		file is left in place as a backup) so no memory is lost in the transition.
+	*/
+	if ms, err := convomem.OpenMemoryStore(filepath.Join(dir, "memory.sqlite")); err != nil {
+		logger.Warn("rag: memory store unavailable; per-profile memory disabled", "err", err)
+	} else {
+		svc.memStore = ms
+		if err := svc.migrateJSONMemory(context.Background()); err != nil {
+			logger.Warn("rag: memory migration skipped", "err", err)
+		}
+	}
+	return svc, nil
+}
+
+/*
+migrateJSONMemory imports a legacy JSON memory collection into the SQLite store
+exactly once (guarded by an empty store), preserving every chunk's fields. It is
+non-destructive: the JSON file is untouched, so a rollback keeps the old data.
+*/
+func (s *Service) migrateJSONMemory(ctx context.Context) error {
+	if s.memStore == nil {
+		return nil
+	}
+	n, err := s.memStore.Count(ctx)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil // already migrated or natively written
+	}
+	col, err := s.Store.Load(MemoryCollectionName)
+	if err != nil {
+		return nil // no legacy memory to migrate
+	}
+	if col.EmbedderID != "" && col.Dim > 0 {
+		if err := s.memStore.SetEmbedder(ctx, col.EmbedderID, col.Dim); err != nil {
+			return err
+		}
+	}
+	migrated := 0
+	for _, c := range col.Chunks {
+		if c.Subject == "" || len(c.Vector) == 0 {
+			continue
+		}
+		rec := convomem.MemoryRecord{
+			ID: c.ID, Subject: c.Subject, Kind: c.Kind, Text: c.Text,
+			Vector: c.Vector, Importance: c.Importance, Pinned: c.Pinned,
+			CreatedAt: c.CreatedAt, LastAccessed: c.LastAccessed,
+		}
+		if err := s.memStore.Put(ctx, rec); err != nil {
+			return err
+		}
+		migrated++
+	}
+	if migrated > 0 {
+		s.Logger.Info("rag: migrated JSON memory to SQLite", "chunks", migrated)
+	}
+	return nil
 }
 
 /*
