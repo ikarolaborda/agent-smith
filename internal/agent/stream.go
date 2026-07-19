@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ikarolaborda/agent-smith/internal/compact"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 )
 
@@ -95,6 +96,24 @@ func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm
 	if user.Role == "" {
 		user.Role = llm.RoleUser
 	}
+
+	/*
+		Compact oversized input before streaming so a message larger than the
+		context window becomes head/tail + summary, with its full text indexed for a
+		per-turn context_search tool. Non-fatal on error: the original is streamed
+		and the provider's own context error still reaches the client.
+	*/
+	reg := a.Tools
+	if a.Compactor != nil && user.Content != "" {
+		if res, err := a.Compactor.Compact(ctx, user.Content, ""); err != nil {
+			a.Logger.Warn("agent: input compaction failed; streaming original", "err", err)
+		} else if res != nil {
+			user.Content = res.Compacted
+			if res.Index != nil && res.Index.Len() > 0 {
+				reg = a.Tools.With(compact.NewContextSearchTool(res.Index))
+			}
+		}
+	}
 	session.Append(user)
 
 	for i := 1; i <= a.MaxIters; i++ {
@@ -103,8 +122,8 @@ func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm
 			Stream:   true,
 			Model:    a.Model,
 		}
-		if a.Tools != nil {
-			req.Tools = a.Tools.Definitions()
+		if reg != nil {
+			req.Tools = reg.Definitions()
 		}
 
 		/*
@@ -151,7 +170,7 @@ func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm
 		}
 
 		for _, call := range assistant.ToolCalls {
-			result, toolErr := a.dispatch(ctx, call)
+			result, toolErr := a.dispatch(ctx, reg, call)
 			session.Append(llm.Message{
 				Role:       llm.RoleTool,
 				Name:       call.Name,

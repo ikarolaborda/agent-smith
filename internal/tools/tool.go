@@ -119,3 +119,26 @@ func (r *Registry) Definitions() []llm.ToolDefinition {
 	}
 	return out
 }
+
+/*
+With returns a new Registry containing r's tools plus extra, without mutating r.
+Same-named extras override. It lets a single agent Run add a per-turn tool (e.g.
+context_search over one request's compacted input) without touching the shared
+registry other requests read concurrently. Nil extras are ignored.
+*/
+func (r *Registry) With(extra ...Tool) *Registry {
+	nr := NewRegistry()
+	if r != nil {
+		r.mu.RLock()
+		for name, t := range r.tools {
+			nr.tools[name] = t
+		}
+		r.mu.RUnlock()
+	}
+	for _, t := range extra {
+		if t != nil {
+			nr.tools[t.Name()] = t
+		}
+	}
+	return nr
+}

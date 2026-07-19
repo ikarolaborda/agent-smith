@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/ikarolaborda/agent-smith/internal/compact"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/tools"
@@ -80,6 +81,13 @@ type Agent struct {
 		rather than burning the whole round timeout.
 	*/
 	MaxTokens int
+	/*
+		Compactor, when non-nil, rewrites a user message that would overflow the
+		model's context window into head/tail + a summary, and exposes the original
+		text to the loop through a per-turn context_search tool. Nil disables it, so
+		callers that never send oversized input are unaffected.
+	*/
+	Compactor *compact.Compactor
 }
 
 /*
@@ -186,7 +194,26 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 		return "", errors.New("agent: nil session")
 	}
 
-	session.Append(llm.Message{Role: llm.RoleUser, Content: userInput})
+	/*
+		Compact oversized input before it reaches the provider: a message larger
+		than the context window is rewritten to head/tail + summary, and its full
+		text is indexed for a per-turn context_search tool so nothing is lost. A
+		compaction error is non-fatal — the original message is sent and the
+		provider's own context-size error (if any) still surfaces to the caller.
+	*/
+	content := userInput
+	reg := a.Tools
+	if a.Compactor != nil {
+		if res, err := a.Compactor.Compact(ctx, userInput, ""); err != nil {
+			a.Logger.Warn("agent: input compaction failed; sending original", "err", err)
+		} else if res != nil {
+			content = res.Compacted
+			if res.Index != nil && res.Index.Len() > 0 {
+				reg = a.Tools.With(compact.NewContextSearchTool(res.Index))
+			}
+		}
+	}
+	session.Append(llm.Message{Role: llm.RoleUser, Content: content})
 
 	usedRetrieval := false
 	for i := 0; i < a.MaxIters; i++ {
@@ -194,8 +221,8 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 			Messages: a.composeMessages(ctx, session),
 			Model:    a.Model,
 		}
-		if a.Tools != nil {
-			req.Tools = a.Tools.Definitions()
+		if reg != nil {
+			req.Tools = reg.Definitions()
 		}
 		if a.MaxTokens > 0 {
 			limit := a.MaxTokens
@@ -228,7 +255,7 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 			if isRetrievalTool(call.Name) {
 				usedRetrieval = true
 			}
-			result, toolErr := a.dispatch(ctx, call)
+			result, toolErr := a.dispatch(ctx, reg, call)
 			session.Append(llm.Message{
 				Role:       llm.RoleTool,
 				Name:       call.Name,
@@ -364,11 +391,11 @@ func (a *Agent) verifyNote(ctx context.Context, content string) string {
 dispatch resolves a tool by name and executes it. Unknown tools surface as
 errors that the loop converts into tool messages so the model can recover.
 */
-func (a *Agent) dispatch(ctx context.Context, call llm.ToolCall) (string, error) {
-	if a.Tools == nil {
+func (a *Agent) dispatch(ctx context.Context, reg *tools.Registry, call llm.ToolCall) (string, error) {
+	if reg == nil {
 		return "", errors.New("agent: no tool registry configured")
 	}
-	t, err := a.Tools.Get(call.Name)
+	t, err := reg.Get(call.Name)
 	if err != nil {
 		return "", err
 	}

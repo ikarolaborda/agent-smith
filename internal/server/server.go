@@ -20,6 +20,7 @@ import (
 
 	"github.com/ikarolaborda/agent-smith/internal/agent"
 	"github.com/ikarolaborda/agent-smith/internal/cluster"
+	"github.com/ikarolaborda/agent-smith/internal/compact"
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/llm/abliteration"
@@ -167,6 +168,14 @@ type Server struct {
 		case a refine request hard-fails rather than returning an unevaluated answer.
 	*/
 	refineJudge refine.Judge
+
+	/*
+		compactor rewrites oversized user input (summary + verbatim head/tail +
+		context_search index) so it fits a context-limited local model. Built once
+		from the openai provider (the large-context summarizer) and attached only to
+		llamacpp per-request agents in newAgent; nil when openai is unconfigured.
+	*/
+	compactor *compact.Compactor
 
 	/*
 		modelsMu guards the dynamic Ollama model list. We preload it at
@@ -344,6 +353,7 @@ func New(opts Options) (*Server, error) {
 	if len(s.providers) == 0 {
 		logger.Warn("no providers ready — chat completions will return 503")
 	}
+	s.compactor = buildCompactor(s.providers, opts.Config, logger)
 
 	s.registerRoutes()
 	s.refreshOllamaModels(context.Background())
@@ -762,7 +772,68 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 	}
 	a.Agentic = s.agentic && ragOn
 	a.Verifier = s.answerVerifier
+	/*
+		Attach input compaction only for the context-limited local model. Cloud
+		providers (openai/anthropic) have large windows, so compacting their input
+		would discard fidelity for no reason. The trigger is derived from the
+		llamacpp context size, and a per-request copy carries it so the shared base
+		compactor stays immutable.
+	*/
+	if name == "llamacpp" && s.compactor != nil {
+		c := *s.compactor
+		c.TriggerTokens = compactTriggerTokens(s.cfg)
+		a.Compactor = &c
+	}
 	return a, nil
+}
+
+/*
+buildCompactor wires the oversized-input compactor to the openai provider as its
+large-context summarizer (model from config, e.g. gpt-5.5). It returns nil when
+openai is not configured, disabling compaction rather than failing — the
+provider's own context error then surfaces unchanged.
+*/
+func buildCompactor(providers map[string]llm.Provider, cfg *config.Config, logger *slog.Logger) *compact.Compactor {
+	if cfg == nil {
+		return nil
+	}
+	op, ok := providers["openai"]
+	if !ok || op == nil {
+		return nil
+	}
+	return &compact.Compactor{
+		Summarizer: &compact.ProviderSummarizer{
+			Provider:         op,
+			Model:            cfg.Providers["openai"].Model,
+			InputTokenBudget: 100000,
+			MaxOutputTokens:  1500,
+		},
+		HeadTokens: 800,
+		TailTokens: 800,
+		ChunkChars: 3000,
+		Logger:     logger,
+	}
+}
+
+/*
+compactTriggerTokens is the input size above which compaction runs for the local
+model, derived from its configured context size with headroom reserved for the
+system prompt, RAG grounding, the model's own response, and the preserved
+head/tail. Falls back to a conservative default when the size is auto-tuned
+(unset in config).
+*/
+func compactTriggerTokens(cfg *config.Config) int {
+	ctxSize := 8192
+	if cfg != nil {
+		if p, ok := cfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && p.LlamaCpp.CtxSize > 0 {
+			ctxSize = p.LlamaCpp.CtxSize
+		}
+	}
+	trigger := ctxSize - 6144
+	if trigger < 2048 {
+		trigger = 2048
+	}
+	return trigger
 }
 
 /* getWorkspace returns the folder the agentic file tools are currently scoped to. */
