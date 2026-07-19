@@ -389,7 +389,7 @@ func (a *Agent) compactSession(ctx context.Context, session *Session, prior []*c
 		is under the trigger and skipped, and the summary cache makes re-scanning cheap.
 	*/
 	for i := range msgs {
-		if msgs[i].Content == "" || !compactableRole(msgs[i].Role) {
+		if msgs[i].Content == "" || !compactableMsg(msgs[i]) {
 			continue
 		}
 		res, err := a.Compactor.Compact(ctx, msgs[i].Content, "")
@@ -413,7 +413,7 @@ func (a *Agent) compactSession(ctx context.Context, session *Session, prior []*c
 		for totalMessageTokens(msgs) > budget {
 			bi, bt := -1, 0
 			for i := range msgs {
-				if tried[i] || !compactableRole(msgs[i].Role) {
+				if tried[i] || !compactableMsg(msgs[i]) {
 					continue
 				}
 				if tk := compact.EstimateTokens(msgs[i].Content); tk > bt {
@@ -448,9 +448,23 @@ func (a *Agent) compactSession(ctx context.Context, session *Session, prior []*c
 	return reg, indexes
 }
 
-/* compactableRole reports whether a message role may be rewritten by compaction. */
-func compactableRole(r llm.Role) bool {
-	return r == llm.RoleUser || r == llm.RoleTool
+/*
+compactableMsg reports whether a message may be rewritten by compaction. User and
+tool messages always qualify. Assistant messages qualify too — a long prior answer
+(e.g. a big generated report) is a common overflow source in a continued chat — but
+only when it carries NO tool_calls: rewriting the content of a tool-call message
+could desync it from its paired tool results. System messages are never touched
+here (the system prompt is rebuilt fresh each turn, not stored in the session).
+*/
+func compactableMsg(m llm.Message) bool {
+	switch m.Role {
+	case llm.RoleUser, llm.RoleTool:
+		return true
+	case llm.RoleAssistant:
+		return len(m.ToolCalls) == 0
+	default:
+		return false
+	}
 }
 
 /* totalMessageTokens estimates the combined size of all messages (system prompt excluded). */
