@@ -14,7 +14,7 @@ make build              # builds web/dist + bin/agent
 make test               # go test -race -count=1 ./...
 ```
 
-Requirements: Go 1.26+, Node 20+, and (optionally) a local Ollama install for the offline-first path.
+Requirements: Go 1.24+, Node 20+, and (optionally) a local Ollama install for the offline-first path.
 
 ## How to propose a change
 
@@ -42,7 +42,7 @@ Subject lines should be ≤ 72 chars, imperative mood (“add caching”, not �
 
 ### Go
 
-- Targets the Go toolchain version pinned in `go.mod` (currently 1.26.3). The CI runs `go vet`, `go test -race -count=1 ./...`, and `golangci-lint run` (config in `.golangci.yml`).
+- Targets the Go toolchain version pinned in `go.mod` (currently Go 1.24). The CI runs `go vet`, `go test -race -count=1 ./...`, and `golangci-lint run` (config in `.golangci.yml`).
 - Block comments `/* ... */` are used throughout this codebase; please match the local convention (the only `//` lines you should add are the `//go:embed` directives, which Go itself requires).
 - Add or update tests for any behaviour change. Race tests are mandatory.
 

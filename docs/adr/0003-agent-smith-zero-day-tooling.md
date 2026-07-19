@@ -161,6 +161,22 @@ different content is no longer honored. The pin is opt-in (unset = resolve by
 tag) because the digest is host-specific. Still deferred: a tighter seccomp
 profile and image provenance/signature verification.
 
+## Capability correction (2026-07-19)
+
+Phase 1 proves a useful containment boundary, but it is not a complete fuzzing
+apparatus. This repository does not contain the referenced `scripts/build.sh`,
+the `php74-asan` apparatus Dockerfile, PHP harnesses, or seed corpora. The
+current `fuzz` operation invokes a PHP driver over a corpus path; it does not
+link or run a coverage-guided engine, evolve a writable corpus, or persist crash
+artifacts. The workspace is intentionally mounted read-only and `/tmp` is
+ephemeral. Treat the tool as a compatibility adapter for an externally prepared
+lab until the runner-v2, artifact-ingestion, and libFuzzer phases in
+`docs/plans/cybersecurity-research-platform.md` are implemented.
+
+The non-functional `shell` and `http` placeholders are no longer registered as
+model tools. Networked acquisition and novelty checks must use dedicated,
+bounded clients; target execution remains structured and container-contained.
+
 ## Rejected alternatives
 - **Host `sh -c` with cwd/timeout/cap "sandbox"** — rejected (not a sandbox;
   credential/exfil/escape risk).

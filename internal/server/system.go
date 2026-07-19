@@ -36,7 +36,43 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "host_profile_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"host": host})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"host":         host,
+		"capabilities": s.capabilityStatus(),
+	})
+}
+
+/*
+capabilityStatus is the authoritative, machine-readable view of features the
+running server can actually execute. It deliberately distinguishes containment
+from a complete fuzzing apparatus so clients and models cannot infer capability
+from stale documentation or a registered placeholder.
+*/
+func (s *Server) capabilityStatus() map[string]any {
+	workspace := s.getWorkspace()
+	execEnabled := s.allowExec && workspace != ""
+	execBackend := "disabled"
+	apparatus := "none"
+	if execEnabled {
+		execBackend = "docker"
+		apparatus = "external_php_driver"
+	}
+	return map[string]any{
+		"file_read":              true,
+		"file_mutation":          workspace != "",
+		"host_shell":             false,
+		"arbitrary_http":         false,
+		"contained_execution":    execEnabled,
+		"execution_backend":      execBackend,
+		"execution_image_pinned": execEnabled && s.execImageDigest != "",
+		"apparatus":              apparatus,
+		"coverage_guided_fuzzing": false,
+		"artifact_persistence":   false,
+		"research_persistence":   false,
+		"authentication":         false,
+		"rag":                    s.rag != nil && !s.disableRAG,
+		"cve_verifier":           s.answerVerifier != nil,
+	}
 }
 
 /* hfModel is the trimmed shape of a Hugging Face model search row. */

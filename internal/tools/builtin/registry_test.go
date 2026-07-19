@@ -8,9 +8,14 @@ import (
 
 func TestNewDefaultRegistry_WriteToolsGatedOnWorkspace(t *testing.T) {
 	readOnly := builtin.NewDefaultRegistry("")
-	for _, name := range []string{"shell", "http", "file_read", "read_dir"} {
+	for _, name := range []string{"file_read", "read_dir"} {
 		if _, err := readOnly.Get(name); err != nil {
 			t.Errorf("read-only registry should always expose %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{"shell", "http"} {
+		if _, err := readOnly.Get(name); err == nil {
+			t.Errorf("registry must not advertise non-functional placeholder %q", name)
 		}
 	}
 	for _, name := range []string{"file_write", "file_edit"} {

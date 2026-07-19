@@ -15,7 +15,7 @@
 - Talks to **OpenAI**, **Anthropic**, any local **Ollama** model, and a self-managed **llama.cpp** server through one `llm.Provider` interface — streaming and non-streaming, with an OpenAI-compatible `/v1/chat/completions` SSE endpoint.
 - Resolves immutable Hugging Face GGUF manifests, profiles live host memory/disk, refuses unsafe fits before payload transfer, verifies shards/projectors by SHA-256, and supervises `llama-server` on loopback. See [`docs/llamacpp-local-models.md`](docs/llamacpp-local-models.md).
 - Runs **clustered inference** across two Apple-Silicon Macs (`--cluster-config`) so you can serve a 70B/72B model that won't fit on one box, with **exo / MLX / llama.cpp-RPC** backends and a memory-admitted single-node **local fallback**.
-- Drives an **agentic tool loop** — `shell`, `http`, `file_read`, `read_dir` (load a whole folder into context, like an IDE's `@folder`), plus sandboxed `file_write` / `file_edit` when you point it at a `--workspace`.
+- Drives an **agentic tool loop** — `file_read`, `read_dir` (load a whole folder into context, like an IDE's `@folder`), plus sandboxed `file_write` / `file_edit` when you point it at a `--workspace`, and an opt-in structured contained research runner with `--allow-exec`.
 - Serves a **ChatGPT-like React SPA** embedded in the binary via `go:embed` — no separate frontend deploy.
 - Augments answers with **hybrid RAG** over eleven built-in markdown corpora, **live Context7 library docs**, **long-term per-profile memory**, and **fresh web grounding** — all rendered as clearly-labelled, untrusted-by-default context sections. Built-in lexical retrieval works on first launch; optional vector ingestion improves ranking.
 - Ships an **always-on persona and engineering policy**: a blunt, informal cybersecurity-software-architect voice, an OOP/Clean-Architecture coding standard, mandatory Context7 for third-party APIs, and a hard factual-grounding rule (never fabricate a CVE, version range, or payload). These reach **every model in every language**, regardless of the configured system prompt.
@@ -78,10 +78,9 @@ The agent runs a plan → call-tool → observe loop with OpenAI-compatible func
 | --- | --- | --- |
 | `file_read` | always on | Read a single text file, with symlink-escape / root-confinement defense. |
 | `read_dir` | always on | Load an **entire folder** into context in one call (the agent equivalent of an IDE `@folder`): recursively reads UTF-8 text files with path headers, bounded by a byte budget, skipping noise dirs (`.git`, `node_modules`, `vendor`, …) and binaries. Narrow with an `ext` filter or a deeper `path`. |
-| `shell` | always on | Run a shell command and capture output. |
-| `http` | always on | Make an outbound HTTP request. |
 | `file_write` | **`--workspace` only** | Create/overwrite a file inside the sandboxed workspace directory. |
 | `file_edit` | **`--workspace` only** | Apply a targeted edit to a file inside the workspace. |
+| `run` | **`--workspace --allow-exec` only** | Run the current fixed PHP research operations inside a network-isolated, read-only Docker container. This phase-1 adapter requires an externally prepared `php74-asan` image/workspace and is not yet coverage-guided fuzzing. |
 
 By default the agent is read-only — it can inspect a project but not modify it. Give it a folder to enable sandboxed project work (writes outside it are refused) either at launch with `--workspace <dir>`, or from the web UI with the top-bar **Open folder…** control, which opens a host folder at runtime (`POST /v1/workspace`) and lets you browse it. The folder is server-side because the agent runs on the host, so it takes a path rather than a browser directory handle.
 
@@ -102,7 +101,7 @@ These live in `pkg/prompt` and are covered by tests that fail if any directive i
 | Providers | OpenAI (`/v1/chat/completions`), the OpenAI-compatible `abliteration` endpoint, Anthropic (`/v1/messages`), Ollama (`/api/chat` NDJSON), and a supervised llama.cpp server, all streaming. |
 | Local model admission | Darwin/Linux host profiling, Linux cgroup limits, immutable HF manifests, exact split/projector selection, cross-process disk/runtime admission locks, pre-download memory/disk reports, SHA-256 + GGUF verification, authenticated loopback serving, and a second pre-launch fit gate. |
 | Clustered inference | Two-node Apple-Silicon cluster (exo / MLX / llama.cpp-RPC) with single-node-first guard, per-node memory budget, long-context plumbing, and automatic local fallback. |
-| Agentic tools | `file_read`, `read_dir`, `shell`, `http` always on; `file_write` / `file_edit` sandboxed behind `--workspace`. |
+| Agentic tools | `file_read` and `read_dir` always on; `file_write` / `file_edit` sandboxed behind `--workspace`; structured contained `run` behind `--workspace --allow-exec`. No host shell or arbitrary model-controlled HTTP tool. |
 | Embeddings | OpenAI `text-embedding-3-small`, Ollama `nomic-embed-text`. |
 | Web UI | React + Vite + react-bootstrap SPA embedded via `go:embed`. Per-conversation provider/model picker, cluster-mode indicator, markdown + code highlighting, scroll-contained long messages and wide tables. |
 | RAG | Built-in lexical retrieval plus optional dense cosine retrieval, per-collection JSON persistence, eleven curated corpora. `--rag-max-chunks` explicitly tunes injection depth for larger contexts. |
@@ -219,7 +218,7 @@ internal/cluster       Cluster manager, scheduler (memory-fit guards), backends 
 internal/rag           Embedded lexical + optional dense RAG, scoped memory, Context7 augmentation
 internal/web           DuckDuckGo searcher, TTL cache, sanitiser
 internal/server        HTTP + SSE + go:embed of the SPA + /v1/cluster + /v1/rag/*
-internal/tools         Tool registry + builtins (file_read, read_dir, shell, http, file_write, file_edit)
+internal/tools         Tool registry + builtins (file_read, read_dir, file_write, file_edit, opt-in contained run)
 internal/config        YAML loader + env expansion
 pkg/prompt             Exported prompt-assembly helpers + always-on persona/engineering directives
 web/                   Vite + React + TS SPA, built into web/dist (embedded)
