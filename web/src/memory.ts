@@ -9,7 +9,7 @@ export interface MemoryChunk {
 }
 
 export async function remember(profileId: string, kind: MemoryKind, text: string): Promise<MemoryChunk> {
-  const resp = await fetch('/v1/rag/remember', {
+  const resp = await authenticatedFetch('/v1/rag/remember', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profile_id: profileId, kind, text }),
@@ -28,7 +28,7 @@ export async function correction(
   wrongAnswer: string,
   correctAnswer: string,
 ): Promise<MemoryChunk> {
-  const resp = await fetch('/v1/rag/correction', {
+  const resp = await authenticatedFetch('/v1/rag/correction', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -45,3 +45,4 @@ export async function correction(
   const json = await resp.json();
   return json.chunk as MemoryChunk;
 }
+import { authenticatedFetch } from './auth';

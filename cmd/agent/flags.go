@@ -38,6 +38,13 @@ type flags struct {
 	validateVuln    bool
 	allowExec       bool
 	execImageDigest string
+	researchMode    bool
+	researchDir     string
+	researchToken   string
+	researchActor   string
+	researchRoots   string
+	researchRuntime string
+	researchWorkers int
 	refineLoop      bool
 	refineIters     int
 	refineTO        time.Duration
@@ -78,6 +85,13 @@ func parseFlags() flags {
 	flag.BoolVar(&f.validateVuln, "validate-vuln", false, "cross-validate vulnerability-research answers against independent models (OpenAI via API; Anthropic via the Claude Code CLI / Max subscription) and append a non-authoritative advisory (network egress; drives the Max subscription programmatically)")
 	flag.BoolVar(&f.allowExec, "allow-exec", false, "enable the OPT-IN container-contained execution tool (ADR 0003): the agent may run fixed apparatus operations (fuzz/reproduce/triage) inside an ephemeral, network-isolated, read-only Docker container mounting --workspace. OFF by default; requires --workspace and Docker. Each run is audited.")
 	flag.StringVar(&f.execImageDigest, "exec-image-digest", "", "pin the contained-exec apparatus image to an exact local image ID (sha256:<hex>, from `docker images --no-trunc --quiet php74-asan`). With --pull=never this makes image resolution fail closed on any other content, defeating a local re-tag. Empty = resolve by tag (unpinned).")
+	flag.BoolVar(&f.researchMode, "research-mode", false, "enable the authenticated durable research control plane (requires a bearer token and fixed workspace roots)")
+	flag.StringVar(&f.researchDir, "research-dir", ".agent-smith/research", "private SQLite/artifact directory used by --research-mode")
+	flag.StringVar(&f.researchToken, "research-token", "", "bootstrap bearer token for --research-mode (minimum 32 characters; prefer AGENT_SMITH_RESEARCH_TOKEN)")
+	flag.StringVar(&f.researchActor, "research-actor", "local-operator", "audit principal ID for the bootstrap research credential")
+	flag.StringVar(&f.researchRoots, "research-workspace-roots", "", "comma-separated existing directories permitted as research workspaces; defaults to --workspace when set")
+	flag.StringVar(&f.researchRuntime, "research-container-runtime", "", "optional verified Docker runtime for research workers (for example runsc for gVisor)")
+	flag.IntVar(&f.researchWorkers, "research-workers", 1, "global research worker concurrency (per-campaign concurrency remains one)")
 	flag.BoolVar(&f.refineLoop, "refine-loop", false, "OPT-IN single-shot refinement loop (requires --prompt + OpenAI judge): regenerate the answer with the gpt-5.x judge's critique until it is judged USABLE (grounded, feasible, honestly scoped) or the iteration budget is exhausted. Anti-fabrication: an honest negative passes; the loop never fakes a pass. CLI-only.")
 	flag.IntVar(&f.refineIters, "refine-max-iters", refine.DefaultMaxIters, "maximum refinement iterations when --refine-loop is set")
 	flag.DurationVar(&f.refineTO, "refine-timeout", refine.DefaultRoundTimeout, "per-round timeout (generate+judge) when --refine-loop is set")

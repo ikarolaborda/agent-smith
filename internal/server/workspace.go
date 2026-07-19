@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 )
 
 /*
@@ -55,6 +57,13 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, workspaceState{Workspace: ws, Writable: ws != ""})
 		return
 	case http.MethodPost:
+		if s.research != nil {
+			principal, ok := principalFromContext(r.Context())
+			if !ok || !principalHasAnyRole(principal, domain.RoleOperator) {
+				writeError(w, http.StatusForbidden, "forbidden", "operator role required to change the research workspace")
+				return
+			}
+		}
 		var req struct {
 			Path string `json:"path"`
 		}
@@ -81,6 +90,10 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_request", "not a directory: "+abs)
 			return
 		}
+		if !s.workspaceAllowed(abs) {
+			writeError(w, http.StatusForbidden, "workspace_out_of_scope", "folder is outside the operator-configured research workspace roots")
+			return
+		}
 		s.setWorkspace(abs)
 		s.logger.Info("workspace: opened from web UI", "root", abs)
 		writeJSON(w, http.StatusOK, workspaceState{Workspace: abs, Writable: true})
@@ -89,6 +102,70 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET or POST required")
 		return
 	}
+}
+
+/*
+workspaceStatePath is where the active workspace folder is persisted so it
+survives a reload or a server restart (the web UI restores it via GET
+/v1/workspace). It is empty — disabling persistence — when no StateDir was
+configured, which is the case in tests so they never touch the real home dir.
+*/
+func (s *Server) workspaceStatePath() string {
+	if s.stateDir == "" {
+		return ""
+	}
+	return filepath.Join(s.stateDir, "workspace")
+}
+
+/* persistWorkspace records (or clears) the active workspace on disk, best-effort. */
+func (s *Server) persistWorkspace(dir string) {
+	path := s.workspaceStatePath()
+	if path == "" {
+		return
+	}
+	if dir == "" {
+		_ = os.Remove(path)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		s.logger.Warn("workspace: cannot persist folder", "err", err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(dir), 0o600); err != nil {
+		s.logger.Warn("workspace: cannot persist folder", "err", err)
+	}
+}
+
+/*
+restoreWorkspace reopens a previously-persisted workspace on startup so a reload
+or restart keeps the folder. An explicit --workspace flag wins. A stale path
+(deleted, not a directory, or outside the research roots) is ignored and cleared.
+*/
+func (s *Server) restoreWorkspace() {
+	if s.getWorkspace() != "" {
+		return
+	}
+	path := s.workspaceStatePath()
+	if path == "" {
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	dir := strings.TrimSpace(string(raw))
+	if dir == "" {
+		return
+	}
+	info, statErr := os.Stat(dir)
+	if statErr != nil || !info.IsDir() || !s.workspaceAllowed(dir) {
+		_ = os.Remove(path)
+		return
+	}
+	s.workspaceMu.Lock()
+	s.workspace = dir
+	s.workspaceMu.Unlock()
+	s.logger.Info("workspace: restored from previous session", "root", dir)
 }
 
 /*

@@ -20,7 +20,7 @@
 - Augments answers with **hybrid RAG** over eleven built-in markdown corpora, **live Context7 library docs**, **long-term per-profile memory**, and **fresh web grounding** — all rendered as clearly-labelled, untrusted-by-default context sections. Built-in lexical retrieval works on first launch; optional vector ingestion improves ranking.
 - Ships an **always-on persona and engineering policy**: a blunt, informal cybersecurity-software-architect voice, an OOP/Clean-Architecture coding standard, mandatory Context7 for third-party APIs, and a hard factual-grounding rule (never fabricate a CVE, version range, or payload). These reach **every model in every language**, regardless of the configured system prompt.
 
-It runs without an internet connection (apart from web grounding and Context7, which both fail closed) and without a database — everything is files and process memory.
+Normal chat mode runs without an internet connection (apart from web grounding and Context7, which both fail closed) and without a database. Opt-in research mode adds a private embedded SQLite metadata store and content-addressed artifact directory.
 
 ## Quick start
 
@@ -42,6 +42,21 @@ make serve CONFIG=configs/josie.yaml    # web UI at http://127.0.0.1:9090
 ```
 
 No code changes are needed to add a local model — see [`docs/josie.md`](docs/josie.md) for the Ollama and vLLM paths and caveats.
+
+### Authorized cybersecurity research mode
+
+Research mode is a separate authenticated control plane for code you own or are explicitly authorized to test. It persists scopes, campaigns, approvals, typed runs, evidence, artifacts, and a hash-chained audit log. It does not add a host shell, arbitrary model-controlled HTTP, weaponized exploit generation, or automatic disclosure.
+
+```sh
+export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"
+./bin/agent --serve --research-mode \
+  --workspace /absolute/path/to/authorized/project \
+  --research-workspace-roots /absolute/path/to/authorized/project
+```
+
+The browser asks for the token and keeps it in tab-scoped `sessionStorage`. Add `--allow-exec` to enable runner v2 only when the local Docker daemon reports rootless mode; add `--research-container-runtime runsc` to require gVisor. Apparatus images and base images must be exact SHA-256 identities. Build the first libFuzzer apparatus with `apparatus/native-clang/build-image.sh`, register the generated manifest through `POST /v1/research/apparatuses`, then include its ID in an `AuthorizationScope`.
+
+See the [research architecture plan](docs/plans/cybersecurity-research-platform.md) and [threat model](docs/security/research-threat-model.md). The deliberately vulnerable micro-fixture is evaluation-only and must never be reported as novel.
 
 ## Clustered inference (70B-class on two Macs)
 
@@ -104,6 +119,7 @@ These live in `pkg/prompt` and are covered by tests that fail if any directive i
 | Agentic tools | `file_read` and `read_dir` always on; `file_write` / `file_edit` sandboxed behind `--workspace`; structured contained `run` behind `--workspace --allow-exec`. No host shell or arbitrary model-controlled HTTP tool. |
 | Embeddings | OpenAI `text-embedding-3-small`, Ollama `nomic-embed-text`. |
 | Web UI | React + Vite + react-bootstrap SPA embedded via `go:embed`. Per-conversation provider/model picker, cluster-mode indicator, markdown + code highlighting, scroll-contained long messages and wide tables. |
+| Research control plane | Authenticated scopes/campaigns/approvals, SQLite metadata, SHA-256 artifacts, hash-chained audit events, typed runner v2, conservative triage/novelty/fix/report gates, and campaign UI. |
 | RAG | Built-in lexical retrieval plus optional dense cosine retrieval, per-collection JSON persistence, eleven curated corpora. `--rag-max-chunks` explicitly tunes injection depth for larger contexts. |
 | Context7 | Live, authoritative library documentation fetched per request for tech/library questions; bounded timeout, silent failure, rendered as a clearly-labelled section. On when `CONTEXT7_API_KEY` is set; `--no-context7` kills it. |
 | Long-term memory | Per-profile namespace; kinds `project_fact`, `preference`, `correction`. Instruction-injection filter on writes; `/remember` + per-message corrections. |
@@ -156,6 +172,11 @@ export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmen
 | `--pull`             | Preflight, download, verify, and commit an exact GGUF model/projector set.          |
 | `--install-runtime`  | Detect this host's OS/GPU and install the matching prebuilt `llama-server` (Vulkan by default), then link it onto `PATH`. |
 | `--workspace`        | Directory the agent may modify via `file_write`/`file_edit` (sandboxed). Unset = read-only. |
+| `--research-mode`    | Enable authenticated durable campaign APIs and the research UI. |
+| `--research-dir`     | Private SQLite/artifact root (default `.agent-smith/research`). |
+| `--research-workspace-roots` | Comma-separated fixed roots; runtime workspace choices cannot escape them. |
+| `--research-token`   | Bootstrap bearer token (prefer `AGENT_SMITH_RESEARCH_TOKEN`; minimum 32 characters). |
+| `--research-container-runtime` | Optional required Docker runtime such as `runsc`; rootless Docker is mandatory for runner v2. |
 | `--ingest`           | Ingest markdown into a RAG collection and exit (with `--collection` + `--source`). |
 | `--collection`       | Collection name when `--ingest` is set.                                            |
 | `--source`           | Directory of `.md` files to ingest.                                               |
@@ -178,6 +199,7 @@ When `--serve` is on, the binary exposes:
 - `POST /v1/title` — generate a short conversation title.
 - `GET/POST /v1/rag/...` — `collections`, `search`, `remember`, `forget`, `memory`, `correction` for inspecting RAG and editing per-profile memory.
 - `GET  /healthz` — `{"status":"ok"}`.
+- `GET/POST /v1/research/...` — authenticated apparatus, scope, campaign, approval, run, artifact, event, and audit APIs when research mode is enabled.
 - `GET  /` — the embedded SPA.
 
 ## RAG corpora
@@ -219,6 +241,7 @@ internal/rag           Embedded lexical + optional dense RAG, scoped memory, Con
 internal/web           DuckDuckGo searcher, TTL cache, sanitiser
 internal/server        HTTP + SSE + go:embed of the SPA + /v1/cluster + /v1/rag/*
 internal/tools         Tool registry + builtins (file_read, read_dir, file_write, file_edit, opt-in contained run)
+internal/research      Domain/state/policy, SQLite/CAS, apparatus, runner, triage, novelty, remediation, reports, remote-worker trust primitives
 internal/config        YAML loader + env expansion
 pkg/prompt             Exported prompt-assembly helpers + always-on persona/engineering directives
 web/                   Vite + React + TS SPA, built into web/dist (embedded)

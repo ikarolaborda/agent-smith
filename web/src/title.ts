@@ -1,3 +1,5 @@
+import { authenticatedFetch } from './auth';
+
 /*
  * generateTitle asks the backend to distill a conversation's first user message
  * into a short title using the conversation's own model. It is best-effort: any
@@ -11,7 +13,7 @@ export async function generateTitle(
   signal?: AbortSignal,
 ): Promise<string | null> {
   try {
-    const resp = await fetch('/v1/title', {
+    const resp = await authenticatedFetch('/v1/title', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt }),

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Modal, Button, Form, Spinner } from 'react-bootstrap';
+import { authenticatedFetch } from '../auth';
 
 type GPU = {
   vendor?: string;
@@ -52,7 +53,7 @@ export function ModelExplorer({ show, onClose }: { show: boolean; onClose: () =>
   useEffect(() => {
     if (!show) return;
     setHost(null);
-    fetch('/v1/system')
+    authenticatedFetch('/v1/system')
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('system probe failed'))))
       .then((d) => setHost(d.host as Host))
       .catch(() => setHost(null));
@@ -64,7 +65,7 @@ export function ModelExplorer({ show, onClose }: { show: boolean; onClose: () =>
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch('/v1/models/search?q=' + encodeURIComponent(query.trim()));
+      const r = await authenticatedFetch('/v1/models/search?q=' + encodeURIComponent(query.trim()));
       if (!r.ok) throw new Error('search unavailable (is the machine online?)');
       const d = await r.json();
       setResults((d.data as HFModel[]) || []);

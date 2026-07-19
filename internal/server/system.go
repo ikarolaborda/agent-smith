@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -57,21 +58,44 @@ func (s *Server) capabilityStatus() map[string]any {
 		execBackend = "docker"
 		apparatus = "external_php_driver"
 	}
+	researchEnabled := s.research != nil
+	researchRunner := researchEnabled && s.research.broker != nil
+	coverageGuided := false
+	researchApparatus := "none"
+	isolationAssurance := "none"
+	if researchRunner {
+		assurance := s.research.broker.Assurance()
+		isolationAssurance = assurance.Isolation
+		if manifests, err := s.research.store.ListApparatus(context.Background(), 1000); err == nil {
+			for _, manifest := range manifests {
+				if manifest.Engine == "libfuzzer" {
+					coverageGuided = true
+					researchApparatus = manifest.ID
+					break
+				}
+			}
+		}
+	}
 	return map[string]any{
-		"file_read":              true,
-		"file_mutation":          workspace != "",
-		"host_shell":             false,
-		"arbitrary_http":         false,
-		"contained_execution":    execEnabled,
-		"execution_backend":      execBackend,
-		"execution_image_pinned": execEnabled && s.execImageDigest != "",
-		"apparatus":              apparatus,
-		"coverage_guided_fuzzing": false,
-		"artifact_persistence":   false,
-		"research_persistence":   false,
-		"authentication":         false,
-		"rag":                    s.rag != nil && !s.disableRAG,
-		"cve_verifier":           s.answerVerifier != nil,
+		"file_read":                    true,
+		"file_mutation":                workspace != "",
+		"host_shell":                   false,
+		"arbitrary_http":               false,
+		"contained_execution":          execEnabled,
+		"execution_backend":            execBackend,
+		"execution_image_pinned":       execEnabled && s.execImageDigest != "",
+		"apparatus":                    apparatus,
+		"coverage_guided_fuzzing":      coverageGuided,
+		"artifact_persistence":         researchEnabled,
+		"research_persistence":         researchEnabled,
+		"authentication":               researchEnabled,
+		"research_mode":                researchEnabled,
+		"research_runner":              researchRunner,
+		"research_apparatus":           researchApparatus,
+		"research_isolation_assurance": isolationAssurance,
+		"research_images_pinned":       researchRunner,
+		"rag":                          s.rag != nil && !s.disableRAG,
+		"cve_verifier":                 s.answerVerifier != nil,
 	}
 }
 

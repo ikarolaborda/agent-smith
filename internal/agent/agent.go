@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/ikarolaborda/agent-smith/internal/compact"
+	"github.com/ikarolaborda/agent-smith/internal/convomem"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/tools"
@@ -88,6 +89,15 @@ type Agent struct {
 		callers that never send oversized input are unaffected.
 	*/
 	Compactor *compact.Compactor
+	/*
+		ConvoMemory, when non-nil and ProfileID is set, persists each substantive
+		turn and recalls the most relevant past turns (across sessions) into the
+		prompt, so a conversation's history survives beyond the context window.
+		Recall is computed once per turn into convoBlock; nil disables it.
+	*/
+	ConvoMemory *convomem.Memory
+	/* convoBlock is the per-turn recalled-memory section, computed once in Run/RunStream. */
+	convoBlock string
 }
 
 /*
@@ -195,6 +205,7 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 	}
 
 	session.Append(llm.Message{Role: llm.RoleUser, Content: userInput})
+	a.recallConvo(ctx, userInput)
 
 	var idxs []*compact.Index
 	reg := a.Tools
@@ -229,9 +240,11 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 			*/
 			if a.Agentic && a.RAG != nil && !usedRetrieval {
 				if grounded, ok := a.classicFallback(ctx, session); ok {
+					a.rememberTurn(ctx, userInput, grounded)
 					return grounded + a.verifyNote(ctx, grounded), nil
 				}
 			}
+			a.rememberTurn(ctx, userInput, answer)
 			return answer + a.verifyNote(ctx, answer), nil
 		}
 
@@ -288,6 +301,45 @@ func (a *Agent) classicFallback(ctx context.Context, session *Session) (string, 
 		return "", false
 	}
 	return resp.Message.Content, true
+}
+
+const (
+	convoRecallK          = 3
+	convoRecallMinScore   = 0.35
+	convoMinRememberChars = 40
+)
+
+/*
+recallConvo computes this turn's recalled-memory section once; composeFrom injects
+it on every iteration without re-querying. Best-effort and profile-scoped: no
+ConvoMemory, no ProfileID, or an empty query yields no recall.
+*/
+func (a *Agent) recallConvo(ctx context.Context, query string) {
+	if a.ConvoMemory == nil || a.ProfileID == "" {
+		return
+	}
+	a.convoBlock = a.ConvoMemory.RecallBlock(ctx, a.ProfileID, query, convoRecallK, convoRecallMinScore)
+}
+
+/*
+rememberTurn persists the user message and the assistant answer for this profile
+so a later conversation can recall them. Trivial messages are skipped to keep the
+store signal-dense; errors are logged rather than failing the turn.
+*/
+func (a *Agent) rememberTurn(ctx context.Context, userMsg, answer string) {
+	if a.ConvoMemory == nil || a.ProfileID == "" {
+		return
+	}
+	if len(strings.TrimSpace(userMsg)) >= convoMinRememberChars {
+		if err := a.ConvoMemory.Remember(ctx, a.ProfileID, "user", userMsg); err != nil {
+			a.Logger.Warn("agent: convo memory remember (user) failed", "err", err)
+		}
+	}
+	if len(strings.TrimSpace(answer)) >= convoMinRememberChars {
+		if err := a.ConvoMemory.Remember(ctx, a.ProfileID, "assistant", answer); err != nil {
+			a.Logger.Warn("agent: convo memory remember (assistant) failed", "err", err)
+		}
+	}
 }
 
 /*
@@ -390,7 +442,7 @@ func (a *Agent) composeFrom(ctx context.Context, msgs []llm.Message) []llm.Messa
 		and the remote abliteration model — regardless of the configured system
 		prompt.
 	*/
-	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, agenticSection, aug)
+	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, agenticSection, aug, a.convoBlock)
 	if system == "" {
 		return msgs
 	}

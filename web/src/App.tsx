@@ -7,6 +7,8 @@ import { ClusterBadge } from './components/ClusterBadge';
 import { WorkspaceBar } from './components/WorkspaceBar';
 import { ModelExplorer } from './components/ModelExplorer';
 import { CorrectionDialog } from './components/CorrectionDialog';
+import { ResearchDashboard } from './components/ResearchDashboard';
+import { authenticatedFetch, getBearerToken, setBearerToken } from './auth';
 import {
   deriveTitle,
   loadConversations,
@@ -30,6 +32,10 @@ export function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [transientError, setTransientError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+	const [view, setView] = useState<'chat' | 'research'>('chat');
+	const [authRequired, setAuthRequired] = useState(false);
+	const [authDraft, setAuthDraft] = useState('');
+	const [authEpoch, setAuthEpoch] = useState(0);
   const [correctionTarget, setCorrectionTarget] = useState<{ question: string; wrong: string } | null>(null);
   const profileId = useMemo(() => getOrCreateProfileId(), []);
   const abortRef = useRef<AbortController | null>(null);
@@ -89,13 +95,22 @@ export function App() {
     (async () => {
       try {
         const [mRes, pRes] = await Promise.all([
-          fetch('/v1/models').then((r) => r.json() as Promise<ModelsResponse>),
-          fetch('/v1/providers').then((r) => r.json() as Promise<ProvidersResponse>),
+          authenticatedFetch('/v1/models'),
+          authenticatedFetch('/v1/providers'),
         ]);
+		if (mRes.status === 401 || pRes.status === 401) {
+			setAuthRequired(true);
+			return;
+		}
+		if (!mRes.ok || !pRes.ok) throw new Error('model discovery failed');
+		const [mBody, pBody] = await Promise.all([
+			mRes.json() as Promise<ModelsResponse>, pRes.json() as Promise<ProvidersResponse>,
+		]);
         if (cancelled) return;
-        const chatOnly = (mRes.data ?? []).filter((m) => m.kind !== 'embedding');
+        const chatOnly = (mBody.data ?? []).filter((m) => m.kind !== 'embedding');
         setModels(chatOnly);
-        setDefaultProvider(pRes.default ?? '');
+		setDefaultProvider(pBody.default ?? '');
+		setAuthRequired(false);
       } catch {
         if (!cancelled) setTransientError('Failed to load models from /v1/models');
       }
@@ -103,7 +118,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authEpoch]);
 
   const active = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -350,6 +365,21 @@ export function App() {
   const selectedModelId = active?.model ?? (models[0]?.id ?? '');
   const supportsVision = !!models.find((m) => m.id === selectedModelId)?.supports_vision;
 
+	if (authRequired) {
+		return (
+			<div className="auth-gate">
+				<form className="auth-card" onSubmit={(event) => { event.preventDefault(); setBearerToken(authDraft); setAuthEpoch((value) => value + 1); }}>
+					<div className="auth-icon"><i className="bi bi-shield-lock" /></div>
+					<h1>Research mode is locked</h1>
+					<p>Enter the operator-issued bearer token. It is kept only in this tab's session storage.</p>
+					<label htmlFor="research-token">Bearer token</label>
+					<input id="research-token" className="form-control" type="password" value={authDraft} onChange={(event) => setAuthDraft(event.target.value)} minLength={32} autoComplete="off" required autoFocus />
+					<button type="submit" className="btn btn-primary w-100 mt-3">Unlock control plane</button>
+				</form>
+			</div>
+		);
+	}
+
   return (
     <div className="app-shell">
       <Sidebar
@@ -361,7 +391,12 @@ export function App() {
       />
       <main className="main-pane">
         <header className="top-bar">
-          <div className="title">{active?.title ?? 'agent-smith'}</div>
+		  <div className="title">{view === 'research' ? 'Research control plane' : (active?.title ?? 'agent-smith')}</div>
+		  <div className="view-switch" role="group" aria-label="Application view">
+			<button type="button" className={view === 'chat' ? 'active' : ''} onClick={() => setView('chat')}><i className="bi bi-chat-dots" /> Chat</button>
+			<button type="button" className={view === 'research' ? 'active' : ''} onClick={() => setView('research')}><i className="bi bi-shield-check" /> Research</button>
+		  </div>
+		  {view === 'chat' && <>
           <ProviderSelector
             models={models}
             value={active?.model ?? (models[0]?.id ?? '')}
@@ -400,13 +435,18 @@ export function App() {
           </button>
           <WorkspaceBar />
           <ClusterBadge />
+		  </>}
+		  {getBearerToken() && <button type="button" className="btn btn-sm btn-outline-secondary" title="Lock research APIs" onClick={() => { setBearerToken(''); setAuthRequired(true); }}><i className="bi bi-lock" /></button>}
         </header>
         {transientError && (
           <div className="alert alert-warning mb-0 rounded-0" role="alert">
             {transientError}
           </div>
         )}
-        <div
+		{view === 'research' ? (
+		  <ResearchDashboard onUnauthorized={() => setAuthRequired(true)} onError={setTransientError} />
+		) : <>
+		<div
           ref={messageListRef}
           className="message-list"
           role="log"
@@ -431,6 +471,7 @@ export function App() {
           ))}
         </div>
         <Composer onSend={handleSend} onStop={handleStop} isStreaming={isStreaming} disabled={noProviders} supportsVision={supportsVision} />
+		</>}
         {toast && (
           <div className="toast-message" role="status" aria-live="polite">
             {toast}

@@ -1,0 +1,169 @@
+#!/bin/sh
+set -eu
+
+operation="${1:-}"
+if [ -z "$operation" ]; then
+    echo "operation required" >&2
+    exit 64
+fi
+shift
+
+harness=""
+max_total_time="30"
+revision=""
+sanitizer="address,undefined"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --harness) harness="${2:-}"; shift 2 ;;
+        --max-total-time) max_total_time="${2:-}"; shift 2 ;;
+        --revision) revision="${2:-}"; shift 2 ;;
+        --sanitizer) sanitizer="${2:-}"; shift 2 ;;
+        --manifest) shift 2 ;;
+        *) echo "unsupported apparatus argument: $1" >&2; exit 64 ;;
+    esac
+done
+
+case "$harness" in
+    micro_oob|micro_oob_clean) ;;
+    "") if [ "$operation" != "list_harnesses" ]; then echo "harness required" >&2; exit 64; fi ;;
+    *) echo "unknown harness" >&2; exit 64 ;;
+esac
+
+case "$max_total_time" in
+    ''|*[!0-9]*) echo "invalid max-total-time" >&2; exit 64 ;;
+esac
+if [ "$max_total_time" -gt 3600 ]; then
+    echo "max-total-time exceeds apparatus ceiling" >&2
+    exit 64
+fi
+
+binary="/build/fuzz_target"
+source_file="/source/apparatus/native-clang/fixtures/$harness/fuzz_target.cc"
+dictionary="/source/apparatus/native-clang/dictionaries/$harness.dict"
+
+case "$sanitizer" in
+    address) sanitizer_flags="fuzzer,address" ;;
+    undefined) sanitizer_flags="fuzzer,undefined" ;;
+    address,undefined|undefined,address) sanitizer_flags="fuzzer,address,undefined" ;;
+    *) echo "unsupported sanitizer variant" >&2; exit 64 ;;
+esac
+
+case "$operation" in
+    inspect)
+        test -r "$source_file"
+        source_sha256="$(sha256sum "$source_file" | awk '{print $1}')"
+        clang_version="$(clang++ --version | sed -n '1p')"
+        jq -n \
+            --arg harness "$harness" \
+            --arg source_sha256 "sha256:$source_sha256" \
+            --arg sanitizer "$sanitizer" \
+            --arg compiler "$clang_version" \
+            '{schema_version:1,harness:$harness,source_sha256:$source_sha256,sanitizers:$sanitizer,compiler:$compiler}' \
+            > /out/apparatus-inspection.json
+        chmod 0444 /out/apparatus-inspection.json
+        ;;
+    list_harnesses)
+        printf '%s\n' '{"harnesses":["micro_oob","micro_oob_clean"]}'
+        ;;
+    build)
+        test -r "$source_file"
+        # Debian's Clang 14 ASan runtime can collide with high-entropy PIE
+        # layouts before main on newer kernels. Fuzz targets are disposable,
+        # contained workers, so use a fixed non-PIE layout for deterministic
+        # sanitizer startup and record the compiler in build provenance.
+        clang++ -std=c++17 -O1 -g -fno-omit-frame-pointer -fno-pie -no-pie \
+            -fsanitize="$sanitizer_flags" \
+            -fprofile-instr-generate -fcoverage-mapping \
+            "$source_file" -o /out/fuzz_target
+        chmod 0555 /out/fuzz_target
+        clang_version="$(clang++ --version | sed -n '1p')"
+        jq -n \
+            --arg harness "$harness" \
+            --arg revision "$revision" \
+            --arg sanitizer "$sanitizer" \
+            --arg clang "$clang_version" \
+            --arg flags "-O1 -g -fno-omit-frame-pointer -fno-pie -no-pie -fsanitize=$sanitizer_flags -fprofile-instr-generate -fcoverage-mapping" \
+            '{schema_version:1,harness:$harness,target_revision:$revision,sanitizers:$sanitizer,compiler:$clang,compiler_flags:$flags}' \
+            > /out/build-provenance.json
+        chmod 0444 /out/build-provenance.json
+        ;;
+    smoke_test)
+        test -x "$binary"
+        LLVM_PROFILE_FILE=/tmp/smoke.profraw "$binary" -runs=1 </dev/null
+        ;;
+    seed)
+        mkdir -p /corpus
+        printf 'SMIT' > /corpus/seed-smit
+        cp /corpus/seed-smit /out/seed-smit
+        chmod 0644 /out/seed-smit
+        ;;
+    fuzz)
+        test -x "$binary"
+        mkdir -p /corpus
+        if [ -r "$dictionary" ]; then
+            LLVM_PROFILE_FILE=/tmp/fuzz.profraw "$binary" \
+                -artifact_prefix=/out/ -max_total_time="$max_total_time" \
+                -timeout=5 -rss_limit_mb=1024 -max_len=4096 -dict="$dictionary" /corpus
+        else
+            LLVM_PROFILE_FILE=/tmp/fuzz.profraw "$binary" \
+                -artifact_prefix=/out/ -max_total_time="$max_total_time" \
+                -timeout=5 -rss_limit_mb=1024 -max_len=4096 /corpus
+        fi
+        ;;
+    reproduce)
+        test -x "$binary"
+        test -f /source/reproducer
+        LLVM_PROFILE_FILE=/tmp/reproduce.profraw "$binary" -runs=3 /source/reproducer
+        ;;
+    minimize)
+        test -x "$binary"
+        test -f /source/reproducer
+        LLVM_PROFILE_FILE=/tmp/minimize.profraw "$binary" \
+            -minimize_crash=1 -exact_artifact_path=/out/minimized /source/reproducer
+        chmod 0644 /out/minimized
+        ;;
+    merge_corpus)
+        test -x "$binary"
+        mkdir -p /out/merged
+        LLVM_PROFILE_FILE=/tmp/merge.profraw "$binary" -merge=1 /out/merged /corpus
+        find /out/merged -type f -exec chmod 0644 {} \;
+        ;;
+    coverage)
+        test -x "$binary"
+        LLVM_PROFILE_FILE=/tmp/coverage.profraw "$binary" -runs=0 /corpus
+        llvm-profdata merge -sparse /tmp/coverage.profraw -o /tmp/coverage.profdata
+        llvm-cov export "$binary" -instr-profile=/tmp/coverage.profdata > /out/coverage.json
+        chmod 0444 /out/coverage.json
+        ;;
+    symbolize)
+        test -x "$binary"
+        test -f /source/addresses.txt
+        llvm-symbolizer --obj="$binary" < /source/addresses.txt > /out/symbolized.txt
+        chmod 0444 /out/symbolized.txt
+        ;;
+    compare_revision)
+        test -x "$binary"
+        test -f /source/reproducer
+        set +e
+        LLVM_PROFILE_FILE=/tmp/compare.profraw "$binary" -runs=3 /source/reproducer > /out/comparison.log 2>&1
+        comparison_exit="$?"
+        set -e
+        jq -n --arg revision "$revision" --argjson exit_code "$comparison_exit" \
+            '{schema_version:1,target_revision:$revision,reproducer_exit_code:$exit_code,signal_absent:($exit_code == 0)}' \
+            > /out/comparison.json
+        chmod 0444 /out/comparison.log /out/comparison.json
+        ;;
+    regression_test)
+        test -x "$binary"
+        test -d /corpus
+        LLVM_PROFILE_FILE=/tmp/regression.profraw "$binary" -runs=0 /corpus > /out/regression.log 2>&1
+        jq -n --arg revision "$revision" \
+            '{schema_version:1,target_revision:$revision,regression_passed:true}' \
+            > /out/regression.json
+        chmod 0444 /out/regression.log /out/regression.json
+        ;;
+    *)
+        echo "unsupported operation: $operation" >&2
+        exit 64
+        ;;
+esac

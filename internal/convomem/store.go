@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -42,7 +43,8 @@ fails safe rather than returning garbage neighbors.
 */
 type Store struct {
 	db  *sql.DB
-	dim int
+	mu  sync.Mutex
+	dim int // learned from the first stored vector (or existing rows on open); 0 = empty
 }
 
 const schema = `
@@ -60,13 +62,12 @@ CREATE INDEX IF NOT EXISTS idx_turns_profile ON turns(profile);
 
 /*
 Open opens (creating if needed) the SQLite database at path and ensures the
-schema. path may be a file or ":memory:". dim must match the embedder that will
-supply vectors.
+schema. path may be a file or ":memory:". The embedding dimension is learned
+lazily from the first stored vector (or from existing rows on reopen), so a caller
+need not know it up front — which matters for embedders that report their
+dimension only after the first call.
 */
-func Open(path string, dim int) (*Store, error) {
-	if dim <= 0 {
-		return nil, fmt.Errorf("convomem: dim must be positive, got %d", dim)
-	}
+func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("convomem: open %q: %w", path, err)
@@ -80,7 +81,13 @@ func Open(path string, dim int) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("convomem: schema: %w", err)
 	}
-	return &Store{db: db, dim: dim}, nil
+	s := &Store{db: db}
+	/* Learn the dimension from an existing row so a reopened store validates queries. */
+	var dim int
+	if err := db.QueryRow("SELECT dim FROM turns LIMIT 1").Scan(&dim); err == nil {
+		s.dim = dim
+	}
+	return s, nil
 }
 
 /* Close releases the database handle. */
@@ -92,12 +99,21 @@ is rejected so a bad vector never poisons recall. profile scopes the memory to o
 user; empty profile is a valid shared bucket.
 */
 func (s *Store) Add(ctx context.Context, profile, role, content string, embedding []float32) (int64, error) {
-	if len(embedding) != s.dim {
-		return 0, fmt.Errorf("convomem: embedding dim %d != store dim %d", len(embedding), s.dim)
+	if len(embedding) == 0 {
+		return 0, fmt.Errorf("convomem: empty embedding")
+	}
+	s.mu.Lock()
+	if s.dim == 0 {
+		s.dim = len(embedding)
+	}
+	dim := s.dim
+	s.mu.Unlock()
+	if len(embedding) != dim {
+		return 0, fmt.Errorf("convomem: embedding dim %d != store dim %d", len(embedding), dim)
 	}
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO turns(profile, role, content, created_at, dim, embedding) VALUES(?,?,?,?,?,?)",
-		profile, role, content, time.Now().Unix(), s.dim, encodeVec(embedding),
+		profile, role, content, time.Now().Unix(), dim, encodeVec(embedding),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("convomem: insert: %w", err)
@@ -111,15 +127,21 @@ first. It loads the profile's candidate rows and ranks them in Go. k<=0 defaults
 to 5. Only rows matching the store's dimension are considered.
 */
 func (s *Store) Recall(ctx context.Context, profile string, query []float32, k int) ([]Turn, error) {
-	if len(query) != s.dim {
-		return nil, fmt.Errorf("convomem: query dim %d != store dim %d", len(query), s.dim)
+	s.mu.Lock()
+	dim := s.dim
+	s.mu.Unlock()
+	if dim == 0 {
+		return nil, nil // nothing stored yet
+	}
+	if len(query) != dim {
+		return nil, fmt.Errorf("convomem: query dim %d != store dim %d", len(query), dim)
 	}
 	if k <= 0 {
 		k = 5
 	}
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, role, content, created_at, embedding FROM turns WHERE profile = ? AND dim = ?",
-		profile, s.dim,
+		profile, dim,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("convomem: query: %w", err)
@@ -135,7 +157,7 @@ func (s *Store) Recall(ctx context.Context, profile string, query []float32, k i
 			return nil, fmt.Errorf("convomem: scan: %w", err)
 		}
 		vec := decodeVec(blob)
-		if len(vec) != s.dim {
+		if len(vec) != dim {
 			continue
 		}
 		t.Profile = profile

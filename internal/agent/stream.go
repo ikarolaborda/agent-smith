@@ -98,6 +98,7 @@ func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm
 	}
 
 	session.Append(user)
+	a.recallConvo(ctx, user.Content)
 
 	/*
 		Compact oversized content at the top of every iteration: the incoming
@@ -158,6 +159,7 @@ func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm
 			if err := sink.Emit(StreamEvent{Kind: StreamEventDone, Iteration: i, FinalContent: final}); err != nil {
 				return "", err
 			}
+			a.rememberTurn(ctx, user.Content, assistant.Content)
 			return final, nil
 		}
 

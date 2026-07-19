@@ -8,6 +8,7 @@
  */
 
 import type { Role, RefineRound, RefineSummary } from './types';
+import { authenticatedFetch } from './auth';
 
 /*
  * A wire message sent to /v1/chat/completions. content is either a plain
@@ -71,7 +72,7 @@ export async function streamChatCompletion(
   cbs: StreamCallbacks,
   signal: AbortSignal,
 ): Promise<void> {
-  const resp = await fetch('/v1/chat/completions', {
+  const resp = await authenticatedFetch('/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify(body),

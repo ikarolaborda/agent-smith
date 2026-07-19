@@ -1,0 +1,620 @@
+// Package service is the deterministic research control plane. Models may
+// propose calls into this package, but policy and evidence gates decide them.
+package service
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"time"
+
+	"github.com/ikarolaborda/agent-smith/internal/research/apparatus"
+	"github.com/ikarolaborda/agent-smith/internal/research/domain"
+	"github.com/ikarolaborda/agent-smith/internal/research/repository"
+	"github.com/ikarolaborda/agent-smith/internal/research/store"
+)
+
+var (
+	ErrForbidden       = errors.New("research service: forbidden")
+	ErrApprovalMissing = errors.New("research service: approved decision not found")
+)
+
+// Service coordinates policy, evidence transitions, durable objects, and audit.
+type Service struct {
+	store          repository.ControlPlane
+	machine        domain.StateMachine
+	now            func() time.Time
+	broker         JobBroker
+	workspaceRoots []string
+}
+
+// ConfigureWorkspaceRoots installs the immutable host-root ceiling supplied by
+// the server operator. Authorization scopes may narrow these roots but cannot
+// expand them through the API.
+func (s *Service) ConfigureWorkspaceRoots(roots []string) error {
+	if len(roots) == 0 {
+		return errors.New("research service: at least one fixed workspace root required")
+	}
+	canonical := make([]string, 0, len(roots))
+	for _, root := range roots {
+		resolved, err := canonicalDirectory(root)
+		if err != nil {
+			return fmt.Errorf("research service: invalid fixed workspace root: %w", err)
+		}
+		canonical = append(canonical, resolved)
+	}
+	s.workspaceRoots = canonical
+	return nil
+}
+
+// JobBroker is the typed runner queue boundary used after policy authorization.
+type JobBroker interface {
+	Submit(context.Context, domain.WorkerJob) (domain.ExperimentRun, error)
+}
+
+// New constructs a deterministic control-plane service.
+func New(storage repository.ControlPlane, minimumReproductions int) (*Service, error) {
+	if storage == nil {
+		return nil, errors.New("research service: store required")
+	}
+	return &Service{
+		store: storage, machine: domain.StateMachine{MinimumReproductions: minimumReproductions},
+		now: func() time.Time { return time.Now().UTC() },
+	}, nil
+}
+
+// Store exposes read-only/query-oriented persistence operations to API adapters.
+func (s *Service) Store() repository.ControlPlane { return s.store }
+
+// AttachBroker installs the verified runner after its isolation preflight.
+func (s *Service) AttachBroker(broker JobBroker) error {
+	if broker == nil {
+		return errors.New("research service: job broker required")
+	}
+	s.broker = broker
+	return nil
+}
+
+// CreateScope validates and persists a scope owned by the authenticated actor.
+func (s *Service) CreateScope(ctx context.Context, actor domain.Principal, scope domain.AuthorizationScope) (domain.AuthorizationScope, error) {
+	if !hasRole(actor, domain.RoleAdmin) && !hasRole(actor, domain.RoleOperator) {
+		return scope, s.denied(ctx, actor, "scope.create", "authorization_scope", scope.ID, "operator or admin role required")
+	}
+	if scope.OperatorID == "" {
+		scope.OperatorID = actor.ID
+	}
+	if scope.OperatorID != actor.ID && !hasRole(actor, domain.RoleAdmin) {
+		return scope, s.denied(ctx, actor, "scope.create", "authorization_scope", scope.ID, "only an admin may create another operator's scope")
+	}
+	if scope.ID == "" {
+		scope.ID = newID("scope")
+	}
+	if scope.SchemaVersion == 0 {
+		scope.SchemaVersion = 1
+	}
+	if scope.CreatedAt.IsZero() {
+		scope.CreatedAt = s.now()
+	}
+	for index, root := range scope.WorkspaceRoots {
+		canonical, err := canonicalDirectory(root)
+		if err != nil {
+			return scope, s.denied(ctx, actor, "scope.create", "authorization_scope", scope.ID, "workspace root must be an existing directory")
+		}
+		if len(s.workspaceRoots) > 0 && !insideAnyRoot(canonical, s.workspaceRoots) {
+			return scope, s.denied(ctx, actor, "scope.create", "authorization_scope", scope.ID, "workspace root exceeds the server operator allowlist")
+		}
+		scope.WorkspaceRoots[index] = canonical
+	}
+	if err := scope.Validate(s.now()); err != nil {
+		return scope, s.denied(ctx, actor, "scope.create", "authorization_scope", scope.ID, err.Error())
+	}
+	for _, manifestID := range scope.AllowedApparatusIDs {
+		if _, err := s.store.GetApparatus(ctx, manifestID); err != nil {
+			return scope, s.denied(ctx, actor, "scope.create", "authorization_scope", scope.ID, "allowed apparatus is not registered: "+manifestID)
+		}
+	}
+	if err := s.store.CreateScope(ctx, scope); err != nil {
+		return scope, err
+	}
+	return scope, s.allowed(ctx, actor, "scope.create", "authorization_scope", scope.ID, "")
+}
+
+// RegisterApparatus persists a validated immutable worker adapter for later scopes.
+func (s *Service) RegisterApparatus(ctx context.Context, actor domain.Principal, manifest domain.ApparatusManifest) (domain.ApparatusManifest, error) {
+	if !hasRole(actor, domain.RoleAdmin) {
+		return manifest, s.denied(ctx, actor, "apparatus.register", "apparatus_manifest", manifest.ID, "admin role required")
+	}
+	if err := apparatus.ValidateManifest(manifest); err != nil {
+		return manifest, s.denied(ctx, actor, "apparatus.register", "apparatus_manifest", manifest.ID, err.Error())
+	}
+	if err := s.store.SaveApparatus(ctx, manifest); err != nil {
+		return manifest, err
+	}
+	return manifest, s.allowed(ctx, actor, "apparatus.register", "apparatus_manifest", manifest.ID, "")
+}
+
+// RevokeScope permanently removes a scope from future authorization decisions.
+func (s *Service) RevokeScope(ctx context.Context, actor domain.Principal, scopeID, reason string) error {
+	scope, err := s.store.GetScope(ctx, scopeID)
+	if err != nil {
+		return err
+	}
+	if actor.ID != scope.OperatorID && !hasRole(actor, domain.RoleAdmin) {
+		return s.denied(ctx, actor, "scope.revoke", "authorization_scope", scopeID, "scope owner or admin required")
+	}
+	if err := s.store.RevokeScope(ctx, scopeID, s.now()); err != nil {
+		return err
+	}
+	return s.allowedWithDetails(ctx, actor, "scope.revoke", "authorization_scope", scopeID, "", map[string]string{"reason": reason})
+}
+
+// CreateCampaign persists a version-one draft under a currently valid scope.
+func (s *Service) CreateCampaign(ctx context.Context, actor domain.Principal, campaign domain.Campaign) (domain.Campaign, error) {
+	if !hasAnyRole(actor, domain.RoleOperator, domain.RoleAdmin) {
+		return campaign, s.denied(ctx, actor, "campaign.create", "campaign", campaign.ID, "operator or admin role required")
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return campaign, err
+	}
+	if err := scope.Validate(s.now()); err != nil {
+		return campaign, s.denied(ctx, actor, "campaign.create", "campaign", campaign.ID, err.Error())
+	}
+	if actor.ID != scope.OperatorID && !hasRole(actor, domain.RoleAdmin) {
+		return campaign, s.denied(ctx, actor, "campaign.create", "campaign", campaign.ID, "scope owner or admin required")
+	}
+	if budgetExceeds(campaign.Budget, scope.Budget) {
+		return campaign, s.denied(ctx, actor, "campaign.create", "campaign", campaign.ID, "campaign budget exceeds authorization scope")
+	}
+	if campaign.ID == "" {
+		campaign.ID = newID("campaign")
+	}
+	if campaign.SchemaVersion == 0 {
+		campaign.SchemaVersion = 1
+	}
+	if campaign.Budget == (domain.ResourceBudget{}) {
+		campaign.Budget = scope.Budget
+	}
+	campaign.State = domain.CampaignDraft
+	campaign.Version = 1
+	campaign.CreatedAt = s.now()
+	campaign.UpdatedAt = campaign.CreatedAt
+	campaign, err = s.store.CreateCampaign(ctx, campaign)
+	if err != nil {
+		return campaign, err
+	}
+	return campaign, s.allowed(ctx, actor, "campaign.create", "campaign", campaign.ID, "")
+}
+
+// Transition advances exactly one evidence-backed state and rejects stale writes.
+func (s *Service) Transition(ctx context.Context, actor domain.Principal, campaignID string, to domain.CampaignState, facts domain.EvidenceFacts) (domain.Campaign, error) {
+	if !hasAnyRole(actor, domain.RoleOperator, domain.RoleAdmin) {
+		return domain.Campaign{}, s.denied(ctx, actor, "campaign.transition", "campaign", campaignID, "operator or admin role required")
+	}
+	campaign, err := s.store.GetCampaign(ctx, campaignID)
+	if err != nil {
+		return campaign, err
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return campaign, err
+	}
+	if err := scope.Validate(s.now()); err != nil {
+		return campaign, s.denied(ctx, actor, "campaign.transition", "campaign", campaignID, err.Error())
+	}
+	if actor.ID != scope.OperatorID && !hasRole(actor, domain.RoleAdmin) {
+		return campaign, s.denied(ctx, actor, "campaign.transition", "campaign", campaignID, "scope owner or admin required")
+	}
+	updated, err := s.machine.Advance(campaign, to, facts, s.now())
+	if err != nil {
+		return campaign, s.denied(ctx, actor, "campaign.transition", "campaign", campaignID, err.Error())
+	}
+	if updated.Version == campaign.Version {
+		return campaign, nil
+	}
+	if err := s.store.UpdateCampaign(ctx, updated, campaign.Version); err != nil {
+		return campaign, err
+	}
+	return updated, s.allowedWithDetails(ctx, actor, "campaign.transition", "campaign", campaignID, "", map[string]string{"from": string(campaign.State), "to": string(to)})
+}
+
+// PromoteFinding applies the monotonic evidence gate and persists the result.
+func (s *Service) PromoteFinding(ctx context.Context, actor domain.Principal, findingID string, to domain.FindingLabel, facts domain.EvidenceFacts) (domain.Finding, error) {
+	if !hasAnyRole(actor, domain.RoleOperator, domain.RoleReviewer, domain.RoleAdmin) {
+		return domain.Finding{}, s.denied(ctx, actor, "finding.promote", "finding", findingID, "operator, reviewer, or admin role required")
+	}
+	finding, err := s.store.GetFinding(ctx, findingID)
+	if err != nil {
+		return finding, err
+	}
+	campaign, err := s.store.GetCampaign(ctx, finding.CampaignID)
+	if err != nil {
+		return finding, err
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return finding, err
+	}
+	if !scopeMember(scope, actor) {
+		return finding, s.denied(ctx, actor, "finding.promote", "finding", findingID, "principal is not a campaign member")
+	}
+	promoted, err := s.machine.PromoteFinding(finding, to, facts, s.now())
+	if err != nil {
+		return finding, s.denied(ctx, actor, "finding.promote", "finding", findingID, err.Error())
+	}
+	if err := s.store.SaveFinding(ctx, promoted); err != nil {
+		return finding, err
+	}
+	return promoted, s.allowedWithDetails(ctx, actor, "finding.promote", "finding", findingID, "", map[string]string{"from": string(finding.Label), "to": string(to)})
+}
+
+// RequestApproval creates a pending decision for a concrete operation.
+func (s *Service) RequestApproval(ctx context.Context, actor domain.Principal, approval domain.Approval) (domain.Approval, error) {
+	if !hasAnyRole(actor, domain.RoleOperator, domain.RoleAdmin) {
+		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "operator or admin role required")
+	}
+	campaign, err := s.store.GetCampaign(ctx, approval.CampaignID)
+	if err != nil {
+		return approval, err
+	}
+	if campaign.ScopeID != approval.ScopeID {
+		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "campaign does not belong to scope")
+	}
+	if approval.ID == "" {
+		approval.ID = newID("approval")
+	} else if _, err := s.store.GetApproval(ctx, approval.ID); !errors.Is(err, store.ErrNotFound) {
+		if err != nil {
+			return approval, err
+		}
+		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "approval id already exists")
+	}
+	if approval.CorrelationID == "" || approval.Operation == "" || approval.Reason == "" {
+		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "correlation, operation, and reason required")
+	}
+	approval.SchemaVersion = 1
+	approval.Status = "pending"
+	approval.RequestedBy = actor.ID
+	approval.CreatedAt = s.now()
+	approval.DecidedBy = ""
+	approval.DecidedAt = nil
+	if err := s.store.SaveApproval(ctx, approval); err != nil {
+		return approval, err
+	}
+	return approval, s.allowed(ctx, actor, "approval.request", "approval", approval.ID, approval.CorrelationID)
+}
+
+// DecideApproval records an independent human review decision.
+func (s *Service) DecideApproval(ctx context.Context, actor domain.Principal, approvalID string, approved bool, reason string) (domain.Approval, error) {
+	if !hasAnyRole(actor, domain.RoleReviewer, domain.RoleAdmin) {
+		return domain.Approval{}, s.denied(ctx, actor, "approval.decide", "approval", approvalID, "reviewer or admin role required")
+	}
+	approval, err := s.store.GetApproval(ctx, approvalID)
+	if err != nil {
+		return approval, err
+	}
+	scope, err := s.store.GetScope(ctx, approval.ScopeID)
+	if err != nil {
+		return approval, err
+	}
+	if !scopeMember(scope, actor) {
+		return approval, s.denied(ctx, actor, "approval.decide", "approval", approvalID, "reviewer is not a scope member")
+	}
+	if approval.Status != "pending" {
+		return approval, s.denied(ctx, actor, "approval.decide", "approval", approvalID, "approval is no longer pending")
+	}
+	if approval.RequestedBy == actor.ID && !hasRole(actor, domain.RoleAdmin) {
+		return approval, s.denied(ctx, actor, "approval.decide", "approval", approvalID, "requester cannot review their own approval")
+	}
+	if reason == "" {
+		return approval, s.denied(ctx, actor, "approval.decide", "approval", approvalID, "decision reason required")
+	}
+	if approved {
+		approval.Status = "approved"
+	} else {
+		approval.Status = "denied"
+	}
+	now := s.now()
+	approval.DecidedBy = actor.ID
+	approval.DecidedAt = &now
+	approval.Reason = reason
+	if err := s.store.SaveApproval(ctx, approval); err != nil {
+		return approval, err
+	}
+	return approval, s.allowedWithDetails(ctx, actor, "approval.decide", "approval", approvalID, approval.CorrelationID, map[string]string{"status": approval.Status, "reason": reason})
+}
+
+// AuthorizeAction verifies policy and, when needed, the exact durable approval.
+func (s *Service) AuthorizeAction(ctx context.Context, campaignID string, action domain.Action, correlationID string) (domain.PolicyDecision, error) {
+	campaign, err := s.store.GetCampaign(ctx, campaignID)
+	if err != nil {
+		return domain.PolicyDecision{}, err
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return domain.PolicyDecision{}, err
+	}
+	if !scopeMember(scope, action.Principal) {
+		decision := domain.PolicyDecision{Reason: "research: principal is not a scope member"}
+		_ = s.denied(ctx, action.Principal, "action.authorize", "campaign", campaignID, decision.Reason)
+		return decision, nil
+	}
+	decision := scope.Authorize(action, s.now())
+	if decision.ApprovalRequired {
+		return decision, nil
+	}
+	if !decision.Allowed {
+		_ = s.denied(ctx, action.Principal, "action.authorize", "campaign", campaignID, decision.Reason)
+		return decision, nil
+	}
+	if action.ApprovalID != "" {
+		approval, err := s.store.GetApproval(ctx, action.ApprovalID)
+		if err != nil {
+			return domain.PolicyDecision{Reason: ErrApprovalMissing.Error()}, nil
+		}
+		if approval.Status != "approved" || approval.ScopeID != scope.ID || approval.CampaignID != campaignID || approval.Operation != action.Operation || approval.CorrelationID != correlationID {
+			return domain.PolicyDecision{Reason: ErrApprovalMissing.Error()}, nil
+		}
+	}
+	_ = s.allowed(ctx, action.Principal, "action.authorize", "campaign", campaignID, correlationID)
+	return decision, nil
+}
+
+// CanReadCampaign applies campaign membership to query/API adapters.
+func (s *Service) CanReadCampaign(ctx context.Context, actor domain.Principal, campaignID string) (bool, error) {
+	campaign, err := s.store.GetCampaign(ctx, campaignID)
+	if err != nil {
+		return false, err
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return false, err
+	}
+	return scopeMember(scope, actor), nil
+}
+
+// Enqueue authorizes every mount and exact approval before touching the queue.
+func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignID string, job domain.WorkerJob, approvalID string) (domain.ExperimentRun, error) {
+	if s.broker == nil {
+		return domain.ExperimentRun{}, errors.New("research service: verified runner unavailable")
+	}
+	campaign, err := s.store.GetCampaign(ctx, campaignID)
+	if err != nil {
+		return domain.ExperimentRun{}, err
+	}
+	if job.CampaignID != campaign.ID || job.ScopeID != campaign.ScopeID || job.AuditCorrelationID == "" {
+		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job identity does not match campaign")
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return domain.ExperimentRun{}, err
+	}
+	manifestID := job.Arguments["manifest"]
+	if manifestID == "" || !containsString(scope.AllowedApparatusIDs, manifestID) {
+		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "apparatus is outside authorization scope")
+	}
+	manifest, err := s.store.GetApparatus(ctx, manifestID)
+	if err != nil {
+		return domain.ExperimentRun{}, err
+	}
+	if manifest.ImageDigest != job.ImageDigest || !containsOperation(manifest.Operations, job.Operation) || !manifestHasHarness(manifest, job.Arguments["harness"]) {
+		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job does not match registered apparatus manifest")
+	}
+	if !containsString(manifest.Sanitizers, job.Arguments["sanitizer"]) || !reflect.DeepEqual(job.Environment, manifest.Environment) ||
+		!reflect.DeepEqual(job.ArtifactRules, apparatus.ArtifactRules(job.Operation)) || budgetExceeds(job.Budget, manifest.Limits) ||
+		!validApparatusArguments(job.Arguments) || !validApparatusMounts(job.Mounts) {
+		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job envelope differs from the registered apparatus schema")
+	}
+	repository, revision := scope.TargetRepository, ""
+	if campaign.TargetID != "" {
+		target, targetErr := s.store.GetTarget(ctx, campaign.TargetID)
+		if targetErr != nil {
+			return domain.ExperimentRun{}, targetErr
+		}
+		repository, revision = target.Repository, target.Commit
+	}
+	if revision == "" && len(scope.AllowedRevisions) == 1 {
+		revision = scope.AllowedRevisions[0]
+	}
+	if job.Arguments["revision"] != revision {
+		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job revision does not match the immutable campaign target")
+	}
+	paths := []string{""}
+	if len(job.Mounts) > 0 {
+		paths = paths[:0]
+		for _, mount := range job.Mounts {
+			paths = append(paths, mount.HostPath)
+		}
+	}
+	for _, path := range paths {
+		if path != "" && len(s.workspaceRoots) > 0 && !insideAnyRoot(path, s.workspaceRoots) {
+			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "mount exceeds the server operator workspace allowlist")
+		}
+		action := domain.Action{
+			Principal: actor, Operation: job.Operation, Repository: repository, Revision: revision, WorkspacePath: path,
+			WallSeconds: job.Budget.MaxWallSeconds, MemoryBytes: job.Budget.MaxMemoryBytes, DiskBytes: job.Budget.MaxDiskBytes,
+			PIDs: job.Budget.MaxPIDs, ApprovalID: approvalID,
+		}
+		decision, authErr := s.AuthorizeAction(ctx, campaignID, action, job.AuditCorrelationID)
+		if authErr != nil {
+			return domain.ExperimentRun{}, authErr
+		}
+		if !decision.Allowed {
+			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, decision.Reason)
+		}
+	}
+	run, err := s.broker.Submit(ctx, job)
+	if err != nil {
+		return run, err
+	}
+	if err := s.allowedWithDetails(ctx, actor, "job.enqueue", "experiment_run", run.ID, job.AuditCorrelationID, map[string]string{"operation": string(job.Operation), "campaign_id": campaignID}); err != nil {
+		return run, err
+	}
+	return run, nil
+}
+
+func canonicalDirectory(path string) (string, error) {
+	abs, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(real)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("not a directory")
+	}
+	return filepath.Clean(real), nil
+}
+
+func insideAnyRoot(path string, roots []string) bool {
+	candidate, err := canonicalDirectory(path)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		relative, err := filepath.Rel(root, candidate)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) denied(ctx context.Context, actor domain.Principal, action, resourceType, resourceID, reason string) error {
+	_, _ = s.store.AppendAudit(ctx, domain.AuditEvent{ActorID: actor.ID, Action: action, ResourceType: resourceType, ResourceID: resourceID, Decision: "denied", Details: map[string]string{"reason": reason}})
+	return fmt.Errorf("%w: %s", ErrForbidden, reason)
+}
+
+func (s *Service) allowed(ctx context.Context, actor domain.Principal, action, resourceType, resourceID, correlationID string) error {
+	return s.allowedWithDetails(ctx, actor, action, resourceType, resourceID, correlationID, nil)
+}
+
+func (s *Service) allowedWithDetails(ctx context.Context, actor domain.Principal, action, resourceType, resourceID, correlationID string, details map[string]string) error {
+	_, err := s.store.AppendAudit(ctx, domain.AuditEvent{ActorID: actor.ID, Action: action, ResourceType: resourceType, ResourceID: resourceID, CorrelationID: correlationID, Decision: "allowed", Details: details})
+	return err
+}
+
+func hasRole(principal domain.Principal, role domain.Role) bool {
+	for _, candidate := range principal.Roles {
+		if candidate == role {
+			return principal.ID != ""
+		}
+	}
+	return false
+}
+
+func hasAnyRole(principal domain.Principal, roles ...domain.Role) bool {
+	for _, role := range roles {
+		if hasRole(principal, role) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeMember(scope domain.AuthorizationScope, principal domain.Principal) bool {
+	if principal.ID == "" {
+		return false
+	}
+	if hasRole(principal, domain.RoleAdmin) || scope.OperatorID == principal.ID {
+		return true
+	}
+	for _, memberID := range scope.MemberIDs {
+		if memberID == principal.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func budgetExceeds(request, limit domain.ResourceBudget) bool {
+	return over(request.MaxWallSeconds, limit.MaxWallSeconds) || over(request.MaxMemoryBytes, limit.MaxMemoryBytes) ||
+		over(request.MaxCPUSeconds, limit.MaxCPUSeconds) || over(request.MaxDiskBytes, limit.MaxDiskBytes) ||
+		over(request.MaxPIDs, limit.MaxPIDs) || (limit.MaxConcurrent > 0 && request.MaxConcurrent > limit.MaxConcurrent)
+}
+
+func over(request, limit int64) bool { return request < 0 || (limit > 0 && request > limit) }
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func containsOperation(values []domain.Operation, wanted domain.Operation) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func manifestHasHarness(manifest domain.ApparatusManifest, wanted string) bool {
+	for _, harness := range manifest.Harnesses {
+		if harness.Name == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func validApparatusArguments(arguments map[string]string) bool {
+	for key, value := range arguments {
+		if value == "" {
+			return false
+		}
+		switch key {
+		case "manifest", "harness", "revision", "sanitizer", "max-total-time":
+		default:
+			return false
+		}
+	}
+	return arguments["manifest"] != "" && arguments["harness"] != "" && arguments["revision"] != "" && arguments["sanitizer"] != ""
+}
+
+func validApparatusMounts(mounts []domain.JobMount) bool {
+	seenSource := false
+	for _, mount := range mounts {
+		switch mount.Name {
+		case "source":
+			if seenSource || mount.ContainerPath != "/source" || !mount.ReadOnly {
+				return false
+			}
+			seenSource = true
+		case "build":
+			if mount.ContainerPath != "/build" || !mount.ReadOnly {
+				return false
+			}
+		case "corpus":
+			if mount.ContainerPath != "/corpus" || mount.ReadOnly {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return seenSource
+}
+
+func newID(prefix string) string {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		panic(err)
+	}
+	return prefix + "_" + hex.EncodeToString(id[:])
+}

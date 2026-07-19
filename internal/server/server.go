@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/cluster"
 	"github.com/ikarolaborda/agent-smith/internal/compact"
 	"github.com/ikarolaborda/agent-smith/internal/config"
+	"github.com/ikarolaborda/agent-smith/internal/convomem"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/llm/abliteration"
 	"github.com/ikarolaborda/agent-smith/internal/llm/anthropic"
@@ -30,6 +32,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/refine"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
+	"github.com/ikarolaborda/agent-smith/internal/research/runner"
 	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
 	"github.com/ikarolaborda/agent-smith/internal/validate"
 	"github.com/ikarolaborda/agent-smith/internal/verify"
@@ -46,6 +49,12 @@ type Options struct {
 		current value.
 	*/
 	Workspace string
+	/*
+		StateDir is where the server persists lightweight UI state — currently the
+		open workspace folder — so it survives a reload or restart. Empty disables
+		persistence; tests leave it empty so they never write to the real home dir.
+	*/
+	StateDir string
 	/*
 		AllowExec enables the opt-in container-contained execution tool (ADR
 		0003) on each per-request agent. Off by default; requires a workspace to
@@ -139,6 +148,9 @@ type ResearchModeOptions struct {
 	Credentials          []ResearchCredential
 	MinimumReproductions int
 	MaxArtifactBytes     int64
+	RunnerBackend        runner.Backend
+	GlobalConcurrency    int
+	CampaignConcurrency  int
 }
 
 /*
@@ -161,6 +173,8 @@ type Server struct {
 	*/
 	workspace   string
 	workspaceMu sync.RWMutex
+	/* stateDir persists lightweight UI state (the open workspace); empty = off. */
+	stateDir string
 	/* allowExec enables the opt-in contained exec tool on per-request agents (ADR 0003). */
 	allowExec bool
 	/* execImageDigest optionally pins the apparatus image by local image ID (ADR 0003). */
@@ -195,6 +209,14 @@ type Server struct {
 		llamacpp per-request agents in newAgent; nil when openai is unconfigured.
 	*/
 	compactor *compact.Compactor
+
+	/*
+		convoMemory persists and recalls conversation turns per profile (SQLite +
+		in-Go cosine), so history survives beyond the context window across sessions.
+		Attached to every per-request agent; nil when no embedder/state dir is
+		available. Recall is profile-scoped and no-ops without a ProfileID.
+	*/
+	convoMemory *convomem.Memory
 
 	/* research is non-nil only for authenticated durable research mode. */
 	research *researchRuntime
@@ -265,6 +287,7 @@ func New(opts Options) (*Server, error) {
 		addr:             opts.Addr,
 		cfg:              opts.Config,
 		workspace:        opts.Workspace,
+		stateDir:         opts.StateDir,
 		allowExec:        opts.AllowExec,
 		execImageDigest:  opts.ExecImageDigest,
 		logger:           logger,
@@ -387,6 +410,8 @@ func New(opts Options) (*Server, error) {
 		logger.Warn("no providers ready — chat completions will return 503")
 	}
 	s.compactor = buildCompactor(s.providers, opts.Config, logger)
+	s.convoMemory = buildConvoMemory(s.rag, s.stateDir, logger)
+	s.restoreWorkspace()
 
 	s.registerRoutes()
 	s.refreshOllamaModels(context.Background())
@@ -584,6 +609,9 @@ func (s *Server) Handler() http.Handler { return s.withCORS(s.withAuthentication
 // Close releases the durable research store, when enabled.
 func (s *Server) Close() error {
 	if s.research != nil {
+		if s.research.broker != nil {
+			_ = s.research.broker.Close()
+		}
 		return s.research.store.Close()
 	}
 	return nil
@@ -607,6 +635,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/v1/rag/forget", s.handleRAGForget)
 	s.mux.HandleFunc("/v1/rag/memory", s.handleRAGMemory)
 	s.mux.HandleFunc("/v1/rag/correction", s.handleRAGCorrection)
+	s.mux.HandleFunc("/v1/research/", s.handleResearch)
+	s.mux.HandleFunc("/v1/research", s.handleResearch)
 	s.mux.Handle("/", staticHandler(s.logger))
 }
 
@@ -813,6 +843,7 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 	}
 	a.Agentic = s.agentic && ragOn
 	a.Verifier = s.answerVerifier
+	a.ConvoMemory = s.convoMemory
 	/*
 		Attach input compaction only for the context-limited local model. Cloud
 		providers (openai/anthropic) have large windows, so compacting their input
@@ -824,6 +855,18 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 		c := *s.compactor
 		c.TriggerTokens = compactTriggerTokens(s.cfg)
 		a.Compactor = &c
+		/*
+			Size read_dir's output budget to the context-limited local model so a
+			whole-folder load doesn't overflow the window in the first place
+			(compaction still catches anything larger). The per-request registry is
+			fresh, so mutating the tool is race-free. Cloud providers keep the
+			generous default.
+		*/
+		if t, err := reg.Get("read_dir"); err == nil {
+			if rd, ok := t.(*builtin.ReadDir); ok {
+				rd.MaxBytes = readDirBudgetBytes(s.cfg)
+			}
+		}
 	}
 	return a, nil
 }
@@ -878,6 +921,72 @@ func compactTriggerTokens(cfg *config.Config) int {
 	return trigger
 }
 
+/*
+readDirBudgetBytes sizes the read_dir output budget for the context-limited local
+model: roughly the context in tokens times ~2 bytes/token (about half the window),
+so a whole-folder load leaves room for the system prompt, retrieval, and the
+response instead of overflowing. Capped at the tool's generous default so a
+large-context configuration is never made smaller than baseline.
+*/
+func readDirBudgetBytes(cfg *config.Config) int {
+	ctxTokens := 8192
+	if cfg != nil {
+		if p, ok := cfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && p.LlamaCpp.CtxSize > 0 {
+			ctxTokens = p.LlamaCpp.CtxSize
+		}
+	}
+	budget := ctxTokens * 2
+	if budget > builtin.DefaultReadDirMaxBytes {
+		budget = builtin.DefaultReadDirMaxBytes
+	}
+	return budget
+}
+
+/*
+buildConvoMemory opens the SQLite conversation-memory store and pairs it with a
+resolved embedder, so per-request agents can persist and recall turns. It fails
+soft: no RAG service, no state dir, an ambiguous/absent embedder, an unknown
+dimension, or a store that will not open all disable conversation memory rather
+than failing the server.
+*/
+func buildConvoMemory(ragSvc *rag.Service, stateDir string, logger *slog.Logger) *convomem.Memory {
+	if ragSvc == nil || stateDir == "" {
+		return nil
+	}
+	emb := pickConvoEmbedder(ragSvc)
+	if emb == nil {
+		return nil
+	}
+	store, err := convomem.Open(filepath.Join(stateDir, "convomem.sqlite"))
+	if err != nil {
+		logger.Warn("convo memory: store unavailable; conversation recall disabled", "err", err)
+		return nil
+	}
+	logger.Info("convo memory: enabled", "embedder", emb.Identity())
+	return &convomem.Memory{Store: store, Embedder: emb}
+}
+
+/*
+pickConvoEmbedder resolves the embedder for conversation memory the same fail-
+closed way as private RAG memory: an explicit MemoryEmbedderID wins, else exactly
+one registered embedder is used, else none (ambiguous → disabled) so turn text is
+never embedded by a random backend.
+*/
+func pickConvoEmbedder(ragSvc *rag.Service) llm.Embedder {
+	if id := ragSvc.MemoryEmbedderID; id != "" {
+		if e, ok := ragSvc.Embedders[id]; ok {
+			return e
+		}
+		return nil
+	}
+	if len(ragSvc.Embedders) == 1 {
+		for _, e := range ragSvc.Embedders {
+			return e
+		}
+	}
+	return nil
+}
+
 /* getWorkspace returns the folder the agentic file tools are currently scoped to. */
 func (s *Server) getWorkspace() string {
 	s.workspaceMu.RLock()
@@ -885,11 +994,16 @@ func (s *Server) getWorkspace() string {
 	return s.workspace
 }
 
-/* setWorkspace replaces the active workspace folder (empty = read-only). */
+/*
+	setWorkspace replaces the active workspace folder (empty = read-only) and
+
+persists it so a reload or server restart keeps the folder open.
+*/
 func (s *Server) setWorkspace(dir string) {
 	s.workspaceMu.Lock()
 	s.workspace = dir
 	s.workspaceMu.Unlock()
+	s.persistWorkspace(dir)
 }
 
 /*

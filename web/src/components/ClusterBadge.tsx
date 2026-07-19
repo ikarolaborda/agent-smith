@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { authenticatedFetch } from '../auth';
 
 interface ClusterNode {
   id: string;
@@ -33,7 +34,7 @@ export function ClusterBadge() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const res = await fetch('/v1/cluster');
+        const res = await authenticatedFetch('/v1/cluster');
         const data = (await res.json()) as ClusterStatus;
         if (!cancelled) {
           setStatus(data);

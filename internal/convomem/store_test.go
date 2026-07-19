@@ -38,10 +38,10 @@ func (f *fakeEmbedder) EmbedTexts(_ context.Context, texts []string) ([][]float3
 	return out, nil
 }
 
-func newTestStore(t *testing.T, dim int) *Store {
+func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mem.sqlite")
-	s, err := Open(path, dim)
+	s, err := Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -49,16 +49,22 @@ func newTestStore(t *testing.T, dim int) *Store {
 	return s
 }
 
-func TestStore_AddRejectsWrongDim(t *testing.T) {
-	s := newTestStore(t, 4)
-	if _, err := s.Add(context.Background(), "p", "user", "x", []float32{1, 2, 3}); err == nil {
-		t.Error("expected dim-mismatch error")
+func TestStore_AddRejectsWrongDimAfterFirst(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	// First write establishes the dimension (4).
+	if _, err := s.Add(ctx, "p", "user", "x", []float32{1, 2, 3, 4}); err != nil {
+		t.Fatal(err)
+	}
+	// A subsequent mismatched vector is rejected.
+	if _, err := s.Add(ctx, "p", "user", "y", []float32{1, 2, 3}); err == nil {
+		t.Error("expected dim-mismatch error after the dimension was established")
 	}
 }
 
 func TestMemory_RecallRanksSemanticMatchFirst(t *testing.T) {
 	emb := newFakeEmbedder()
-	m := &Memory{Store: newTestStore(t, emb.Dim()), Embedder: emb}
+	m := &Memory{Store: newTestStore(t), Embedder: emb}
 	ctx := context.Background()
 
 	if err := m.Remember(ctx, "alice", "user", "the vault access code is zebra"); err != nil {
@@ -90,7 +96,7 @@ func TestMemory_RecallRanksSemanticMatchFirst(t *testing.T) {
 
 func TestMemory_RecallIsProfileScoped(t *testing.T) {
 	emb := newFakeEmbedder()
-	m := &Memory{Store: newTestStore(t, emb.Dim()), Embedder: emb}
+	m := &Memory{Store: newTestStore(t), Embedder: emb}
 	ctx := context.Background()
 	_ = m.Remember(ctx, "alice", "user", "the vault code is zebra")
 	_ = m.Remember(ctx, "bob", "user", "the parser has a bug")
@@ -108,7 +114,7 @@ func TestMemory_RecallIsProfileScoped(t *testing.T) {
 
 func TestMemory_RecallBlockRendersOrEmpty(t *testing.T) {
 	emb := newFakeEmbedder()
-	m := &Memory{Store: newTestStore(t, emb.Dim()), Embedder: emb}
+	m := &Memory{Store: newTestStore(t), Embedder: emb}
 	ctx := context.Background()
 	_ = m.Remember(ctx, "alice", "user", "the vault access code is zebra")
 

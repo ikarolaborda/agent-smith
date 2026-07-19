@@ -5,11 +5,28 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
+	"github.com/ikarolaborda/agent-smith/internal/research/domain"
+	"github.com/ikarolaborda/agent-smith/internal/research/runner"
 	"github.com/ikarolaborda/agent-smith/internal/server"
 )
+
+/*
+serverStateDir is where the server persists lightweight UI state (the open
+workspace folder) so it survives a restart. Empty when no home directory is
+resolvable, which disables persistence rather than failing.
+*/
+func serverStateDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".agent-smith")
+	}
+	return ""
+}
 
 /*
 runServe wires the embedded HTTP server with all configured providers and the
@@ -65,10 +82,40 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		extra = map[string]llm.Provider{prov.Name(): prov}
 	}
 
+	var researchMode *server.ResearchModeOptions
+	if f.researchMode {
+		token := strings.TrimSpace(f.researchToken)
+		if token == "" {
+			token = strings.TrimSpace(os.Getenv("AGENT_SMITH_RESEARCH_TOKEN"))
+		}
+		roots := splitNonEmpty(f.researchRoots)
+		if len(roots) == 0 && strings.TrimSpace(f.workspace) != "" {
+			roots = []string{f.workspace}
+		}
+		if token == "" {
+			return errors.New("serve: --research-mode requires --research-token or AGENT_SMITH_RESEARCH_TOKEN")
+		}
+		if len(roots) == 0 {
+			return errors.New("serve: --research-mode requires --research-workspace-roots or --workspace")
+		}
+		researchMode = &server.ResearchModeOptions{
+			Enabled: true, DataDir: f.researchDir, WorkspaceRoots: roots,
+			GlobalConcurrency: f.researchWorkers, CampaignConcurrency: 1,
+			Credentials: []server.ResearchCredential{{
+				Token:     token,
+				Principal: domain.Principal{ID: f.researchActor, Name: f.researchActor, Roles: []domain.Role{domain.RoleAdmin}},
+			}},
+		}
+		if f.allowExec {
+			researchMode.RunnerBackend = runner.NewDockerBackend(runner.DockerOptions{Runtime: f.researchRuntime, RequireRootless: true})
+		}
+	}
+
 	srv, err := server.New(server.Options{
 		Addr:             f.addr,
 		Config:           serverCfg,
 		Workspace:        f.workspace,
+		StateDir:         serverStateDir(),
 		AllowExec:        f.allowExec,
 		ExecImageDigest:  f.execImageDigest,
 		Logger:           logger,
@@ -81,11 +128,23 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		ValidateVuln:     f.validateVuln,
 		Providers:        injected,
 		ExtraProviders:   extra,
+		ResearchMode:     researchMode,
 	})
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
+	defer srv.Close()
 	return srv.ListenAndServe(ctx)
+}
+
+func splitNonEmpty(value string) []string {
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 /* configForServe makes CLI provider/model overrides authoritative for empty-model API requests and the UI default. */

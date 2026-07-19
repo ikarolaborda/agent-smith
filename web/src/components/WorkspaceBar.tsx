@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { authenticatedFetch } from '../auth';
 
 interface WorkspaceState {
   workspace: string;
@@ -41,7 +42,7 @@ export function WorkspaceBar() {
 
   const load = async () => {
     try {
-      const res = await fetch('/v1/workspace');
+      const res = await authenticatedFetch('/v1/workspace');
       if (res.ok) setWs((await res.json()) as WorkspaceState);
     } catch {
       /* leave the last known state */
@@ -56,7 +57,7 @@ export function WorkspaceBar() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch('/v1/workspace', {
+      const res = await authenticatedFetch('/v1/workspace', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path }),
@@ -84,7 +85,7 @@ export function WorkspaceBar() {
       return;
     }
     try {
-      const res = await fetch('/v1/workspace/tree');
+      const res = await authenticatedFetch('/v1/workspace/tree');
       if (res.ok) setTree((await res.json()) as TreeResponse);
     } catch {
       /* ignore; show nothing */
