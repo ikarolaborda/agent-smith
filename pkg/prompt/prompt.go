@@ -82,6 +82,27 @@ const AgenticRAGDirective = "Agentic retrieval (how to answer grounded questions
 	"If, after a reasonable search, the evidence does not support an answer, say so plainly and state what is missing — a grounded \"I don't have that\" beats a fluent guess."
 
 /*
+WorkspaceDirective is injected only when the operator has opened a workspace
+folder (POST /v1/workspace). It closes the specific failure mode seen in the lab:
+the model, pointed at an opened research folder, answered "I don't have filesystem
+access — paste the files" and then fabricated placeholder content. That is wrong:
+with a workspace open the model HAS file tools rooted at that folder, so a
+folder/project/"previously researched material" question must be answered by
+reading the actual files, not by guessing or disclaiming access. path is the
+absolute workspace root.
+*/
+func WorkspaceDirective(path string) string {
+	if path == "" {
+		return ""
+	}
+	return "Workspace access (a folder is open — you are NOT a context-less chat model here): " +
+		"An operator has opened the folder " + path + " for this session, and you have tools rooted at it: " +
+		"read_dir (load an entire directory's text files at once, like an IDE @folder) and file_read (read one file). " +
+		"When the user refers to \"this folder\", \"the project\", \"the directory\", \"the files\", \"the repo\", \"previously researched material\", or points you at a path under this workspace, you MUST call read_dir (start at the root, then narrow with a subpath or ext filter) and/or file_read to read the actual contents BEFORE answering — never claim you cannot see local files, and never invent file names, contents, or findings. " +
+		"Ground every statement about the workspace in what you actually read; if a file you need was not read, read it or say which file you still need. A grounded \"the folder contains X, and file Y shows Z\" beats any placeholder or assumed structure."
+}
+
+/*
 JoinSections concatenates non-empty sections with a blank line between them.
 It trims trailing whitespace on each section so callers do not have to worry
 about stray newlines.

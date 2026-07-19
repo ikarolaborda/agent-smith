@@ -98,6 +98,13 @@ type Agent struct {
 	ConvoMemory *convomem.Memory
 	/* convoBlock is the per-turn recalled-memory section, computed once in Run/RunStream. */
 	convoBlock string
+	/*
+		Workspace, when non-empty, is the opened folder the file_read/read_dir tools
+		are rooted at. It drives the workspace-awareness directive so the model reads
+		the folder instead of claiming it cannot see local files. Set per-request by
+		the server from the active workspace.
+	*/
+	Workspace string
 }
 
 /*
@@ -490,7 +497,7 @@ func (a *Agent) composeFrom(ctx context.Context, msgs []llm.Message) []llm.Messa
 		and the remote abliteration model — regardless of the configured system
 		prompt.
 	*/
-	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, agenticSection, aug, a.convoBlock)
+	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, prompt.WorkspaceDirective(a.Workspace), agenticSection, aug, a.convoBlock)
 	if system == "" {
 		return msgs
 	}
