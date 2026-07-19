@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ikarolaborda/agent-smith/internal/compact"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 )
 
@@ -97,14 +98,17 @@ func (a *Agent) RunStreamMessage(ctx context.Context, session *Session, user llm
 	}
 
 	session.Append(user)
-	/*
-		Compact the whole session (this message plus any oversized paste replayed
-		from an earlier turn) so a multi-turn conversation cannot overflow the
-		context window through history. Non-fatal on error; see compactSession.
-	*/
-	reg := a.compactSession(ctx, session)
 
+	/*
+		Compact oversized content at the top of every iteration: the incoming
+		message and any large paste replayed from history, plus tool results (e.g. a
+		read_dir output) appended mid-loop. This keeps a multi-turn or tool-heavy
+		conversation from overflowing the context window. Non-fatal; see compactSession.
+	*/
+	var idxs []*compact.Index
+	reg := a.Tools
 	for i := 1; i <= a.MaxIters; i++ {
+		reg, idxs = a.compactSession(ctx, session, idxs)
 		req := llm.ChatRequest{
 			Messages: a.composeMessages(ctx, session),
 			Stream:   true,

@@ -195,10 +195,12 @@ func (a *Agent) Run(ctx context.Context, session *Session, userInput string) (st
 	}
 
 	session.Append(llm.Message{Role: llm.RoleUser, Content: userInput})
-	reg := a.compactSession(ctx, session)
 
+	var idxs []*compact.Index
+	reg := a.Tools
 	usedRetrieval := false
 	for i := 0; i < a.MaxIters; i++ {
+		reg, idxs = a.compactSession(ctx, session, idxs)
 		req := llm.ChatRequest{
 			Messages: a.composeMessages(ctx, session),
 			Model:    a.Model,
@@ -299,20 +301,29 @@ oversized, it returns the shared registry unchanged. Compaction errors are
 non-fatal: the original message is kept and the provider's own context error (if
 any) still surfaces.
 */
-func (a *Agent) compactSession(ctx context.Context, session *Session) *tools.Registry {
+func (a *Agent) compactSession(ctx context.Context, session *Session, prior []*compact.Index) (*tools.Registry, []*compact.Index) {
 	if a.Compactor == nil {
-		return a.Tools
+		return a.Tools, prior
 	}
 	msgs := session.Messages()
-	var indexes []*compact.Index
+	indexes := prior
 	changed := false
 	for i := range msgs {
-		if msgs[i].Role != llm.RoleUser || msgs[i].Content == "" {
+		if msgs[i].Content == "" {
+			continue
+		}
+		/*
+			Compact oversized USER messages (a large paste) and TOOL results (e.g. a
+			read_dir that loaded a whole folder). The latter is appended mid-loop, so
+			this runs every iteration; an already-compacted message is now under the
+			trigger and is skipped, and the summary cache makes re-scanning cheap.
+		*/
+		if msgs[i].Role != llm.RoleUser && msgs[i].Role != llm.RoleTool {
 			continue
 		}
 		res, err := a.Compactor.Compact(ctx, msgs[i].Content, "")
 		if err != nil {
-			a.Logger.Warn("agent: input compaction failed; keeping original", "err", err)
+			a.Logger.Warn("agent: input compaction failed; keeping original", "role", msgs[i].Role, "err", err)
 			continue
 		}
 		if res == nil {
@@ -334,7 +345,7 @@ func (a *Agent) compactSession(ctx context.Context, session *Session) *tools.Reg
 	if merged := compact.MergeIndexes(indexes...); merged != nil && merged.Len() > 0 {
 		reg = a.Tools.With(compact.NewContextSearchTool(merged))
 	}
-	return reg
+	return reg, indexes
 }
 
 /*
