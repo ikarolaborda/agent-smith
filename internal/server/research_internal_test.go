@@ -51,7 +51,7 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 		ImageDigest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Sanitizers:    []string{"address"},
 		Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}},
-		Operations: []domain.Operation{domain.OperationFuzz}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxDiskBytes: 1024, MaxPIDs: 8},
+		Operations: []domain.Operation{domain.OperationFuzz}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxCPUSeconds: 30, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1},
 	}
 	response := researchJSONRequest(srv, http.MethodPost, "/v1/research/apparatuses", operatorToken, manifest)
 	if response.Code != http.StatusCreated {
@@ -61,7 +61,7 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 		Purpose: "authorized API test", MemberIDs: []string{"reviewer"}, TargetRepository: "repo", AllowedRevisions: []string{"abc"},
 		WorkspaceRoots: []string{workspace}, AllowedOperations: []domain.Operation{domain.OperationInspect, domain.OperationFuzz},
 		ApprovalOperations: []domain.Operation{domain.OperationFuzz}, AllowedApparatusIDs: []string{manifest.ID},
-		Budget: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxDiskBytes: 1024, MaxPIDs: 8}, ExpiresAt: time.Now().UTC().Add(time.Hour),
+		Budget: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxCPUSeconds: 30, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1}, ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}
 	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/scopes", operatorToken, scopeRequest)
 	if response.Code != http.StatusCreated {
@@ -173,7 +173,7 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	defer srv.Close()
 	manifest := domain.ApparatusManifest{SchemaVersion: 1, ID: "apparatus", Name: "fixture", Version: "1", Engine: "libfuzzer", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Sanitizers: []string{"address"}, Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}},
-		Operations: []domain.Operation{domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationSymbolize}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1 << 20, MaxDiskBytes: 1 << 20, MaxPIDs: 8}}
+		Operations: []domain.Operation{domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationSymbolize}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 30, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 8, MaxConcurrent: 1}}
 	if response := researchJSONRequest(srv, http.MethodPost, "/v1/research/apparatuses", operatorToken, manifest); response.Code != http.StatusCreated {
 		t.Fatalf("apparatus status=%d body=%s", response.Code, response.Body.String())
 	}

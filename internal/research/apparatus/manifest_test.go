@@ -3,6 +3,7 @@ package apparatus
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
@@ -46,6 +47,9 @@ func TestManifestFailsClosed(t *testing.T) {
 	if _, err := NewJob(manifest, JobRequest{Operation: domain.OperationFuzz, Harness: "parser", Arguments: map[string]string{"harness": "override"}}); err == nil {
 		t.Fatal("accepted unsupported/reserved argument")
 	}
+	if _, err := NewJob(manifest, JobRequest{Operation: domain.OperationFuzz, Harness: "parser", Budget: domain.ResourceBudget{MaxWallSeconds: 1}}); err == nil {
+		t.Fatal("accepted incomplete resource budget")
+	}
 }
 
 func TestLoadManifestRejectsUnknownAndTrailingData(t *testing.T) {
@@ -62,6 +66,12 @@ func TestLoadManifestRejectsUnknownAndTrailingData(t *testing.T) {
 	if _, err := LoadManifest(path); err == nil {
 		t.Fatal("accepted trailing manifest")
 	}
+	if err := os.WriteFile(path, []byte(`{}`+strings.Repeat(" ", 1<<20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadManifest(path); err == nil {
+		t.Fatal("accepted oversized manifest")
+	}
 }
 
 func validManifest() domain.ApparatusManifest {
@@ -70,6 +80,6 @@ func validManifest() domain.ApparatusManifest {
 		Sanitizers: []string{"address"}, Architectures: []string{"amd64"},
 		Harnesses:  []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}},
 		Operations: []domain.Operation{domain.OperationBuild, domain.OperationFuzz}, Environment: map[string]string{"ASAN_OPTIONS": "abort_on_error=1"},
-		Limits: domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1 << 30, MaxCPUSeconds: 60, MaxDiskBytes: 1 << 30, MaxPIDs: 32, MaxConcurrent: 1},
+		Limits: domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1 << 30, MaxCPUSeconds: 60, MaxDiskBytes: 1 << 30, MaxInodes: 4096, MaxPIDs: 32, MaxConcurrent: 1},
 	}
 }

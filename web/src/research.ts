@@ -5,6 +5,7 @@ export interface ResourceBudget {
   max_memory_bytes: number;
   max_cpu_seconds: number;
   max_disk_bytes: number;
+  max_inodes: number;
   max_pids: number;
   max_concurrent: number;
 }
@@ -50,7 +51,7 @@ export interface ExperimentRun {
   created_at: string;
   completed_at?: string;
   exit?: { code: number; signal?: string; reason?: string };
-  resource_usage?: { wall_ms: number; max_rss_bytes: number };
+  resource_usage?: { wall_ms: number; cpu_ms: number; max_rss_bytes: number; disk_written_bytes: number; inodes_created: number };
 }
 
 export interface ResearchBuild {

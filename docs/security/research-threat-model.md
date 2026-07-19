@@ -87,9 +87,14 @@ exhaustion, secret discovery, network access, mount mutation, process orphaning,
 or cross-campaign access. Disposable per-run mounts, rootless Docker/gVisor,
 network denial, read-only source/build mounts, per-campaign concurrency, process
 cancellation, and strict artifact collection reduce risk. Docker shares a kernel
-and is not a perfect sandbox. Disk and inode quotas depend on the deployment
-filesystem/runtime and require live release-gate tests; deployments that cannot
-enforce them must not claim hostile-target isolation.
+and is not a perfect sandbox. Docker workers receive a CFS CPU-rate ceiling
+derived from the authorized CPU/wall envelope plus memory, PID, file-size,
+open-file, and wall-clock limits. The broker continuously measures the writable
+output/corpus footprint, rejects links and non-regular entries, records peak
+growth, and cancels byte or inode overruns. That monitor is defense in depth,
+not a kernel-enforced filesystem quota: disk and inode quotas still depend on
+the deployment filesystem/runtime and require live release-gate tests.
+Deployments that cannot enforce them must not claim hostile-target isolation.
 
 ### Persistence and artifacts
 
@@ -131,8 +136,9 @@ privilege change, or cross-boundary impact.
 ## Beta blockers
 
 Before a beta claim, run live isolation tests on every supported backend;
-enforce disk/inode quotas; add an acquisition/egress deployment policy; complete
-a real known-bug ground-truth campaign plus clean controls; validate fix and
-branch workflows end to end; add encrypted retention/backup guidance; commission
-an independent review of authentication, container escape surface, artifact
-ingestion, supply chain, prompt injection, and multi-campaign isolation.
+enforce kernel/filesystem disk and inode quotas; add an acquisition/egress
+deployment policy; complete a real known-bug ground-truth campaign plus clean
+controls; validate fix and branch workflows end to end; add encrypted
+retention/backup guidance; commission an independent review of authentication,
+container escape surface, artifact ingestion, supply chain, prompt injection,
+and multi-campaign isolation.

@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "id": "native-clang-libfuzzer-v2",
+  "id": "native-clang-libfuzzer-v3",
   "name": "Native Clang libFuzzer",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "image_digest": "${IMAGE_DIGEST}",
   "engine": "libfuzzer",
   "sanitizers": ["address", "undefined"],
@@ -39,6 +39,7 @@
     "max_memory_bytes": 2147483648,
     "max_cpu_seconds": 3600,
     "max_disk_bytes": 1073741824,
+    "max_inodes": 65536,
     "max_pids": 64,
     "max_concurrent": 1
   }

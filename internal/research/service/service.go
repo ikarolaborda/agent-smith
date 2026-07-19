@@ -209,6 +209,9 @@ func (s *Service) CreateCampaign(ctx context.Context, actor domain.Principal, ca
 	if campaign.Budget == (domain.ResourceBudget{}) {
 		campaign.Budget = scope.Budget
 	}
+	if err := campaign.Budget.Validate(); err != nil {
+		return campaign, s.denied(ctx, actor, "campaign.create", "campaign", campaign.ID, err.Error())
+	}
 	campaign.State = domain.CampaignDraft
 	campaign.Version = 1
 	campaign.CreatedAt = s.now()
@@ -544,6 +547,9 @@ func (s *Service) PreauthorizeEnqueue(ctx context.Context, actor domain.Principa
 	if correlationID == "" {
 		return s.denied(ctx, actor, "job.preauthorize", "campaign", campaignID, "audit correlation id is required")
 	}
+	if err := budget.Validate(); err != nil {
+		return s.denied(ctx, actor, "job.preauthorize", "campaign", campaignID, err.Error())
+	}
 	campaign, err := s.store.GetCampaign(ctx, campaignID)
 	if err != nil {
 		return err
@@ -557,7 +563,7 @@ func (s *Service) PreauthorizeEnqueue(ctx context.Context, actor domain.Principa
 	}
 	decision, err := s.AuthorizeAction(ctx, campaignID, domain.Action{
 		Principal: actor, Operation: operation, Repository: scope.TargetRepository, Revision: revision,
-		WallSeconds: budget.MaxWallSeconds, MemoryBytes: budget.MaxMemoryBytes, DiskBytes: budget.MaxDiskBytes, PIDs: budget.MaxPIDs, ApprovalID: approvalID,
+		WallSeconds: budget.MaxWallSeconds, MemoryBytes: budget.MaxMemoryBytes, CPUSeconds: budget.MaxCPUSeconds, DiskBytes: budget.MaxDiskBytes, Inodes: budget.MaxInodes, PIDs: budget.MaxPIDs, ApprovalID: approvalID,
 	}, correlationID)
 	if err != nil {
 		return err
@@ -724,8 +730,8 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 		}
 		action := domain.Action{
 			Principal: actor, Operation: job.Operation, Repository: repository, Revision: revision, WorkspacePath: policyPath,
-			WallSeconds: job.Budget.MaxWallSeconds, MemoryBytes: job.Budget.MaxMemoryBytes, DiskBytes: job.Budget.MaxDiskBytes,
-			PIDs: job.Budget.MaxPIDs, ApprovalID: approvalID,
+			WallSeconds: job.Budget.MaxWallSeconds, MemoryBytes: job.Budget.MaxMemoryBytes, CPUSeconds: job.Budget.MaxCPUSeconds, DiskBytes: job.Budget.MaxDiskBytes,
+			Inodes: job.Budget.MaxInodes, PIDs: job.Budget.MaxPIDs, ApprovalID: approvalID,
 		}
 		decision, authErr := s.AuthorizeAction(ctx, campaignID, action, job.AuditCorrelationID)
 		if authErr != nil {
@@ -828,7 +834,7 @@ func scopeMember(scope domain.AuthorizationScope, principal domain.Principal) bo
 func budgetExceeds(request, limit domain.ResourceBudget) bool {
 	return over(request.MaxWallSeconds, limit.MaxWallSeconds) || over(request.MaxMemoryBytes, limit.MaxMemoryBytes) ||
 		over(request.MaxCPUSeconds, limit.MaxCPUSeconds) || over(request.MaxDiskBytes, limit.MaxDiskBytes) ||
-		over(request.MaxPIDs, limit.MaxPIDs) || (limit.MaxConcurrent > 0 && request.MaxConcurrent > limit.MaxConcurrent)
+		over(request.MaxInodes, limit.MaxInodes) || over(request.MaxPIDs, limit.MaxPIDs) || (limit.MaxConcurrent > 0 && request.MaxConcurrent > limit.MaxConcurrent)
 }
 
 func over(request, limit int64) bool { return request < 0 || (limit > 0 && request > limit) }

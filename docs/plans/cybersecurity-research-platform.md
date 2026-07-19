@@ -54,11 +54,27 @@ approved human disclosure records. No-match novelty results remain
 
 The implementation is not beta-ready. A pinned real-program known-bug campaign
 (Magma or equivalent), end-to-end real-program branch/novelty/fix validation,
-constrained network acquisition, disk/inode enforcement, encrypted retention
-operations, and an independent security review remain release blockers. The
-current host reports neither rootless Docker nor gVisor, so the production CLI
-correctly refuses to start its research runner here; rootful Docker results are
-functional lab evidence only.
+constrained network acquisition, kernel/filesystem disk and inode enforcement,
+encrypted retention operations, and an independent security review remain
+release blockers. The current host reports neither rootless Docker nor gVisor,
+so the production CLI correctly refuses to start its research runner here;
+rootful Docker results are functional lab evidence only.
+
+The runner now treats CPU seconds and inode count as required finite scope,
+campaign, manifest, and job ceilings. Docker applies a CFS CPU rate derived from
+the CPU/wall envelope and process/file rlimits; the broker monitors writable
+output and corpus trees, records peak byte/inode growth, rejects hostile entry
+types, and cancels overruns. This does not replace the kernel/filesystem quota
+release gate, and capability reporting keeps kernel storage quotas and complete
+CPU/RSS accounting false.
+
+An opt-in hostile containment apparatus now exercises network denial, read-only
+mounts, control-plane secret isolation, cross-campaign visibility, device
+creation, orphan cleanup, hostile symlink output, and writable byte/inode
+exhaustion through the real Docker backend. All nine controls passed on the
+assessment host with the exact local image ID
+`sha256:1758e9e26b768681fc41e46bf8e324f36826a69e4cf88b431ac5c24c6caf4f27`.
+This is reproducible rootful-lab evidence, not production isolation evidence.
 
 ## Operating boundary
 

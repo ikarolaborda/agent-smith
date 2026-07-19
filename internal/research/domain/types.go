@@ -71,6 +71,7 @@ type ResourceBudget struct {
 	MaxMemoryBytes int64 `json:"max_memory_bytes"`
 	MaxCPUSeconds  int64 `json:"max_cpu_seconds"`
 	MaxDiskBytes   int64 `json:"max_disk_bytes"`
+	MaxInodes      int64 `json:"max_inodes"`
 	MaxPIDs        int64 `json:"max_pids"`
 	MaxConcurrent  int   `json:"max_concurrent"`
 }
@@ -227,6 +228,7 @@ type ResourceUsage struct {
 	CPUMillis        int64 `json:"cpu_ms"`
 	MaxRSSBytes      int64 `json:"max_rss_bytes"`
 	DiskWrittenBytes int64 `json:"disk_written_bytes"`
+	InodesCreated    int64 `json:"inodes_created"`
 }
 
 /* RunExit captures deterministic termination semantics. */

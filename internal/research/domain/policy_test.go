@@ -12,7 +12,7 @@ func scopeFixture(root string) AuthorizationScope {
 		TargetRepository: "https://example.test/project.git", AllowedRevisions: []string{"abc123"},
 		WorkspaceRoots: []string{root}, AllowedOperations: []Operation{OperationInspect, OperationFuzz, OperationDisclose},
 		ApprovalOperations: []Operation{OperationFuzz, OperationDisclose}, AllowedDomains: []string{"example.test", "*.example.test"},
-		Budget:    ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1024, MaxDiskBytes: 2048, MaxPIDs: 32},
+		Budget:    ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1024, MaxCPUSeconds: 60, MaxDiskBytes: 2048, MaxInodes: 128, MaxPIDs: 32, MaxConcurrent: 1},
 		CreatedAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(time.Hour), DisclosureContact: "security@example.test",
 	}
 }
@@ -63,5 +63,23 @@ func TestUnknownOperationsFailClosed(t *testing.T) {
 	scope.AllowedOperations = append(scope.AllowedOperations, Operation("model_shell"))
 	if err := scope.Validate(time.Now().UTC()); err == nil {
 		t.Fatal("scope accepted unknown operation")
+	}
+}
+
+func TestScopeRejectsIncompleteAndExceededCPUOrInodeBudgets(t *testing.T) {
+	scope := scopeFixture(t.TempDir())
+	scope.Budget.MaxInodes = 0
+	if err := scope.Validate(time.Now().UTC()); err == nil {
+		t.Fatal("scope accepted an unbounded inode budget")
+	}
+	scope = scopeFixture(t.TempDir())
+	action := Action{Principal: Principal{ID: "operator", Roles: []Role{RoleOperator}}, Operation: OperationInspect, Repository: scope.TargetRepository, Revision: "abc123", CPUSeconds: scope.Budget.MaxCPUSeconds + 1}
+	if decision := scope.Authorize(action, time.Now().UTC()); decision.Allowed {
+		t.Fatalf("CPU budget overrun authorized: %#v", decision)
+	}
+	action.CPUSeconds = 1
+	action.Inodes = scope.Budget.MaxInodes + 1
+	if decision := scope.Authorize(action, time.Now().UTC()); decision.Allowed {
+		t.Fatalf("inode budget overrun authorized: %#v", decision)
 	}
 }

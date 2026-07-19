@@ -88,9 +88,13 @@ func (d *DockerBackend) Preflight(ctx context.Context) (Assurance, error) {
 	if err := d.executor.Run(ctx, d.binary, []string{"info", "--format", "{{json .CgroupDriver}} {{json .CgroupVersion}}"}, &stdout, &stderr); err != nil {
 		return Assurance{}, fmt.Errorf("docker cgroup preflight: %w: %s", err, boundedMessage(stderr.String()))
 	}
-	var cgroupDriver string
-	var cgroupVersion int
-	if _, err := fmt.Fscan(strings.NewReader(stdout.String()), &cgroupDriver, &cgroupVersion); err != nil || strings.Trim(cgroupDriver, `"`) == "" || cgroupVersion <= 0 {
+	var cgroupDriver, cgroupVersionValue string
+	if _, err := fmt.Fscan(strings.NewReader(stdout.String()), &cgroupDriver, &cgroupVersionValue); err != nil {
+		return Assurance{}, errors.New("Docker cgroup driver/version could not be verified")
+	}
+	cgroupDriver = strings.Trim(cgroupDriver, `"`)
+	cgroupVersion, versionErr := strconv.Atoi(strings.Trim(cgroupVersionValue, `"`))
+	if cgroupDriver == "" || versionErr != nil || cgroupVersion <= 0 {
 		return Assurance{}, errors.New("Docker cgroup driver/version could not be verified")
 	}
 	if rootless && cgroupVersion != 2 {
@@ -131,6 +135,9 @@ func (d *DockerBackend) Execute(ctx context.Context, job domain.WorkerJob, stagi
 	if d.assurance.Isolation == "" {
 		return Execution{}, errors.New("docker backend used before successful preflight")
 	}
+	if err := job.Budget.Validate(); err != nil {
+		return Execution{}, fmt.Errorf("docker backend: %w", err)
+	}
 	if !digestPattern.MatchString(job.ImageDigest) {
 		return Execution{}, errors.New("docker backend requires exact image digest")
 	}
@@ -143,11 +150,17 @@ func (d *DockerBackend) Execute(ctx context.Context, job domain.WorkerJob, stagi
 	}
 
 	containerName := "agent-smith-" + safeID(job.RunID)
+	cpuRate := float64(job.Budget.MaxCPUSeconds) / float64(job.Budget.MaxWallSeconds)
+	if cpuRate < 0.001 {
+		return Execution{}, errors.New("docker backend: CPU budget is too small for the wall-clock envelope")
+	}
 	args := []string{
 		"run", "--rm", "--name", containerName,
 		"--network", "none", "--read-only", "--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges", "--pids-limit", strconv.FormatInt(job.Budget.MaxPIDs, 10),
 		"--memory", strconv.FormatInt(job.Budget.MaxMemoryBytes, 10), "--memory-swap", strconv.FormatInt(job.Budget.MaxMemoryBytes, 10),
+		"--cpus", strconv.FormatFloat(cpuRate, 'f', 6, 64),
+		"--ulimit", "core=0:0", "--ulimit", "nofile=1024:1024", "--ulimit", "fsize=" + strconv.FormatInt(job.Budget.MaxDiskBytes, 10) + ":" + strconv.FormatInt(job.Budget.MaxDiskBytes, 10),
 		// In rootless mode container uid 0 maps to the unprivileged daemon user,
 		// allowing writes to the private host staging directory without granting
 		// host root. Capabilities and privilege escalation remain disabled.

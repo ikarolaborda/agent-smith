@@ -324,7 +324,7 @@ func pipelineStore(t *testing.T) (*store.Store, domain.Campaign) {
 	now := time.Now().UTC()
 	scope := domain.AuthorizationScope{ID: "scope", OperatorID: "operator", Purpose: "test", TargetRepository: "repo", AllowedRevisions: []string{"abc"},
 		WorkspaceRoots: []string{repository.Root()}, AllowedOperations: []domain.Operation{domain.OperationBuild, domain.OperationFuzz},
-		Budget: domain.ResourceBudget{MaxWallSeconds: 10}, ExpiresAt: now.Add(time.Hour), CreatedAt: now}
+		Budget: domain.ResourceBudget{MaxWallSeconds: 10, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 10, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 16, MaxConcurrent: 1}, ExpiresAt: now.Add(time.Hour), CreatedAt: now}
 	if err := repository.CreateScope(ctx, scope); err != nil {
 		repository.Close()
 		t.Fatal(err)

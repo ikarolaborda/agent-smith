@@ -312,7 +312,7 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
             <div className="research-grid">
               <Panel title="Experiment runs" icon="bi-activity">
                 {runs.length === 0 ? <Empty text="No worker runs queued." /> : runs.map((run) => (
-                  <div className="research-row" key={run.id}><div><strong>{run.operation}</strong><small>{shortID(run.id)} · {run.isolation_assurance || 'isolation pending'}</small></div><StatusBadge value={run.status} />{(run.status === 'queued' || run.status === 'running') && <Button variant="link" size="sm" onClick={() => void cancelRun(run)}>Cancel</Button>}</div>
+                  <div className="research-row" key={run.id}><div><strong>{run.operation}</strong><small>{shortID(run.id)} · {run.isolation_assurance || 'isolation pending'}{run.resource_usage ? ` · ${formatUsage(run.resource_usage)}` : ''}</small></div><StatusBadge value={run.status} />{(run.status === 'queued' || run.status === 'running') && <Button variant="link" size="sm" onClick={() => void cancelRun(run)}>Cancel</Button>}</div>
                 ))}
               </Panel>
               <Panel title="Build provenance" icon="bi-box-seam">
@@ -407,3 +407,4 @@ function StatusBadge({ value }: { value: string }) {
 
 function shortID(value: string): string { return value.length > 24 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value; }
 function formatBytes(value: number): string { if (value < 1024) return `${value} B`; if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`; return `${(value / 1024 ** 2).toFixed(1)} MiB`; }
+function formatUsage(value: NonNullable<ExperimentRun['resource_usage']>): string { return `${value.wall_ms} ms · ${formatBytes(value.disk_written_bytes || 0)} writable Δ · ${value.inodes_created || 0} inode Δ`; }

@@ -191,10 +191,177 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)`, timestamp(time.Now().UTC())); err != nil {
 		return fmt.Errorf("research store: record migration: %w", err)
 	}
+	var resourceMigrationApplied int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 2`).Scan(&resourceMigrationApplied); err != nil {
+		return fmt.Errorf("research store: inspect resource migration: %w", err)
+	}
+	if resourceMigrationApplied == 0 {
+		if err := migrateFiniteResourceBudgets(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)`, timestamp(time.Now().UTC())); err != nil {
+			return fmt.Errorf("research store: record resource migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("research store: commit migration: %w", err)
 	}
 	return nil
+}
+
+// migrateFiniteResourceBudgets upgrades pre-v2 JSON records whose missing
+// fields decoded as zero (formerly interpreted as unbounded). Scope values are
+// made conservatively finite; campaigns inherit missing limits from their
+// scope, while apparatuses and queued jobs receive safe standalone defaults.
+func migrateFiniteResourceBudgets(ctx context.Context, tx *sql.Tx) error {
+	type encodedRecord struct {
+		id   string
+		kind string
+		data []byte
+	}
+	load := func(query string, includesKind bool, arguments ...any) ([]encodedRecord, error) {
+		rows, err := tx.QueryContext(ctx, query, arguments...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var records []encodedRecord
+		for rows.Next() {
+			var record encodedRecord
+			if includesKind {
+				err = rows.Scan(&record.kind, &record.id, &record.data)
+			} else {
+				err = rows.Scan(&record.id, &record.data)
+			}
+			if err != nil {
+				return nil, err
+			}
+			records = append(records, record)
+		}
+		return records, rows.Err()
+	}
+
+	scopeRecords, err := load(`SELECT id, data FROM authorization_scopes`, false)
+	if err != nil {
+		return fmt.Errorf("research store: load scopes for resource migration: %w", err)
+	}
+	scopeBudgets := make(map[string]domain.ResourceBudget, len(scopeRecords))
+	for _, record := range scopeRecords {
+		var scope domain.AuthorizationScope
+		if err := json.Unmarshal(record.data, &scope); err != nil {
+			return fmt.Errorf("research store: decode scope resource migration: %w", err)
+		}
+		fillFiniteBudget(&scope.Budget, domain.ResourceBudget{})
+		scopeBudgets[scope.ID] = scope.Budget
+		data, err := json.Marshal(scope)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE authorization_scopes SET data = ? WHERE id = ?`, data, record.id); err != nil {
+			return fmt.Errorf("research store: migrate scope resources: %w", err)
+		}
+	}
+
+	campaignRecords, err := load(`SELECT id, data FROM campaigns`, false)
+	if err != nil {
+		return fmt.Errorf("research store: load campaigns for resource migration: %w", err)
+	}
+	for _, record := range campaignRecords {
+		var campaign domain.Campaign
+		if err := json.Unmarshal(record.data, &campaign); err != nil {
+			return fmt.Errorf("research store: decode campaign resource migration: %w", err)
+		}
+		fillFiniteBudget(&campaign.Budget, scopeBudgets[campaign.ScopeID])
+		data, err := json.Marshal(campaign)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE campaigns SET data = ? WHERE id = ?`, data, record.id); err != nil {
+			return fmt.Errorf("research store: migrate campaign resources: %w", err)
+		}
+	}
+
+	records, err := load(`SELECT kind, id, data FROM research_records WHERE kind IN ('apparatus_manifest', 'worker_job')`, true)
+	if err != nil {
+		return fmt.Errorf("research store: load worker resources for migration: %w", err)
+	}
+	for _, record := range records {
+		var data []byte
+		switch record.kind {
+		case "apparatus_manifest":
+			var manifest domain.ApparatusManifest
+			if err := json.Unmarshal(record.data, &manifest); err != nil {
+				return err
+			}
+			fillFiniteBudget(&manifest.Limits, domain.ResourceBudget{})
+			data, err = json.Marshal(manifest)
+		case "worker_job":
+			var job domain.WorkerJob
+			if err := json.Unmarshal(record.data, &job); err != nil {
+				return err
+			}
+			fillFiniteBudget(&job.Budget, domain.ResourceBudget{})
+			data, err = json.Marshal(job)
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE research_records SET data = ? WHERE kind = ? AND id = ?`, data, record.kind, record.id); err != nil {
+			return fmt.Errorf("research store: migrate worker resources: %w", err)
+		}
+	}
+	return nil
+}
+
+func fillFiniteBudget(budget *domain.ResourceBudget, fallback domain.ResourceBudget) {
+	if budget.MaxWallSeconds <= 0 {
+		budget.MaxWallSeconds = fallback.MaxWallSeconds
+		if budget.MaxWallSeconds <= 0 {
+			budget.MaxWallSeconds = 300
+		}
+	}
+	if budget.MaxMemoryBytes <= 0 {
+		budget.MaxMemoryBytes = fallback.MaxMemoryBytes
+		if budget.MaxMemoryBytes <= 0 {
+			budget.MaxMemoryBytes = 256 << 20
+		}
+	}
+	if budget.MaxCPUSeconds <= 0 {
+		budget.MaxCPUSeconds = fallback.MaxCPUSeconds
+		if budget.MaxCPUSeconds <= 0 {
+			budget.MaxCPUSeconds = budget.MaxWallSeconds
+		}
+	}
+	if budget.MaxDiskBytes <= 0 {
+		budget.MaxDiskBytes = fallback.MaxDiskBytes
+		if budget.MaxDiskBytes <= 0 {
+			budget.MaxDiskBytes = 256 << 20
+		}
+	}
+	if budget.MaxInodes <= 0 {
+		budget.MaxInodes = fallback.MaxInodes
+		if budget.MaxInodes <= 0 {
+			budget.MaxInodes = budget.MaxDiskBytes / 4096
+			if budget.MaxInodes < 1024 {
+				budget.MaxInodes = 1024
+			}
+			if budget.MaxInodes > 1<<20 {
+				budget.MaxInodes = 1 << 20
+			}
+		}
+	}
+	if budget.MaxPIDs <= 0 {
+		budget.MaxPIDs = fallback.MaxPIDs
+		if budget.MaxPIDs <= 0 {
+			budget.MaxPIDs = 32
+		}
+	}
+	if budget.MaxConcurrent <= 0 {
+		budget.MaxConcurrent = fallback.MaxConcurrent
+		if budget.MaxConcurrent <= 0 {
+			budget.MaxConcurrent = 1
+		}
+	}
 }
 
 // CreateScope persists a validated authorization envelope.

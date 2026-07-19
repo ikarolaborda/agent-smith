@@ -2,6 +2,7 @@
 package apparatus
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +24,15 @@ func LoadManifest(path string) (domain.ApparatusManifest, error) {
 		return domain.ApparatusManifest{}, err
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, 1<<20))
+	const maxManifestBytes = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(file, maxManifestBytes+1))
+	if err != nil {
+		return domain.ApparatusManifest{}, fmt.Errorf("apparatus: read manifest: %w", err)
+	}
+	if len(body) > maxManifestBytes {
+		return domain.ApparatusManifest{}, errors.New("apparatus: manifest exceeds 1 MiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var manifest domain.ApparatusManifest
 	if err := decoder.Decode(&manifest); err != nil {
@@ -66,8 +75,8 @@ func ValidateManifest(manifest domain.ApparatusManifest) error {
 			return errors.New("apparatus: invalid environment allowlist")
 		}
 	}
-	if manifest.Limits.MaxWallSeconds <= 0 || manifest.Limits.MaxMemoryBytes <= 0 || manifest.Limits.MaxDiskBytes <= 0 || manifest.Limits.MaxPIDs <= 0 {
-		return errors.New("apparatus: positive wall, memory, disk, and pid limits required")
+	if err := manifest.Limits.Validate(); err != nil {
+		return fmt.Errorf("apparatus: %w", err)
 	}
 	return nil
 }
@@ -117,6 +126,9 @@ func NewJob(manifest domain.ApparatusManifest, request JobRequest) (domain.Worke
 	budget := request.Budget
 	if budget == (domain.ResourceBudget{}) {
 		budget = manifest.Limits
+	}
+	if err := budget.Validate(); err != nil {
+		return domain.WorkerJob{}, fmt.Errorf("apparatus: %w", err)
 	}
 	if exceedsBudget(budget, manifest.Limits) {
 		return domain.WorkerJob{}, errors.New("apparatus: requested budget exceeds manifest limits")
@@ -248,7 +260,7 @@ func containsString(values []string, want string) bool {
 }
 
 func exceedsBudget(request, limit domain.ResourceBudget) bool {
-	return over(request.MaxWallSeconds, limit.MaxWallSeconds) || over(request.MaxMemoryBytes, limit.MaxMemoryBytes) || over(request.MaxCPUSeconds, limit.MaxCPUSeconds) || over(request.MaxDiskBytes, limit.MaxDiskBytes) || over(request.MaxPIDs, limit.MaxPIDs) || request.MaxConcurrent < 0 || limit.MaxConcurrent > 0 && request.MaxConcurrent > limit.MaxConcurrent
+	return over(request.MaxWallSeconds, limit.MaxWallSeconds) || over(request.MaxMemoryBytes, limit.MaxMemoryBytes) || over(request.MaxCPUSeconds, limit.MaxCPUSeconds) || over(request.MaxDiskBytes, limit.MaxDiskBytes) || over(request.MaxInodes, limit.MaxInodes) || over(request.MaxPIDs, limit.MaxPIDs) || request.MaxConcurrent < 0 || limit.MaxConcurrent > 0 && request.MaxConcurrent > limit.MaxConcurrent
 }
 
 func over(request, limit int64) bool { return request < 0 || limit > 0 && request > limit }

@@ -5,7 +5,7 @@ import "testing"
 func TestCapabilityStatusIsTruthfulByDefault(t *testing.T) {
 	s := &Server{}
 	got := s.capabilityStatus()
-	for _, name := range []string{"host_shell", "arbitrary_http", "contained_execution", "coverage_guided_fuzzing", "artifact_persistence", "research_persistence", "authentication"} {
+	for _, name := range []string{"host_shell", "arbitrary_http", "contained_execution", "coverage_guided_fuzzing", "artifact_persistence", "research_persistence", "authentication", "research_cpu_rate_limit", "research_writable_monitor", "research_kernel_storage_quota", "research_full_accounting"} {
 		if enabled, _ := got[name].(bool); enabled {
 			t.Errorf("%s must be false by default: %#v", name, got)
 		}

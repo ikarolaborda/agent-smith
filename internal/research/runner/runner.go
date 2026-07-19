@@ -407,7 +407,24 @@ func (b *Broker) execute(job domain.WorkerJob) {
 	// identities can export artifacts without granting access outside that
 	// private parent.
 	_ = os.Chmod(staging, 0o777)
-	execution, executeErr := b.backend.Execute(jobCtx, job, staging)
+	quotaCtx, quotaCancel := context.WithCancelCause(jobCtx)
+	monitorStop := make(chan struct{})
+	monitorDone, monitorErr := monitorWritableBudget(quotaCtx, quotaCancel, job, staging, monitorStop)
+	if monitorErr != nil {
+		quotaCancel(monitorErr)
+		b.finishFailed(job, run, monitorErr)
+		return
+	}
+	execution, executeErr := b.backend.Execute(quotaCtx, job, staging)
+	close(monitorStop)
+	monitorResult := <-monitorDone
+	quotaCancel(nil)
+	execution.Usage.DiskWrittenBytes = max(execution.Usage.DiskWrittenBytes, monitorResult.peakBytes)
+	execution.Usage.InodesCreated = max(execution.Usage.InodesCreated, monitorResult.peakInodes)
+	if monitorResult.err != nil {
+		b.finishFailedWithUsage(job, run, monitorResult.err, execution.Usage)
+		return
+	}
 	result, collectErr := b.collector.Collect(b.ctx, job, staging, execution, b.assurance)
 	if executeErr != nil && execution.Exit.Reason == "" {
 		execution.Exit.Reason = executeErr.Error()
@@ -447,9 +464,13 @@ func (b *Broker) execute(job domain.WorkerJob) {
 }
 
 func (b *Broker) finishFailed(job domain.WorkerJob, run domain.ExperimentRun, failure error) {
+	b.finishFailedWithUsage(job, run, failure, run.Usage)
+}
+
+func (b *Broker) finishFailedWithUsage(job domain.WorkerJob, run domain.ExperimentRun, failure error, usage domain.ResourceUsage) {
 	now := time.Now().UTC()
 	job.Status, job.UpdatedAt = domain.RunFailed, now
-	run.Status, run.CompletedAt, run.Exit.Reason = domain.RunFailed, &now, failure.Error()
+	run.Status, run.CompletedAt, run.Exit.Reason, run.Usage = domain.RunFailed, &now, failure.Error(), usage
 	_ = b.journal.SaveJobAndRun(context.Background(), job, run)
 	b.publish(resultFromRun(run))
 }
@@ -501,8 +522,8 @@ func validateJob(job domain.WorkerJob) error {
 	if !digestPattern.MatchString(job.ImageDigest) {
 		return fmt.Errorf("%w: exact sha256 image digest required", ErrInvalidJob)
 	}
-	if job.Budget.MaxWallSeconds <= 0 || job.Budget.MaxMemoryBytes <= 0 || job.Budget.MaxPIDs <= 0 || job.Budget.MaxDiskBytes <= 0 {
-		return fmt.Errorf("%w: positive wall, memory, pid, and disk limits required", ErrInvalidJob)
+	if err := job.Budget.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidJob, err)
 	}
 	seenNames, seenContainers := map[string]bool{}, map[string]bool{}
 	for _, mount := range job.Mounts {

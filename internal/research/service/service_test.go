@@ -29,7 +29,7 @@ func TestServiceEnforcesScopeOwnershipBudgetAndEvidenceTransitions(t *testing.T)
 		WorkspaceRoots:     []string{work},
 		AllowedOperations:  []domain.Operation{domain.OperationInspect, domain.OperationFuzz, domain.OperationDisclose},
 		ApprovalOperations: []domain.Operation{domain.OperationFuzz, domain.OperationDisclose},
-		Budget:             domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1024, MaxDiskBytes: 1024, MaxPIDs: 16, MaxConcurrent: 1},
+		Budget:             domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1024, MaxCPUSeconds: 60, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 16, MaxConcurrent: 1},
 		ExpiresAt:          now.Add(time.Hour),
 	})
 	if err != nil {
@@ -77,7 +77,7 @@ func TestApprovalMustBeIndependentAndMatchAction(t *testing.T) {
 		Purpose: "authorized test", TargetRepository: "repo", AllowedRevisions: []string{"abc"}, WorkspaceRoots: []string{work},
 		MemberIDs:         []string{reviewer.ID},
 		AllowedOperations: []domain.Operation{domain.OperationFuzz}, ApprovalOperations: []domain.Operation{domain.OperationFuzz},
-		Budget: domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1024, MaxDiskBytes: 1024, MaxPIDs: 16}, ExpiresAt: now.Add(time.Hour),
+		Budget: domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1024, MaxCPUSeconds: 60, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 16, MaxConcurrent: 1}, ExpiresAt: now.Add(time.Hour),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestFixedWorkspaceRootsCannotBeExpandedByScope(t *testing.T) {
 	operator := domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleOperator}}
 	_, err := svc.CreateScope(ctx, operator, domain.AuthorizationScope{
 		Purpose: "must stay fixed", TargetRepository: "repo", AllowedRevisions: []string{"abc"}, WorkspaceRoots: []string{outside},
-		AllowedOperations: []domain.Operation{domain.OperationInspect}, Budget: domain.ResourceBudget{MaxWallSeconds: 1}, ExpiresAt: time.Now().UTC().Add(time.Hour),
+		AllowedOperations: []domain.Operation{domain.OperationInspect}, Budget: domain.ResourceBudget{MaxWallSeconds: 1, MaxMemoryBytes: 1024, MaxCPUSeconds: 1, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1}, ExpiresAt: time.Now().UTC().Add(time.Hour),
 	})
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("outside fixed root error=%v", err)
@@ -141,7 +141,7 @@ func TestExpiredScopeCannotAuthorizeOrTransition(t *testing.T) {
 	svc.now = func() time.Time { return base }
 	scope, err := svc.CreateScope(ctx, operator, domain.AuthorizationScope{
 		Purpose: "short test", TargetRepository: "repo", AllowedRevisions: []string{"abc"}, WorkspaceRoots: []string{repository.Root()},
-		AllowedOperations: []domain.Operation{domain.OperationInspect}, Budget: domain.ResourceBudget{MaxWallSeconds: 1}, ExpiresAt: base.Add(time.Minute),
+		AllowedOperations: []domain.Operation{domain.OperationInspect}, Budget: domain.ResourceBudget{MaxWallSeconds: 1, MaxMemoryBytes: 1024, MaxCPUSeconds: 1, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1}, ExpiresAt: base.Add(time.Minute),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestUnapprovedOrOutOfScopeJobNeverReachesBroker(t *testing.T) {
 	now := time.Now().UTC()
 	manifest := domain.ApparatusManifest{SchemaVersion: 1, ID: "apparatus", Name: "test", Version: "1", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Engine: "libfuzzer",
 		Sanitizers: []string{"address"}, Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}}, Operations: []domain.Operation{domain.OperationFuzz},
-		Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxDiskBytes: 1024, MaxPIDs: 8}}
+		Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxCPUSeconds: 30, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1}}
 	if err := repository.SaveApparatus(ctx, manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestUnapprovedOrOutOfScopeJobNeverReachesBroker(t *testing.T) {
 		MemberIDs:         []string{reviewer.ID},
 		AllowedOperations: []domain.Operation{domain.OperationFuzz}, ApprovalOperations: []domain.Operation{domain.OperationFuzz},
 		AllowedApparatusIDs: []string{manifest.ID},
-		Budget:              domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxDiskBytes: 1024, MaxPIDs: 8}, ExpiresAt: now.Add(time.Hour),
+		Budget:              domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxCPUSeconds: 30, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1}, ExpiresAt: now.Add(time.Hour),
 	})
 	if err != nil {
 		t.Fatal(err)

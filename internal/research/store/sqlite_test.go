@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -58,8 +59,56 @@ func TestStorePersistsScopeCampaignAndTypedRecords(t *testing.T) {
 		t.Fatalf("run after reopen: %#v, %v", gotRun, err)
 	}
 	var migrations int
-	if err := s.Database().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil || migrations != 1 {
+	if err := s.Database().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil || migrations != 2 {
 		t.Fatalf("migrations=%d err=%v", migrations, err)
+	}
+}
+
+func TestResourceMigrationBackfillsFiniteBudgets(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s := openTestStore(t, root, 0)
+	scope, campaign := seedCampaign(t, s)
+	var scopeData, campaignData []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT data FROM authorization_scopes WHERE id = ?`, scope.ID).Scan(&scopeData); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT data FROM campaigns WHERE id = ?`, campaign.ID).Scan(&campaignData); err != nil {
+		t.Fatal(err)
+	}
+	var oldScope domain.AuthorizationScope
+	var oldCampaign domain.Campaign
+	if err := json.Unmarshal(scopeData, &oldScope); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(campaignData, &oldCampaign); err != nil {
+		t.Fatal(err)
+	}
+	oldScope.Budget.MaxCPUSeconds, oldScope.Budget.MaxInodes, oldScope.Budget.MaxConcurrent = 0, 0, 0
+	oldCampaign.Budget.MaxCPUSeconds, oldCampaign.Budget.MaxInodes, oldCampaign.Budget.MaxConcurrent = 0, 0, 0
+	scopeData, _ = json.Marshal(oldScope)
+	campaignData, _ = json.Marshal(oldCampaign)
+	if _, err := s.db.ExecContext(ctx, `UPDATE authorization_scopes SET data = ? WHERE id = ?`, scopeData, scope.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE campaigns SET data = ? WHERE id = ?`, campaignData, campaign.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = openTestStore(t, root, 0)
+	defer s.Close()
+	migratedScope, err := s.GetScope(ctx, scope.ID)
+	if err != nil || migratedScope.Budget.Validate() != nil || migratedScope.Budget.MaxInodes == 0 {
+		t.Fatalf("scope=%#v err=%v", migratedScope, err)
+	}
+	migratedCampaign, err := s.GetCampaign(ctx, campaign.ID)
+	if err != nil || migratedCampaign.Budget.Validate() != nil || migratedCampaign.Budget.MaxInodes != migratedScope.Budget.MaxInodes {
+		t.Fatalf("campaign=%#v err=%v", migratedCampaign, err)
 	}
 }
 
@@ -218,7 +267,7 @@ func seedCampaign(t *testing.T, s *Store) (domain.AuthorizationScope, domain.Cam
 		SchemaVersion: 1, ID: "scope-1", OperatorID: "operator-1", Purpose: "authorized fixture research",
 		TargetRepository: "https://example.test/owned.git", AllowedRevisions: []string{"main"},
 		WorkspaceRoots: []string{s.Root()}, AllowedOperations: []domain.Operation{domain.OperationInspect, domain.OperationFuzz},
-		Budget:    domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1 << 30, MaxDiskBytes: 1 << 30, MaxPIDs: 64},
+		Budget:    domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1 << 30, MaxCPUSeconds: 60, MaxDiskBytes: 1 << 30, MaxInodes: 4096, MaxPIDs: 64, MaxConcurrent: 1},
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	if err := s.CreateScope(ctx, scope); err != nil {

@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+operation="${1:-}"
+shift || true
+harness=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --harness) harness="${2:-}"; shift 2 ;;
+        --manifest|--revision|--sanitizer) shift 2 ;;
+        *) echo "unsupported containment-probe argument: $1" >&2; exit 64 ;;
+    esac
+done
+if [ "$operation" != "inspect" ]; then
+    echo "containment probe supports inspect only" >&2
+    exit 64
+fi
+
+emit_ok() {
+    jq -n --arg probe "$harness" '{schema_version:1,probe:$probe,contained:true}' > /out/apparatus-inspection.json
+    chmod 0444 /out/apparatus-inspection.json
+}
+
+case "$harness" in
+    containment_network)
+        if curl --fail --silent --show-error --max-time 2 https://example.com/ >/dev/null 2>&1; then
+            echo "network request unexpectedly succeeded" >&2
+            exit 90
+        fi
+        emit_ok
+        ;;
+    containment_mount)
+        if printf 'mutation' > /source/containment-probe-write 2>/dev/null; then
+            echo "read-only source mutation unexpectedly succeeded" >&2
+            exit 91
+        fi
+        emit_ok
+        ;;
+    containment_secrets)
+        if env | grep -E '^(OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|NVD_API_KEY)=' >/dev/null; then
+            echo "control-plane credential leaked into worker" >&2
+            exit 92
+        fi
+        emit_ok
+        ;;
+    containment_cross_campaign)
+        if find / -xdev -name agent-smith-cross-campaign-secret -print 2>/dev/null | grep . >/dev/null; then
+            echo "unmounted cross-campaign marker became visible" >&2
+            exit 94
+        fi
+        emit_ok
+        ;;
+    containment_device)
+        if mknod /out/worker-device c 1 3 2>/dev/null; then
+            echo "device creation unexpectedly succeeded" >&2
+            exit 93
+        fi
+        emit_ok
+        ;;
+    containment_orphan)
+        sleep 300 &
+        emit_ok
+        ;;
+    containment_symlink)
+        ln -s /etc/passwd /out/apparatus-inspection.json
+        ;;
+    containment_disk)
+        dd if=/dev/zero of=/out/apparatus-inspection.json bs=4096 count=512 status=none
+        ;;
+    containment_inodes)
+        index=0
+        while [ "$index" -lt 512 ]; do
+            : > "/out/probe-$index"
+            index="$((index + 1))"
+        done
+        ;;
+    *)
+        echo "unknown containment probe" >&2
+        exit 64
+        ;;
+esac

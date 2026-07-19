@@ -26,7 +26,7 @@ func TestEvidenceOwnedWorkflowFromBranchReviewThroughDisclosure(t *testing.T) {
 		TargetRepository: "repo", AllowedRevisions: []string{"main", "stable"}, WorkspaceRoots: []string{repository.Root()},
 		AllowedOperations:  []domain.Operation{domain.OperationRegressionTest, domain.OperationDraftReport, domain.OperationDisclose},
 		ApprovalOperations: []domain.Operation{domain.OperationRegressionTest, domain.OperationDraftReport, domain.OperationDisclose},
-		Budget:             domain.ResourceBudget{MaxWallSeconds: 60}, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		Budget:             domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 60, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 16, MaxConcurrent: 1}, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	if err := repository.CreateScope(ctx, scope); err != nil {
 		t.Fatal(err)
@@ -182,7 +182,7 @@ func TestAcquireComparisonTargetRetainsAlternateRevisionWithoutReplacingPrimary(
 	if err := svc.ConfigureInternalRoot(internalRoot); err != nil {
 		t.Fatal(err)
 	}
-	scope := domain.AuthorizationScope{SchemaVersion: 1, ID: "scope-alt", OperatorID: operator.ID, Purpose: "supported revision", TargetRepository: "repo", AllowedRevisions: []string{"main", "stable"}, WorkspaceRoots: []string{sourceRoot}, AllowedOperations: []domain.Operation{domain.OperationAcquire}, Budget: domain.ResourceBudget{MaxDiskBytes: 1 << 20}, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	scope := domain.AuthorizationScope{SchemaVersion: 1, ID: "scope-alt", OperatorID: operator.ID, Purpose: "supported revision", TargetRepository: "repo", AllowedRevisions: []string{"main", "stable"}, WorkspaceRoots: []string{sourceRoot}, AllowedOperations: []domain.Operation{domain.OperationAcquire}, Budget: domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 60, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 16, MaxConcurrent: 1}, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
 	if err := repository.CreateScope(ctx, scope); err != nil {
 		t.Fatal(err)
 	}

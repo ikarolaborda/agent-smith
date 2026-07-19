@@ -19,7 +19,9 @@ type Action struct {
 	DestinationHost string
 	WallSeconds     int64
 	MemoryBytes     int64
+	CPUSeconds      int64
 	DiskBytes       int64
+	Inodes          int64
 	PIDs            int64
 	ApprovalID      string
 }
@@ -41,6 +43,9 @@ func (s AuthorizationScope) Validate(now time.Time) error {
 	}
 	if len(s.AllowedOperations) == 0 {
 		return errors.New("research: scope must allow at least one operation")
+	}
+	if err := s.Budget.Validate(); err != nil {
+		return fmt.Errorf("research: scope %w", err)
 	}
 	allowed := make(map[Operation]bool, len(s.AllowedOperations))
 	for _, operation := range s.AllowedOperations {
@@ -99,7 +104,7 @@ func (s AuthorizationScope) Authorize(action Action, now time.Time) PolicyDecisi
 	if action.DestinationHost != "" && !hostAllowed(action.DestinationHost, s.AllowedDomains) {
 		return deny("research: destination host is outside egress allowlist")
 	}
-	if exceeds(action.WallSeconds, s.Budget.MaxWallSeconds) || exceeds(action.MemoryBytes, s.Budget.MaxMemoryBytes) || exceeds(action.DiskBytes, s.Budget.MaxDiskBytes) || exceeds(action.PIDs, s.Budget.MaxPIDs) {
+	if exceeds(action.WallSeconds, s.Budget.MaxWallSeconds) || exceeds(action.MemoryBytes, s.Budget.MaxMemoryBytes) || exceeds(action.CPUSeconds, s.Budget.MaxCPUSeconds) || exceeds(action.DiskBytes, s.Budget.MaxDiskBytes) || exceeds(action.Inodes, s.Budget.MaxInodes) || exceeds(action.PIDs, s.Budget.MaxPIDs) {
 		return deny("research: requested resources exceed authorization budget")
 	}
 	needsApproval := containsOperation(s.ApprovalOperations, action.Operation)
@@ -107,6 +112,15 @@ func (s AuthorizationScope) Authorize(action Action, now time.Time) PolicyDecisi
 		return PolicyDecision{ApprovalRequired: true, Reason: "research: human approval required"}
 	}
 	return PolicyDecision{Allowed: true, Reason: "authorized"}
+}
+
+// Validate rejects incomplete resource envelopes. A zero limit is not treated
+// as unlimited because every research worker must have a finite ceiling.
+func (b ResourceBudget) Validate() error {
+	if b.MaxWallSeconds <= 0 || b.MaxMemoryBytes <= 0 || b.MaxCPUSeconds <= 0 || b.MaxDiskBytes <= 0 || b.MaxInodes <= 0 || b.MaxPIDs <= 0 || b.MaxConcurrent <= 0 {
+		return errors.New("resource budget requires positive wall, memory, CPU, disk, inode, PID, and concurrency limits")
+	}
+	return nil
 }
 
 func principalMay(p Principal, op Operation) bool {

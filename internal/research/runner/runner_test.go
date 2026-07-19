@@ -188,6 +188,86 @@ func TestInvalidJobFailsClosed(t *testing.T) {
 	}
 }
 
+func TestBrokerCancelsHostileWritableFootprints(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(*domain.WorkerJob)
+		write      func(string) error
+		wantReason string
+	}{
+		{
+			name: "disk", configure: func(job *domain.WorkerJob) { job.Budget.MaxDiskBytes = 16 },
+			write: func(staging string) error {
+				return os.WriteFile(filepath.Join(staging, "crash-budget"), []byte(strings.Repeat("x", 64)), 0o600)
+			},
+			wantReason: "bytes exceeds",
+		},
+		{
+			name: "inodes", configure: func(job *domain.WorkerJob) { job.Budget.MaxInodes = 2 },
+			write: func(staging string) error {
+				for index := 0; index < 3; index++ {
+					if err := os.WriteFile(filepath.Join(staging, fmt.Sprintf("crash-%d", index)), nil, 0o600); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+			wantReason: "inodes exceeds",
+		},
+		{
+			name: "symlink", configure: func(_ *domain.WorkerJob) {},
+			write: func(staging string) error {
+				target := filepath.Join(staging, "crash-target")
+				if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+					return err
+				}
+				return os.Symlink(target, filepath.Join(staging, "crash-link"))
+			},
+			wantReason: "contains symlink",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			repository, campaign := runnerStore(t)
+			defer repository.Close()
+			backend := &FakeBackend{ExecuteFunc: func(ctx context.Context, _ domain.WorkerJob, staging string) (Execution, error) {
+				if err := test.write(staging); err != nil {
+					return Execution{}, err
+				}
+				<-ctx.Done()
+				return Execution{Status: domain.RunFailed}, ctx.Err()
+			}}
+			broker, err := NewBroker(Options{Backend: backend, Journal: repository, Artifacts: repository, StagingRoot: filepath.Join(repository.Root(), "staging")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := broker.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			defer broker.Close()
+			job := validJob(t, campaign)
+			test.configure(&job)
+			run, err := broker.Submit(ctx, job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			result, err := broker.Wait(waitCtx, run.ID)
+			if err != nil || result.Status != domain.RunFailed || !strings.Contains(result.Exit.Reason, test.wantReason) {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			if test.name == "disk" && result.ResourceUsage.DiskWrittenBytes < 64 {
+				t.Fatalf("disk peak was not retained: %#v", result.ResourceUsage)
+			}
+			if test.name == "inodes" && result.ResourceUsage.InodesCreated < 3 {
+				t.Fatalf("inode peak was not retained: %#v", result.ResourceUsage)
+			}
+		})
+	}
+}
+
 func TestDockerBackendPreflightAndHardenedArgv(t *testing.T) {
 	executor := &recordingExecutor{digest: testDigest, rootless: true, seccomp: true, cgroupVersion: 2, runtimes: `{"runsc":{}}`}
 	backend := NewDockerBackend(DockerOptions{Executor: executor, RequireRootless: true, Runtime: "runsc", OutputLimit: 4})
@@ -197,14 +277,14 @@ func TestDockerBackendPreflightAndHardenedArgv(t *testing.T) {
 	}
 	job := domain.WorkerJob{
 		RunID: "run-1", CampaignID: "campaign", ScopeID: "scope", Operation: domain.OperationFuzz, ImageDigest: testDigest,
-		Arguments: map[string]string{"harness": "parser"}, Budget: domain.ResourceBudget{MaxMemoryBytes: 1024, MaxPIDs: 8},
+		Arguments: map[string]string{"harness": "parser"}, Budget: domain.ResourceBudget{MaxWallSeconds: 10, MaxMemoryBytes: 1024, MaxCPUSeconds: 10, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1},
 	}
 	execution, err := backend.Execute(context.Background(), job, t.TempDir())
 	if err != nil || execution.Status != domain.RunCompleted || !execution.StdoutTruncated {
 		t.Fatalf("execution=%#v err=%v", execution, err)
 	}
 	argv := strings.Join(executor.lastRun(), " ")
-	for _, required := range []string{"--network none", "--read-only", "--cap-drop ALL", "no-new-privileges", "--runtime runsc", testDigest, "/apparatus/dispatch fuzz", "--harness parser"} {
+	for _, required := range []string{"--network none", "--read-only", "--cap-drop ALL", "no-new-privileges", "--cpus 1.000000", "core=0:0", "nofile=1024:1024", "fsize=1024:1024", "--runtime runsc", testDigest, "/apparatus/dispatch fuzz", "--harness parser"} {
 		if !strings.Contains(argv, required) {
 			t.Fatalf("argv missing %q: %s", required, argv)
 		}
@@ -293,7 +373,7 @@ func runnerStore(t *testing.T) (*store.Store, domain.Campaign) {
 	scope := domain.AuthorizationScope{
 		SchemaVersion: 1, ID: "scope", OperatorID: "operator", Purpose: "test", TargetRepository: "repo",
 		AllowedRevisions: []string{"abc"}, WorkspaceRoots: []string{repository.Root()}, AllowedOperations: []domain.Operation{domain.OperationFuzz},
-		Budget: domain.ResourceBudget{MaxWallSeconds: 10, MaxMemoryBytes: 1 << 20, MaxDiskBytes: 1 << 20, MaxPIDs: 16}, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		Budget: domain.ResourceBudget{MaxWallSeconds: 10, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 10, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 16, MaxConcurrent: 1}, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	if err := repository.CreateScope(ctx, scope); err != nil {
 		repository.Close()
@@ -314,6 +394,6 @@ func validJob(t *testing.T, campaign domain.Campaign) domain.WorkerJob {
 		CampaignID: campaign.ID, ScopeID: campaign.ScopeID, Operation: domain.OperationFuzz, ImageDigest: testDigest,
 		AuditCorrelationID: "correlation", Mounts: []domain.JobMount{{Name: "source", HostPath: mount, ContainerPath: "/source", ReadOnly: true}},
 		ArtifactRules: []domain.ArtifactRule{{Role: "crashing_input", MediaType: "application/octet-stream", Glob: "crash-*", MaxCount: 2, MaxBytes: 1024}},
-		Budget:        domain.ResourceBudget{MaxWallSeconds: 5, MaxMemoryBytes: 1 << 20, MaxDiskBytes: 1 << 20, MaxPIDs: 16},
+		Budget:        domain.ResourceBudget{MaxWallSeconds: 5, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 5, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 16, MaxConcurrent: 1},
 	}
 }
