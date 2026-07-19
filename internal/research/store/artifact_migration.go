@@ -180,7 +180,9 @@ func (s *Store) rotateArtifactBlob(path string, blob storedArtifactBlob, current
 }
 
 func (s *Store) listArtifactBlobs(ctx context.Context) ([]storedArtifactBlob, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT content_id, storage_path, size FROM artifacts GROUP BY content_id, storage_path, size ORDER BY content_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT content_id, storage_path, size FROM artifacts
+		WHERE COALESCE(json_extract(data, '$.purged_at'), '') = ''
+		GROUP BY content_id, storage_path, size ORDER BY content_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +203,9 @@ func (s *Store) resolveStoredBlob(blob storedArtifactBlob) (string, error) {
 		return "", errors.New("research store: invalid stored artifact identity")
 	}
 	hexDigest := strings.TrimPrefix(blob.contentID, "sha256:")
+	if decoded, err := hex.DecodeString(hexDigest); err != nil || len(decoded) != sha256.Size {
+		return "", errors.New("research store: invalid stored artifact identity")
+	}
 	expectedRelative := filepath.Join("blobs", hexDigest[:2], hexDigest)
 	if filepath.Clean(filepath.FromSlash(blob.storagePath)) != expectedRelative {
 		return "", errors.New("research store: stored artifact path mismatch")

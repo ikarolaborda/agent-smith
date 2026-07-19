@@ -151,6 +151,7 @@ type ResearchModeOptions struct {
 	MinimumReproductions   int
 	MaxArtifactBytes       int64
 	ArtifactEncryptionKeys [][]byte
+	ArtifactRetention      time.Duration
 	RunnerBackend          runner.Backend
 	GlobalConcurrency      int
 	CampaignConcurrency    int

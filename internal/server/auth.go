@@ -71,7 +71,7 @@ func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*resea
 		seenPrincipals[credential.Principal.ID] = true
 		runtime.credentials = append(runtime.credentials, credentialHash{digest: sha256.Sum256([]byte(credential.Token)), principal: credential.Principal})
 	}
-	repository, err := store.Open(ctx, store.Config{Root: opts.DataDir, MaxArtifactBytes: opts.MaxArtifactBytes, ArtifactEncryptionKeys: opts.ArtifactEncryptionKeys})
+	repository, err := store.Open(ctx, store.Config{Root: opts.DataDir, MaxArtifactBytes: opts.MaxArtifactBytes, ArtifactEncryptionKeys: opts.ArtifactEncryptionKeys, ArtifactRetention: opts.ArtifactRetention})
 	if err != nil {
 		return nil, err
 	}

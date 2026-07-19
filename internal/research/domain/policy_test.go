@@ -66,6 +66,22 @@ func TestUnknownOperationsFailClosed(t *testing.T) {
 	}
 }
 
+func TestArtifactPurgeOperationIsAdminOnly(t *testing.T) {
+	scope := scopeFixture(t.TempDir())
+	scope.AllowedOperations = append(scope.AllowedOperations, OperationPurgeArtifact)
+	action := Action{Operation: OperationPurgeArtifact, Repository: scope.TargetRepository, Revision: scope.AllowedRevisions[0]}
+	for _, role := range []Role{RoleViewer, RoleAnalyst, RoleOperator, RoleReviewer} {
+		action.Principal = Principal{ID: string(role), Roles: []Role{role}}
+		if decision := scope.Authorize(action, time.Now().UTC()); decision.Allowed {
+			t.Fatalf("%s authorized artifact purge: %#v", role, decision)
+		}
+	}
+	action.Principal = Principal{ID: "admin", Roles: []Role{RoleAdmin}}
+	if decision := scope.Authorize(action, time.Now().UTC()); !decision.Allowed {
+		t.Fatalf("admin artifact purge denied: %#v", decision)
+	}
+}
+
 func TestScopeRejectsIncompleteAndExceededCPUOrInodeBudgets(t *testing.T) {
 	scope := scopeFixture(t.TempDir())
 	scope.Budget.MaxInodes = 0

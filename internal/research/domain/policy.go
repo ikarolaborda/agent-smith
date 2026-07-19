@@ -133,7 +133,7 @@ func principalMay(p Principal, op Operation) bool {
 				return true
 			}
 		case RoleOperator:
-			if op != OperationDisclose {
+			if op != OperationDisclose && op != OperationPurgeArtifact {
 				return true
 			}
 		case RoleAnalyst:

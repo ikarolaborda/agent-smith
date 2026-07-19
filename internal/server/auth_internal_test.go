@@ -74,7 +74,7 @@ func TestResearchModeAuthenticationAndFixedWorkspaceRoots(t *testing.T) {
 		t.Fatalf("workspace=%q want %q", got, child)
 	}
 	capabilities := srv.capabilityStatus()
-	for _, key := range []string{"authentication", "research_mode", "artifact_persistence", "research_persistence", "research_artifact_encryption"} {
+	for _, key := range []string{"authentication", "research_mode", "artifact_persistence", "research_persistence", "research_artifact_encryption", "research_artifact_retention"} {
 		if capabilities[key] != true {
 			t.Fatalf("capability %s=%v", key, capabilities[key])
 		}

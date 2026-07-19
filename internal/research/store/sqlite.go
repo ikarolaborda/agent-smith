@@ -15,13 +15,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	_ "modernc.org/sqlite"
 )
 
-const defaultArtifactLimit int64 = 256 << 20
+const (
+	defaultArtifactLimit     int64 = 256 << 20
+	DefaultArtifactRetention       = 90 * 24 * time.Hour
+	MinimumArtifactRetention       = 24 * time.Hour
+	MaximumArtifactRetention       = 10 * 365 * 24 * time.Hour
+)
 
 var (
 	// ErrNotFound identifies a missing durable research object.
@@ -30,6 +36,10 @@ var (
 	ErrVersionConflict = errors.New("research store: version conflict")
 	// ErrArtifactTooLarge identifies evidence exceeding the ingestion limit.
 	ErrArtifactTooLarge = errors.New("research store: artifact exceeds size limit")
+	// ErrArtifactPurged identifies an immutable tombstone whose bytes are no longer readable.
+	ErrArtifactPurged = errors.New("research store: artifact has been purged")
+	// ErrRetentionActive identifies evidence whose minimum custody period has not elapsed.
+	ErrRetentionActive = errors.New("research store: artifact retention period is active")
 )
 
 // Config controls the private on-disk research store.
@@ -37,6 +47,7 @@ type Config struct {
 	Root                   string
 	MaxArtifactBytes       int64
 	ArtifactEncryptionKeys [][]byte
+	ArtifactRetention      time.Duration
 }
 
 // Store owns the metadata database and artifact directory.
@@ -47,6 +58,9 @@ type Store struct {
 	maxArtifactBytes    int64
 	artifactKeys        map[string][]byte
 	activeArtifactKeyID string
+	artifactRetention   time.Duration
+	artifactMu          sync.RWMutex
+	instanceLock        *storeFileLock
 }
 
 // Open initializes or migrates a private research store.
@@ -71,11 +85,16 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if err := privateDir(filepath.Join(artifactRoot, "tmp")); err != nil {
 		return nil, err
 	}
+	instanceLock, err := acquireStoreFileLock(filepath.Join(root, ".custody.lock"))
+	if err != nil {
+		return nil, err
+	}
 
 	dbPath := filepath.Join(root, "research.sqlite")
 	dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		instanceLock.Close()
 		return nil, fmt.Errorf("research store: open database: %w", err)
 	}
 	// A single embedded writer makes audit sequencing and aggregate updates
@@ -83,28 +102,56 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
+		instanceLock.Close()
 		return nil, fmt.Errorf("research store: ping database: %w", err)
 	}
 	if err := os.Chmod(dbPath, 0o600); err != nil {
 		db.Close()
+		instanceLock.Close()
 		return nil, fmt.Errorf("research store: protect database: %w", err)
 	}
 
 	artifactKeys, activeKeyID, err := prepareArtifactKeys(cfg.ArtifactEncryptionKeys)
 	if err != nil {
 		db.Close()
+		instanceLock.Close()
 		return nil, err
 	}
-	s := &Store{db: db, root: root, artifactRoot: artifactRoot, maxArtifactBytes: cfg.MaxArtifactBytes, artifactKeys: artifactKeys, activeArtifactKeyID: activeKeyID}
+	if cfg.ArtifactRetention < 0 {
+		db.Close()
+		instanceLock.Close()
+		return nil, errors.New("research store: artifact retention cannot be negative")
+	}
+	if cfg.ArtifactRetention == 0 {
+		cfg.ArtifactRetention = DefaultArtifactRetention
+	}
+	if cfg.ArtifactRetention < MinimumArtifactRetention || cfg.ArtifactRetention > MaximumArtifactRetention {
+		db.Close()
+		instanceLock.Close()
+		return nil, errors.New("research store: artifact retention must be between 24 hours and 10 years")
+	}
+	s := &Store{db: db, root: root, artifactRoot: artifactRoot, maxArtifactBytes: cfg.MaxArtifactBytes, artifactKeys: artifactKeys, activeArtifactKeyID: activeKeyID, artifactRetention: cfg.ArtifactRetention, instanceLock: instanceLock}
 	if s.maxArtifactBytes <= 0 {
 		s.maxArtifactBytes = defaultArtifactLimit
 	}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
+		instanceLock.Close()
 		return nil, err
 	}
 	if err := s.migrateArtifactEncryption(ctx); err != nil {
 		db.Close()
+		instanceLock.Close()
+		return nil, err
+	}
+	if err := s.migrateArtifactRetention(ctx); err != nil {
+		db.Close()
+		instanceLock.Close()
+		return nil, err
+	}
+	if err := s.completeApprovedArtifactPurges(ctx); err != nil {
+		db.Close()
+		instanceLock.Close()
 		return nil, err
 	}
 	return s, nil
@@ -121,7 +168,14 @@ func privateDir(path string) error {
 }
 
 // Close flushes and closes the metadata database.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	databaseErr := s.db.Close()
+	lockErr := s.instanceLock.Close()
+	if databaseErr != nil {
+		return databaseErr
+	}
+	return lockErr
+}
 
 // Root returns the absolute private store root.
 func (s *Store) Root() string { return s.root }
@@ -1056,6 +1110,8 @@ func (s *Store) ListWorkerJobsByStatus(ctx context.Context, statuses ...domain.R
 
 // PutArtifact streams evidence into the bounded content-addressed store.
 func (s *Store) PutArtifact(ctx context.Context, metadata domain.Artifact, source io.Reader) (domain.Artifact, error) {
+	s.artifactMu.Lock()
+	defer s.artifactMu.Unlock()
 	if metadata.ID == "" {
 		metadata.ID = newID("artifact")
 	}
@@ -1065,6 +1121,11 @@ func (s *Store) PutArtifact(ctx context.Context, metadata domain.Artifact, sourc
 	if metadata.CreatedAt.IsZero() {
 		metadata.CreatedAt = time.Now().UTC()
 	}
+	metadata.RetainUntil = time.Now().UTC().Add(s.artifactRetention)
+	metadata.PurgedAt = nil
+	metadata.PurgeApprovalID = ""
+	metadata.PurgeReason = ""
+	metadata.BlobDeletedAt = nil
 	tmp, err := os.CreateTemp(filepath.Join(s.artifactRoot, "tmp"), ".ingest-*")
 	if err != nil {
 		return metadata, fmt.Errorf("research store: create artifact temp: %w", err)
@@ -1152,7 +1213,7 @@ func copyBounded(file *os.File, digest hash.Hash, source io.Reader, limit int64)
 	return written, nil
 }
 
-// GetArtifact loads immutable artifact metadata.
+// GetArtifact loads content identity and monotonic custody metadata.
 func (s *Store) GetArtifact(ctx context.Context, id string) (domain.Artifact, error) {
 	var data []byte
 	err := s.db.QueryRowContext(ctx, `SELECT data FROM artifacts WHERE id = ?`, id).Scan(&data)
@@ -1167,15 +1228,28 @@ func (s *Store) GetArtifact(ctx context.Context, id string) (domain.Artifact, er
 // authenticated once before return and decrypted again as the caller reads;
 // plaintext is never written to a temporary file.
 func (s *Store) OpenArtifact(ctx context.Context, id string) (domain.Artifact, io.ReadCloser, error) {
+	s.artifactMu.RLock()
+	releaseLock := true
+	defer func() {
+		if releaseLock {
+			s.artifactMu.RUnlock()
+		}
+	}()
 	metadata, err := s.GetArtifact(ctx, id)
 	if err != nil {
 		return metadata, nil, err
+	}
+	if metadata.PurgedAt != nil {
+		return metadata, nil, ErrArtifactPurged
 	}
 	expectedPrefix := "sha256:"
 	if !strings.HasPrefix(metadata.ContentID, expectedPrefix) || len(metadata.ContentID) != len(expectedPrefix)+sha256.Size*2 {
 		return metadata, nil, errors.New("research store: invalid artifact content id")
 	}
 	hexDigest := strings.TrimPrefix(metadata.ContentID, expectedPrefix)
+	if decoded, err := hex.DecodeString(hexDigest); err != nil || len(decoded) != sha256.Size {
+		return metadata, nil, errors.New("research store: invalid artifact content id")
+	}
 	expectedRelative := filepath.Join("blobs", hexDigest[:2], hexDigest)
 	if filepath.Clean(filepath.FromSlash(metadata.StoragePath)) != expectedRelative {
 		return metadata, nil, errors.New("research store: artifact path does not match content id")
@@ -1205,14 +1279,28 @@ func (s *Store) OpenArtifact(ctx context.Context, id string) (domain.Artifact, i
 		return metadata, nil, err
 	}
 	if scheme == "" {
-		return metadata, file, nil
+		releaseLock = false
+		return metadata, &artifactReadCloser{ReadCloser: file, unlock: s.artifactMu.RUnlock}, nil
 	}
 	reader, _, err := newEncryptedArtifactReader(file, metadata.Size, metadata.ContentID, s.artifactKeys)
 	if err != nil {
 		file.Close()
 		return metadata, nil, err
 	}
-	return metadata, reader, nil
+	releaseLock = false
+	return metadata, &artifactReadCloser{ReadCloser: reader, unlock: s.artifactMu.RUnlock}, nil
+}
+
+type artifactReadCloser struct {
+	io.ReadCloser
+	unlock func()
+	once   sync.Once
+}
+
+func (reader *artifactReadCloser) Close() error {
+	err := reader.ReadCloser.Close()
+	reader.once.Do(reader.unlock)
+	return err
 }
 
 // AppendAudit adds one tamper-evident event to the global event chain.

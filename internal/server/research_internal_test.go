@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,7 +26,9 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
+	"github.com/ikarolaborda/agent-smith/internal/research/service"
 	"github.com/ikarolaborda/agent-smith/internal/research/sourcefetch"
+	"github.com/ikarolaborda/agent-smith/internal/research/store"
 )
 
 const reviewerToken = "reviewer-token-0123456789-abcdef-0003"
@@ -99,6 +102,7 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 		ResearchMode: &ResearchModeOptions{
 			Enabled: true, DataDir: filepath.Join(root, "state"), WorkspaceRoots: []string{workspace},
 			ArtifactEncryptionKeys: [][]byte{bytes.Repeat([]byte{0x5a}, 32)},
+			ArtifactRetention:      store.MinimumArtifactRetention,
 			Credentials: []ResearchCredential{
 				{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}},
 				{Token: reviewerToken, Principal: domain.Principal{ID: "reviewer", Roles: []domain.Role{domain.RoleReviewer}}},
@@ -124,8 +128,8 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 	}
 	scopeRequest := domain.AuthorizationScope{
 		Purpose: "authorized API test", MemberIDs: []string{"reviewer"}, TargetRepository: "repo", AllowedRevisions: []string{"abc"},
-		WorkspaceRoots: []string{workspace}, AllowedOperations: []domain.Operation{domain.OperationInspect, domain.OperationFuzz},
-		ApprovalOperations: []domain.Operation{domain.OperationFuzz}, AllowedApparatusIDs: []string{manifest.ID},
+		WorkspaceRoots: []string{workspace}, AllowedOperations: []domain.Operation{domain.OperationInspect, domain.OperationFuzz, domain.OperationPurgeArtifact},
+		ApprovalOperations: []domain.Operation{domain.OperationFuzz, domain.OperationPurgeArtifact}, AllowedApparatusIDs: []string{manifest.ID},
 		Budget: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxCPUSeconds: 30, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1}, ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}
 	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/scopes", operatorToken, scopeRequest)
@@ -163,6 +167,14 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	artifact.RetainUntil = time.Now().UTC().Add(-time.Second)
+	artifactData, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.research.store.Database().ExecContext(t.Context(), `UPDATE artifacts SET data = ? WHERE id = ?`, artifactData, artifact.ID); err != nil {
+		t.Fatal(err)
+	}
 	rawArtifact, err := os.ReadFile(filepath.Join(srv.research.store.Root(), "artifacts", filepath.FromSlash(artifact.StoragePath)))
 	if err != nil || bytes.Contains(rawArtifact, []byte("boom")) || artifact.Encryption == "" || artifact.EncryptionKeyID == "" {
 		t.Fatalf("artifact was not encrypted at rest: metadata=%#v raw=%q err=%v", artifact, rawArtifact, err)
@@ -186,6 +198,44 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 	}
 	if response = researchJSONRequest(srv, http.MethodGet, "/v1/research/audit/verify", operatorToken, nil); response.Code != http.StatusOK {
 		t.Fatalf("audit status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns/"+campaign.ID+"/transition", operatorToken, map[string]any{"state": domain.CampaignCancelled})
+	if response.Code != http.StatusOK {
+		t.Fatalf("terminal transition status=%d body=%s", response.Code, response.Body.String())
+	}
+	correlationID := service.ArtifactPurgeCorrelation(artifact.ID)
+	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns/"+campaign.ID+"/approvals", operatorToken, map[string]any{
+		"operation": domain.OperationPurgeArtifact, "correlation_id": correlationID, "reason": "retention elapsed and backup policy reviewed",
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("purge approval status=%d body=%s", response.Code, response.Body.String())
+	}
+	var approval domain.Approval
+	if err := json.Unmarshal(response.Body.Bytes(), &approval); err != nil {
+		t.Fatal(err)
+	}
+	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/approvals/"+approval.ID+"/decision", reviewerToken, map[string]any{
+		"approved": true, "reason": "independent custody review complete",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("purge decision status=%d body=%s", response.Code, response.Body.String())
+	}
+	purgeRequest := map[string]any{"approval_id": approval.ID, "reason": "execute approved lifecycle cleanup"}
+	if response = researchJSONRequest(srv, http.MethodPost, "/v1/research/artifacts/"+artifact.ID+"/purge", reviewerToken, purgeRequest); response.Code != http.StatusForbidden {
+		t.Fatalf("reviewer purge status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/artifacts/"+artifact.ID+"/purge", operatorToken, purgeRequest)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"purged_at"`) || !strings.Contains(response.Body.String(), `"blob_deleted_at"`) || strings.Contains(response.Body.String(), `"storage_path":"blobs`) {
+		t.Fatalf("admin purge status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response = researchJSONRequest(srv, http.MethodGet, "/v1/research/artifacts/"+artifact.ID+"?download=1", reviewerToken, nil); response.Code != http.StatusGone {
+		t.Fatalf("purged download status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, err := os.Lstat(filepath.Join(srv.research.store.Root(), "artifacts", filepath.FromSlash(artifact.StoragePath))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("purged encrypted blob remains: %v", err)
+	}
+	if response = researchJSONRequest(srv, http.MethodGet, "/v1/research/audit/verify", operatorToken, nil); response.Code != http.StatusOK {
+		t.Fatalf("post-purge audit status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

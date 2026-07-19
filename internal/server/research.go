@@ -576,6 +576,23 @@ func (s *Server) handleResearchRun(w http.ResponseWriter, r *http.Request, princ
 }
 
 func (s *Server) handleResearchArtifact(w http.ResponseWriter, r *http.Request, principal domain.Principal, rest []string) {
+	if len(rest) == 2 && rest[1] == "purge" && r.Method == http.MethodPost {
+		var request struct {
+			ApprovalID string `json:"approval_id"`
+			Reason     string `json:"reason"`
+		}
+		if !decodeJSONRequest(w, r, &request, maxResearchBodyBytes) {
+			return
+		}
+		artifact, err := s.research.service.PurgeArtifact(r.Context(), principal, rest[0], request.ApprovalID, request.Reason)
+		if err != nil {
+			s.writeResearchError(w, err)
+			return
+		}
+		artifact.StoragePath = ""
+		writeJSON(w, http.StatusOK, artifact)
+		return
+	}
 	if len(rest) != 1 || r.Method != http.MethodGet {
 		writeError(w, http.StatusNotFound, "not_found", "artifact route not found")
 		return
@@ -715,6 +732,10 @@ func (s *Server) writeResearchError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, store.ErrArtifactPurged):
+		writeError(w, http.StatusGone, "artifact_purged", err.Error())
+	case errors.Is(err, store.ErrRetentionActive):
+		writeError(w, http.StatusConflict, "retention_active", err.Error())
 	case errors.Is(err, service.ErrForbidden):
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 	case strings.Contains(err.Error(), "runner unavailable"), strings.Contains(err.Error(), "broker not running"):

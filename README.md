@@ -85,7 +85,8 @@ chmod 600 .agent-smith-artifact.key
 ./bin/agent --serve --research-mode \
   --workspace /absolute/path/to/authorized/project \
   --research-workspace-roots /absolute/path/to/authorized/project \
-  --research-artifact-keys .agent-smith-artifact.key
+  --research-artifact-keys .agent-smith-artifact.key \
+  --research-artifact-retention 2160h
 ```
 
 The first file in `--research-artifact-keys` is the active AES-256 key; later
@@ -101,6 +102,21 @@ base images must be exact SHA-256 identities. Build the first libFuzzer
 apparatus with `BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 apparatus/native-clang/build-image.sh`,
 register the generated manifest through `POST /v1/research/apparatuses`, then
 include its ID in an `AuthorizationScope`.
+
+Artifact retention defaults to 90 days and is constrained to 24 hours through
+10 years. It is a minimum custody deadline, not automatic deletion. Purge is
+available only after the campaign is terminal: request a `purge_artifact`
+operation that the original scope lists in both `allowed_operations` and
+`approval_operations`, bind its correlation to `artifact-purge:<artifact-id>`,
+obtain an independent reviewer/admin decision, then have an admin call
+`POST /v1/research/artifacts/<artifact-id>/purge` with that approval ID and a
+reason within 24 hours of the decision. The metadata and hash-chained audit
+trail remain as an immutable tombstone. A deduplicated blob remains until every
+logical reference is approved for purge, and active downloads block deletion.
+Only one process may hold a custody directory; a second server fails startup on
+the OS-backed lock rather than racing migration or deletion.
+Filesystem unlink does not guarantee physical erasure on SSD, copy-on-write,
+snapshot, or backup media; deployment policy must cover those copies.
 
 The opt-in real-program calibration adapter is under `apparatus/libpng-known-bug`.
 After capturing clean source trees at the exact revisions documented there,
@@ -183,7 +199,7 @@ These live in `pkg/prompt` and are covered by tests that fail if any directive i
 | Agentic tools | `file_read` and `read_dir` always on; `file_write` / `file_edit` sandboxed behind `--workspace`; structured contained `run` behind `--workspace --allow-exec`. No host shell or arbitrary model-controlled HTTP tool. |
 | Embeddings | OpenAI `text-embedding-3-small`, Ollama `nomic-embed-text`. |
 | Web UI | React + Vite + react-bootstrap SPA embedded via `go:embed`. Per-conversation provider/model picker, cluster-mode indicator, markdown + code highlighting, scroll-contained long messages and wide tables. |
-| Research control plane | Authenticated scopes/campaigns/approvals, SQLite metadata, SHA-256 artifacts, hash-chained audit events, typed runner v2, conservative triage/novelty/fix/report gates, and campaign UI. |
+| Research control plane | Authenticated scopes/campaigns/approvals, encrypted SHA-256 artifact custody with retention/purge tombstones, hash-chained audit events, typed runner v2, conservative triage/novelty/fix/report gates, and campaign UI. |
 | RAG | Built-in lexical retrieval plus optional dense cosine retrieval, per-collection JSON persistence, eleven curated corpora. `--rag-max-chunks` explicitly tunes injection depth for larger contexts. |
 | Context7 | Live, authoritative library documentation fetched per request for tech/library questions; bounded timeout, silent failure, rendered as a clearly-labelled section. On when `CONTEXT7_API_KEY` is set; `--no-context7` kills it. |
 | Long-term memory | Per-profile namespace; kinds `project_fact`, `preference`, `correction`. Instruction-injection filter on writes; `/remember` + per-message corrections. |
@@ -241,6 +257,7 @@ export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmen
 | `--research-workspace-roots` | Comma-separated fixed roots; runtime workspace choices cannot escape them. |
 | `--research-token`   | Bootstrap bearer token (prefer `AGENT_SMITH_RESEARCH_TOKEN`; minimum 32 characters). |
 | `--research-artifact-keys` | Ordered comma-separated `0600` files containing hex AES-256 custody keys; the first key is active. |
+| `--research-artifact-retention` | Minimum evidence custody period before approved purge (default 90 days; range 24 hours–10 years). |
 | `--research-container-runtime` | Optional required Docker runtime such as `runsc`; rootless Docker is mandatory for runner v2. |
 | `--research-novelty-sources` | Bounded JSON file of operator-fixed HTTPS novelty sources; empty disables lookup egress. |
 | `--ingest`           | Ingest markdown into a RAG collection and exit (with `--collection` + `--source`). |

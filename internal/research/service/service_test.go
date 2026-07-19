@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +96,9 @@ func TestApprovalMustBeIndependentAndMatchAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := svc.RequestApproval(ctx, domain.Principal{ID: "outsider", Roles: []domain.Role{domain.RoleOperator}}, domain.Approval{ScopeID: scope.ID, CampaignID: campaign.ID, CorrelationID: "outsider", Operation: domain.OperationFuzz, Reason: "not a member"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-member requested approval: %v", err)
+	}
 	if _, err := svc.DecideApproval(ctx, operator, approval.ID, true, "self approve"); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("self approval error=%v", err)
 	}
@@ -110,6 +114,80 @@ func TestApprovalMustBeIndependentAndMatchAction(t *testing.T) {
 	decision, err = svc.AuthorizeAction(ctx, campaign.ID, action, "correlation")
 	if err != nil || !decision.Allowed {
 		t.Fatalf("approved decision=%#v err=%v", decision, err)
+	}
+}
+
+func TestArtifactPurgeRequiresTerminalRetentionAdminAndBoundIndependentApproval(t *testing.T) {
+	ctx := context.Background()
+	svc, repository := newTestService(t)
+	defer repository.Close()
+	operator := domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleOperator}}
+	reviewer := domain.Principal{ID: "reviewer", Roles: []domain.Role{domain.RoleReviewer}}
+	admin := domain.Principal{ID: "admin", Roles: []domain.Role{domain.RoleAdmin}}
+	work := filepath.Join(repository.Root(), "work-purge")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scope, err := svc.CreateScope(ctx, operator, domain.AuthorizationScope{
+		Purpose: "authorized retention test", TargetRepository: "repo", AllowedRevisions: []string{"abc"}, WorkspaceRoots: []string{work},
+		MemberIDs: []string{reviewer.ID}, AllowedOperations: []domain.Operation{domain.OperationInspect, domain.OperationPurgeArtifact},
+		ApprovalOperations: []domain.Operation{domain.OperationPurgeArtifact},
+		Budget:             domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1024, MaxCPUSeconds: 60, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 16, MaxConcurrent: 1}, ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	campaign, err := svc.CreateCampaign(ctx, operator, domain.Campaign{ScopeID: scope.ID, Name: "purge fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := repository.PutArtifact(ctx, domain.Artifact{CampaignID: campaign.ID, Role: "log", MediaType: "text/plain"}, strings.NewReader("embargoed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlationID := ArtifactPurgeCorrelation(artifact.ID)
+	request := domain.Approval{ScopeID: scope.ID, CampaignID: campaign.ID, CorrelationID: correlationID, Operation: domain.OperationPurgeArtifact, Reason: "retention expired"}
+	if _, err := svc.RequestApproval(ctx, operator, request); !errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("nonterminal purge approval accepted: %v", err)
+	}
+	if _, err := svc.Transition(ctx, operator, campaign.ID, domain.CampaignCancelled, domain.EvidenceFacts{}); err != nil {
+		t.Fatal(err)
+	}
+	future := artifact.RetainUntil.Add(time.Minute)
+	svc.now = func() time.Time { return future }
+	request.CorrelationID = "artifact-purge:other"
+	if _, err := svc.RequestApproval(ctx, operator, request); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unbound purge approval accepted: %v", err)
+	}
+	request.CorrelationID = correlationID
+	approval, err := svc.RequestApproval(ctx, operator, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err = svc.DecideApproval(ctx, reviewer, approval.ID, true, "independently reviewed custody and backups")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.now = func() time.Time { return approval.DecidedAt.Add(artifactPurgeApprovalLifetime + time.Second) }
+	if _, err := svc.PurgeArtifact(ctx, admin, artifact.ID, approval.ID, "stale approval attempt"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("stale purge approval accepted: %v", err)
+	}
+	svc.now = func() time.Time { return future }
+	if _, err := svc.PurgeArtifact(ctx, operator, artifact.ID, approval.ID, "approved lifecycle cleanup"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-admin purged artifact: %v", err)
+	}
+	purged, err := svc.PurgeArtifact(ctx, admin, artifact.ID, approval.ID, "approved lifecycle cleanup")
+	if err != nil || purged.PurgedAt == nil || purged.BlobDeletedAt == nil || purged.PurgeApprovalID != approval.ID {
+		t.Fatalf("purged=%#v err=%v", purged, err)
+	}
+	if _, reader, err := repository.OpenArtifact(ctx, artifact.ID); !errors.Is(err, store.ErrArtifactPurged) {
+		if reader != nil {
+			reader.Close()
+		}
+		t.Fatalf("purged artifact readable: %v", err)
+	}
+	if err := repository.VerifyAuditChain(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -29,6 +29,7 @@ const (
 	OperationStaticAnalyze  Operation = "static_analyze"
 	OperationDraftReport    Operation = "draft_report"
 	OperationDisclose       Operation = "disclose"
+	OperationPurgeArtifact  Operation = "purge_artifact"
 )
 
 // IsKnownOperation keeps policy, manifests, and runner dispatch on the same
@@ -40,7 +41,7 @@ func IsKnownOperation(operation Operation) bool {
 		OperationSmokeTest, OperationSeed, OperationFuzz, OperationReproduce,
 		OperationMinimize, OperationMergeCorpus, OperationCoverage, OperationSymbolize,
 		OperationCompareBranch, OperationNoveltyLookup, OperationRegressionTest, OperationStaticAnalyze,
-		OperationDraftReport, OperationDisclose:
+		OperationDraftReport, OperationDisclose, OperationPurgeArtifact:
 		return true
 	default:
 		return false
@@ -354,22 +355,27 @@ type RunResult struct {
 	AuditCorrelationID string            `json:"audit_correlation_id"`
 }
 
-/* Artifact is immutable metadata for bytes in the content-addressed store. */
+/* Artifact has immutable content identity and monotonic custody lifecycle metadata. */
 type Artifact struct {
-	SchemaVersion   int       `json:"schema_version"`
-	ID              string    `json:"id"`
-	ContentID       string    `json:"content_id"`
-	CampaignID      string    `json:"campaign_id"`
-	RunID           string    `json:"run_id,omitempty"`
-	ParentIDs       []string  `json:"parent_ids,omitempty"`
-	Role            string    `json:"role"`
-	MediaType       string    `json:"media_type"`
-	Size            int64     `json:"size"`
-	Sensitivity     string    `json:"sensitivity"`
-	StoragePath     string    `json:"storage_path"`
-	Encryption      string    `json:"encryption,omitempty"`
-	EncryptionKeyID string    `json:"encryption_key_id,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
+	SchemaVersion   int        `json:"schema_version"`
+	ID              string     `json:"id"`
+	ContentID       string     `json:"content_id"`
+	CampaignID      string     `json:"campaign_id"`
+	RunID           string     `json:"run_id,omitempty"`
+	ParentIDs       []string   `json:"parent_ids,omitempty"`
+	Role            string     `json:"role"`
+	MediaType       string     `json:"media_type"`
+	Size            int64      `json:"size"`
+	Sensitivity     string     `json:"sensitivity"`
+	StoragePath     string     `json:"storage_path"`
+	Encryption      string     `json:"encryption,omitempty"`
+	EncryptionKeyID string     `json:"encryption_key_id,omitempty"`
+	RetainUntil     time.Time  `json:"retain_until"`
+	PurgedAt        *time.Time `json:"purged_at,omitempty"`
+	PurgeApprovalID string     `json:"purge_approval_id,omitempty"`
+	PurgeReason     string     `json:"purge_reason,omitempty"`
+	BlobDeletedAt   *time.Time `json:"blob_deleted_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 /* ObservationClass separates security signals from resource/test observations. */

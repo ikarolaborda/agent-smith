@@ -90,6 +90,7 @@ func (s *Server) capabilityStatus() map[string]any {
 		"coverage_guided_fuzzing":         coverageGuided,
 		"artifact_persistence":            researchEnabled,
 		"research_artifact_encryption":    researchEnabled && s.research.store.ArtifactEncryptionEnabled(),
+		"research_artifact_retention":     researchEnabled,
 		"research_persistence":            researchEnabled,
 		"authentication":                  researchEnabled,
 		"research_mode":                   researchEnabled,

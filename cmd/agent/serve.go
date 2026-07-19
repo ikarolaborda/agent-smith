@@ -21,6 +21,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/research/novelty"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
 	"github.com/ikarolaborda/agent-smith/internal/research/sourcefetch"
+	"github.com/ikarolaborda/agent-smith/internal/research/store"
 	"github.com/ikarolaborda/agent-smith/internal/server"
 )
 
@@ -113,10 +114,14 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		if keyErr != nil {
 			return keyErr
 		}
+		if f.researchArtifactRetention < store.MinimumArtifactRetention || f.researchArtifactRetention > store.MaximumArtifactRetention {
+			return errors.New("serve: research artifact retention must be between 24 hours and 10 years")
+		}
 		researchMode = &server.ResearchModeOptions{
 			Enabled: true, DataDir: f.researchDir, WorkspaceRoots: roots,
 			GlobalConcurrency: f.researchWorkers, CampaignConcurrency: 1,
 			ArtifactEncryptionKeys: artifactKeys,
+			ArtifactRetention:      f.researchArtifactRetention,
 			Credentials: []server.ResearchCredential{{
 				Token:     token,
 				Principal: domain.Principal{ID: f.researchActor, Name: f.researchActor, Roles: []domain.Role{domain.RoleAdmin}},

@@ -250,6 +250,24 @@ func TestMissingObjectReturnsSentinel(t *testing.T) {
 	}
 }
 
+func TestStoreCustodyDirectoryIsSingleProcess(t *testing.T) {
+	root := t.TempDir()
+	first := openTestStore(t, root, 0)
+	if second, err := Open(context.Background(), Config{Root: root}); err == nil {
+		second.Close()
+		t.Fatal("second store instance acquired the same custody directory")
+	} else if !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("second store error=%v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openTestStore(t, root, 0)
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func openTestStore(t *testing.T, root string, maxArtifactBytes int64) *Store {
 	t.Helper()
 	s, err := Open(context.Background(), Config{Root: root, MaxArtifactBytes: maxArtifactBytes})

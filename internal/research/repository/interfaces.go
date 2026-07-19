@@ -45,6 +45,7 @@ type Artifacts interface {
 	PutArtifact(context.Context, domain.Artifact, io.Reader) (domain.Artifact, error)
 	GetArtifact(context.Context, string) (domain.Artifact, error)
 	OpenArtifact(context.Context, string) (domain.Artifact, io.ReadCloser, error)
+	PurgeArtifact(context.Context, string, string, string, time.Time) (domain.Artifact, error)
 }
 
 type Jobs interface {

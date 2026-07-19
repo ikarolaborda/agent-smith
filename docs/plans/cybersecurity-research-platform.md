@@ -62,9 +62,9 @@ disclosure records. No-match novelty results remain `novelty_unverified`.
 The implementation is not beta-ready. A clean stochastic real-program
 discovery/minimization campaign, end-to-end real-program branch/novelty/fix
 validation, dependency/SBOM admission, kernel/filesystem disk and inode
-enforcement, approved retention/purge operations, and an independent security
-review remain release blockers. The current host reports neither rootless Docker
-nor gVisor, so the production CLI correctly refuses to start its research runner
+enforcement, backup/restore validation, and an independent security review
+remain release blockers. The current host reports neither rootless Docker nor
+gVisor, so the production CLI correctly refuses to start its research runner
 here; rootful Docker results are functional lab evidence only.
 
 The runner now treats CPU seconds and inode count as required finite scope,
@@ -83,6 +83,17 @@ writing a plaintext temporary file. Downloads are preverified before a decrypted
 stream is returned. The key identifier is a SHA-256 fingerprint, not key
 material; SQLite metadata, access-pattern leakage, encrypted backups, and key
 escrow remain deployment responsibilities.
+
+Every new artifact receives a fixed minimum retention deadline (90 days by
+default, operator-constrained to 24 hours through 10 years). There is no
+automatic deletion. A purge requires a terminal campaign, a fresh approval
+for a scope-authorized `purge_artifact` operation bound to
+`artifact-purge:<artifact-id>`, independent request/decision actors, and an
+admin executor. The logical record becomes an immutable tombstone before
+the CAS blob is unlinked. Shared blobs survive until all references are purged;
+active readers and new ingestion are serialized against deletion, and startup
+completes an approved unlink interrupted by a crash. Unlink is not a claim of
+physical erasure from snapshots, COW storage, SSD remapping, or backups.
 
 An opt-in hostile containment apparatus now exercises network denial, read-only
 mounts, control-plane secret isolation, cross-campaign visibility, device

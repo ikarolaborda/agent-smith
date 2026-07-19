@@ -29,6 +29,8 @@ var (
 	ErrSourceUnavailable = errors.New("research service: source acquisition unavailable")
 )
 
+const artifactPurgeApprovalLifetime = 24 * time.Hour
+
 // Service coordinates policy, evidence transitions, durable objects, and audit.
 type Service struct {
 	store          repository.ControlPlane
@@ -456,6 +458,38 @@ func (s *Service) RequestApproval(ctx context.Context, actor domain.Principal, a
 	if campaign.ScopeID != approval.ScopeID {
 		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "campaign does not belong to scope")
 	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return approval, err
+	}
+	if !scopeMember(scope, actor) {
+		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "principal is not a scope member")
+	}
+	if !domain.IsKnownOperation(approval.Operation) {
+		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "approval operation is unknown")
+	}
+	if approval.Operation == domain.OperationPurgeArtifact {
+		if !containsOperation(scope.AllowedOperations, domain.OperationPurgeArtifact) || !containsOperation(scope.ApprovalOperations, domain.OperationPurgeArtifact) {
+			return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "artifact purge must be an approval-gated scope operation")
+		}
+		artifactID, ok := artifactIDFromPurgeCorrelation(approval.CorrelationID)
+		if !ok {
+			return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "artifact purge correlation must bind one artifact")
+		}
+		artifact, err := s.store.GetArtifact(ctx, artifactID)
+		if err != nil {
+			return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "artifact purge requires the matching terminal campaign")
+		}
+		if artifact.CampaignID != campaign.ID || !domain.IsTerminalCampaignState(campaign.State) {
+			return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "artifact purge requires the matching terminal campaign")
+		}
+		if artifact.PurgedAt != nil {
+			return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "artifact already has an immutable purge tombstone")
+		}
+		if artifact.RetainUntil.IsZero() || s.now().Before(artifact.RetainUntil) {
+			return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, store.ErrRetentionActive.Error())
+		}
+	}
 	if approval.ID == "" {
 		approval.ID = newID("approval")
 	} else if _, err := s.store.GetApproval(ctx, approval.ID); !errors.Is(err, store.ErrNotFound) {
@@ -464,7 +498,8 @@ func (s *Service) RequestApproval(ctx context.Context, actor domain.Principal, a
 		}
 		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "approval id already exists")
 	}
-	if approval.CorrelationID == "" || approval.Operation == "" || approval.Reason == "" {
+	approval.Reason = strings.TrimSpace(approval.Reason)
+	if approval.CorrelationID == "" || approval.Operation == "" || approval.Reason == "" || len(approval.Reason) > 4096 {
 		return approval, s.denied(ctx, actor, "approval.request", "approval", approval.ID, "correlation, operation, and reason required")
 	}
 	approval.SchemaVersion = 1
@@ -477,6 +512,77 @@ func (s *Service) RequestApproval(ctx context.Context, actor domain.Principal, a
 		return approval, err
 	}
 	return approval, s.allowed(ctx, actor, "approval.request", "approval", approval.ID, approval.CorrelationID)
+}
+
+// ArtifactPurgeCorrelation is the stable approval binding for one artifact.
+func ArtifactPurgeCorrelation(artifactID string) string { return "artifact-purge:" + artifactID }
+
+func artifactIDFromPurgeCorrelation(correlationID string) (string, bool) {
+	const prefix = "artifact-purge:"
+	artifactID := strings.TrimPrefix(correlationID, prefix)
+	return artifactID, strings.HasPrefix(correlationID, prefix) && artifactID != "" && ArtifactPurgeCorrelation(artifactID) == correlationID
+}
+
+// PurgeArtifact applies the destructive custody gate: an admin, a terminal
+// campaign, an elapsed retention deadline, and a fresh independent approval
+// bound to exactly one artifact. The store retains immutable tombstone metadata.
+func (s *Service) PurgeArtifact(ctx context.Context, actor domain.Principal, artifactID, approvalID, reason string) (domain.Artifact, error) {
+	if !hasRole(actor, domain.RoleAdmin) {
+		return domain.Artifact{}, s.denied(ctx, actor, "artifact.purge", "artifact", artifactID, "admin role required")
+	}
+	artifact, err := s.store.GetArtifact(ctx, artifactID)
+	if err != nil {
+		return artifact, err
+	}
+	campaign, err := s.store.GetCampaign(ctx, artifact.CampaignID)
+	if err != nil {
+		return artifact, err
+	}
+	if !domain.IsTerminalCampaignState(campaign.State) {
+		return artifact, s.denied(ctx, actor, "artifact.purge", "artifact", artifactID, "campaign must be terminal before evidence purge")
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return artifact, err
+	}
+	if !containsOperation(scope.AllowedOperations, domain.OperationPurgeArtifact) || !containsOperation(scope.ApprovalOperations, domain.OperationPurgeArtifact) {
+		return artifact, s.denied(ctx, actor, "artifact.purge", "artifact", artifactID, "artifact purge is outside the approval-gated scope")
+	}
+	now := s.now()
+	if artifact.RetainUntil.IsZero() || now.Before(artifact.RetainUntil) {
+		return artifact, s.denied(ctx, actor, "artifact.purge", "artifact", artifactID, store.ErrRetentionActive.Error())
+	}
+	approval, err := s.store.GetApproval(ctx, approvalID)
+	if err != nil {
+		return artifact, s.denied(ctx, actor, "artifact.purge", "artifact", artifactID, ErrApprovalMissing.Error())
+	}
+	correlationID := ArtifactPurgeCorrelation(artifactID)
+	if approval.Status != "approved" || approval.ScopeID != campaign.ScopeID || approval.CampaignID != campaign.ID ||
+		approval.Operation != domain.OperationPurgeArtifact || approval.CorrelationID != correlationID || approval.DecidedAt == nil ||
+		approval.DecidedBy == "" || approval.RequestedBy == approval.DecidedBy || now.Before(*approval.DecidedAt) || now.Sub(*approval.DecidedAt) > artifactPurgeApprovalLifetime {
+		return artifact, s.denied(ctx, actor, "artifact.purge", "artifact", artifactID, ErrApprovalMissing.Error())
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len(reason) > 1024 {
+		return artifact, s.denied(ctx, actor, "artifact.purge", "artifact", artifactID, "bounded purge reason required")
+	}
+	details := map[string]string{
+		"campaign_id": campaign.ID, "content_id": artifact.ContentID, "approval_id": approval.ID,
+		"retain_until": artifact.RetainUntil.UTC().Format(time.RFC3339Nano), "reason": reason,
+	}
+	if err := s.allowedWithDetails(ctx, actor, "artifact.purge.authorize", "artifact", artifactID, correlationID, details); err != nil {
+		return artifact, err
+	}
+	purged, err := s.store.PurgeArtifact(ctx, artifactID, approval.ID, reason, now)
+	if err != nil {
+		_, _ = s.store.AppendAudit(ctx, domain.AuditEvent{ActorID: actor.ID, Action: "artifact.purge.failed", ResourceType: "artifact", ResourceID: artifactID, CorrelationID: correlationID, Decision: "failed", Details: map[string]string{"reason": err.Error()}})
+		return purged, err
+	}
+	details["blob_deleted"] = fmt.Sprintf("%t", purged.BlobDeletedAt != nil)
+	if err := s.allowedWithDetails(ctx, actor, "artifact.purge.complete", "artifact", artifactID, correlationID, details); err != nil {
+		return purged, err
+	}
+	return purged, nil
 }
 
 // DecideApproval records an independent human review decision.
@@ -498,10 +604,11 @@ func (s *Service) DecideApproval(ctx context.Context, actor domain.Principal, ap
 	if approval.Status != "pending" {
 		return approval, s.denied(ctx, actor, "approval.decide", "approval", approvalID, "approval is no longer pending")
 	}
-	if approval.RequestedBy == actor.ID && !hasRole(actor, domain.RoleAdmin) {
+	if approval.RequestedBy == actor.ID && (approval.Operation == domain.OperationPurgeArtifact || !hasRole(actor, domain.RoleAdmin)) {
 		return approval, s.denied(ctx, actor, "approval.decide", "approval", approvalID, "requester cannot review their own approval")
 	}
-	if reason == "" {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len(reason) > 4096 {
 		return approval, s.denied(ctx, actor, "approval.decide", "approval", approvalID, "decision reason required")
 	}
 	if approved {

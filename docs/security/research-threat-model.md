@@ -134,7 +134,18 @@ sensitive metadata, and ciphertext size, access timing, deletion, and rollback
 remain visible to a host administrator. Hash chaining detects alteration but
 does not prevent rollback. Protect the ordered keyring separately from the
 ciphertext, test restore and rotation procedures, encrypt database volumes and
-backups, use external audit anchors, and enforce an approved retention policy.
+backups, and use external audit anchors. The store assigns a minimum retention
+deadline and never deletes automatically. Purge requires a terminal campaign,
+an approval-gated `purge_artifact` scope permission, an artifact-bound approval
+decided by someone other than its requester, a fresh 24-hour decision window,
+and an admin executor. Logical tombstones and audit
+events survive deletion; CAS bytes remain while any unpurged reference or open
+reader exists. Startup resumes an approved purge interrupted after tombstoning.
+An OS-backed exclusive lock rejects a second process using the same custody
+directory; platforms without safe locking cannot open the research store.
+Filesystem unlink cannot prove physical erasure from SSDs, COW filesystems,
+snapshots, replicas, or backups; those require deployment-specific destruction
+and restore-test procedures.
 
 ### Egress and novelty research
 
@@ -170,7 +181,7 @@ enforce kernel/filesystem disk and inode quotas; operationally govern and rotate
 artifact-custody and source-bundle/egress signing keys; complete repeated
 clean-corpus discovery and minimization on the real known-bug benchmark (the
 libpng replay calibration alone is not discovery); validate fix and branch
-workflows end to end; add approved retention and purge operations plus backup
-restore tests; commission an independent review of authentication, container
+workflows end to end; run backup restore and destruction-policy tests;
+commission an independent review of authentication, container
 escape surface, artifact ingestion, supply chain, prompt injection, and
 multi-campaign isolation.

@@ -140,6 +140,10 @@ func terminalCampaignState(s CampaignState) bool {
 	return s == CampaignDisclosed || s == CampaignCompletedNoFinding || s == CampaignCancelled || s == CampaignFailed
 }
 
+// IsTerminalCampaignState reports whether evidence collection has reached a
+// state in which approval-gated custody cleanup may be considered.
+func IsTerminalCampaignState(state CampaignState) bool { return terminalCampaignState(state) }
+
 var findingRank = map[FindingLabel]int{
 	FindingHypothesis:             0,
 	FindingObservation:            1,
