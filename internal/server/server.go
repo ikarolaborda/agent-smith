@@ -29,6 +29,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/refine"
+	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/tools/builtin"
 	"github.com/ikarolaborda/agent-smith/internal/validate"
 	"github.com/ikarolaborda/agent-smith/internal/verify"
@@ -120,6 +121,24 @@ type Options struct {
 		and drives the Max subscription programmatically.
 	*/
 	ValidateVuln bool
+	/* ResearchMode enables authenticated durable campaign APIs and fixed roots. */
+	ResearchMode *ResearchModeOptions
+}
+
+// ResearchCredential binds one bearer secret to a durable audit principal.
+type ResearchCredential struct {
+	Token     string
+	Principal domain.Principal
+}
+
+// ResearchModeOptions are fail-closed controls for the research control plane.
+type ResearchModeOptions struct {
+	Enabled              bool
+	DataDir              string
+	WorkspaceRoots       []string
+	Credentials          []ResearchCredential
+	MinimumReproductions int
+	MaxArtifactBytes     int64
 }
 
 /*
@@ -176,6 +195,9 @@ type Server struct {
 		llamacpp per-request agents in newAgent; nil when openai is unconfigured.
 	*/
 	compactor *compact.Compactor
+
+	/* research is non-nil only for authenticated durable research mode. */
+	research *researchRuntime
 
 	/*
 		modelsMu guards the dynamic Ollama model list. We preload it at
@@ -256,6 +278,17 @@ func New(opts Options) (*Server, error) {
 		agentic:          opts.Agentic,
 		graphExpand:      opts.GraphExpand,
 		webSearchEnabled: opts.WebSearchEnabled,
+	}
+	if opts.ResearchMode != nil && opts.ResearchMode.Enabled {
+		research, err := buildResearchRuntime(context.Background(), *opts.ResearchMode)
+		if err != nil {
+			return nil, err
+		}
+		s.research = research
+		if s.workspace != "" && !s.workspaceAllowed(s.workspace) {
+			research.store.Close()
+			return nil, errors.New("server: initial workspace is outside research workspace roots")
+		}
 	}
 	s.answerVerifier = BuildAnswerVerifier(opts.Config, opts.VerifyCVE, opts.ValidateVuln, logger)
 	s.refineJudge = buildRefineJudge(opts.Config)
@@ -546,7 +579,15 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 }
 
 /* Handler exposes the configured mux. Useful for httptest. */
-func (s *Server) Handler() http.Handler { return s.withCORS(s.mux) }
+func (s *Server) Handler() http.Handler { return s.withCORS(s.withAuthentication(s.mux)) }
+
+// Close releases the durable research store, when enabled.
+func (s *Server) Close() error {
+	if s.research != nil {
+		return s.research.store.Close()
+	}
+	return nil
+}
 
 /* registerRoutes wires the supported paths onto the internal mux. */
 func (s *Server) registerRoutes() {
@@ -812,6 +853,7 @@ func buildCompactor(providers map[string]llm.Provider, cfg *config.Config, logge
 		TailTokens: 800,
 		ChunkChars: 3000,
 		Logger:     logger,
+		Cache:      compact.NewSummaryCache(0),
 	}
 }
 

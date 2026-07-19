@@ -99,6 +99,12 @@ type Compactor struct {
 	TailTokens    int
 	ChunkChars    int
 	Logger        *slog.Logger
+	/*
+		Cache, when non-nil, memoizes summaries by message content hash so a large
+		paste replayed on every conversation turn is summarized once. Shared by
+		pointer across per-request Compactor copies; nil disables memoization.
+	*/
+	Cache *SummaryCache
 }
 
 /*
@@ -152,11 +158,17 @@ func (c *Compactor) Compact(ctx context.Context, content, instruction string) (*
 
 	summary := ""
 	if c.Summarizer != nil {
-		s, err := c.summarize(ctx, middle, framing)
-		if err != nil {
-			c.logger().Warn("compact: summary failed; continuing with head/tail + retrieval index", "err", err)
+		key := hashContent(content)
+		if cached, ok := c.Cache.get(key); ok {
+			summary = cached
 		} else {
-			summary = s
+			s, err := c.summarize(ctx, middle, framing)
+			if err != nil {
+				c.logger().Warn("compact: summary failed; continuing with head/tail + retrieval index", "err", err)
+			} else {
+				summary = s
+				c.Cache.put(key, summary)
+			}
 		}
 	}
 

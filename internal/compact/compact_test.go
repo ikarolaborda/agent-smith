@@ -76,6 +76,27 @@ func TestCompact_PreservesHeadTailAndSummarizes(t *testing.T) {
 	}
 }
 
+func TestCompact_CacheAvoidsResummarizing(t *testing.T) {
+	fs := &fakeSummarizer{}
+	c := &Compactor{
+		Summarizer:    fs,
+		TriggerTokens: 500,
+		HeadTokens:    5,
+		TailTokens:    5,
+		ChunkChars:    1000,
+		Cache:         NewSummaryCache(0),
+	}
+	content := strings.Repeat("repeated paste content across turns. ", 500)
+	for i := 0; i < 3; i++ {
+		if _, err := c.Compact(context.Background(), content, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fs.calls != 1 {
+		t.Errorf("identical content summarized %d times, want 1 (cache miss then two hits)", fs.calls)
+	}
+}
+
 func TestCompact_SummaryFailureIsNonFatal(t *testing.T) {
 	c := &Compactor{
 		Summarizer:    failSummarizer{},
