@@ -61,7 +61,7 @@ disclosure records. No-match novelty results remain `novelty_unverified`.
 
 The implementation is not beta-ready. A clean stochastic real-program
 discovery/minimization campaign, end-to-end real-program branch/novelty/fix
-validation, curated bundle-manifest signing, kernel/filesystem disk and inode
+validation, dependency/SBOM admission, kernel/filesystem disk and inode
 enforcement, encrypted retention operations, and an independent security review
 remain release blockers. The current host reports neither rootless Docker nor
 gVisor, so the production CLI correctly refuses to start its research runner
@@ -414,8 +414,13 @@ SHA-256. Its no-proxy/no-redirect transport rejects private and reserved DNS
 answers, pins each connection to the validated answer, caps headers/time/body,
 and extracts uncompressed tar entries with hostile path/type/case/byte/inode
 validation. Scope policy independently allowlists the repository, commit,
-operation, and destination host before any request. Curated manifest signing,
-SBOM policy, and pinned dependency mirrors remain beta blockers.
+operation, and destination host before any request. Source policy is admitted
+only through a versioned Ed25519 envelope with a separately trusted PKIX public
+key, derived SHA-256 key identity, a maximum 90-day lifetime, canonical signing
+payload, strict JSON/PEM decoding, and key identity retained in target
+provenance. The CLI creates canonical envelopes while refusing broadly readable
+private-key files. Operational key rotation/revocation, SBOM policy, and pinned
+dependency mirrors remain beta blockers.
 
 ## APIs and user experience
 

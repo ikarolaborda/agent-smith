@@ -55,13 +55,28 @@ tree. Branch names and tags are not immutable acquisition revisions.
 
 Optional network acquisition accepts only operator-pinned, uncompressed tar
 bundles listed by exact commit, fixed HTTPS URL, repository identity, and
-SHA-256 in a strict configuration file. Redirects, URL credentials/query
+SHA-256 in a short-lived Ed25519-signed manifest. Redirects, URL credentials/query
 parameters, private/reserved DNS answers, digest mismatches, links, devices,
 unsafe paths, case collisions, and byte/inode overruns fail closed. Enable it
-with `--research-source-bundles configs/research-source-bundles.example.json`;
-the example values are placeholders and must be replaced with an authorized
-mirror manifest and independently computed bundle digest. Campaign scopes must
-also allow the repository, commit, `acquire` operation, and bundle hostname.
+by first replacing the placeholders in
+`configs/research-source-bundles.example.json`, independently computing every
+bundle digest, and signing that source list:
+
+```sh
+openssl genpkey -algorithm ed25519 -out source-manifest-private.pem
+chmod 600 source-manifest-private.pem
+openssl pkey -in source-manifest-private.pem -pubout -out source-manifest-public.pem
+./bin/agent \
+  --sign-research-source-bundles configs/research-source-bundles.example.json \
+  --research-source-bundle-private-key source-manifest-private.pem \
+  > research-source-bundles.signed.json
+```
+
+Pass the signed envelope with `--research-source-bundles` and the separately
+trusted public key with `--research-source-bundle-public-key`. Campaign scopes
+must also allow the repository, commit, `acquire` operation, and bundle
+hostname. Manifests expire after at most 90 days; rotate them and protect the
+private key outside the application host used for research.
 
 ```sh
 export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"

@@ -1,13 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
@@ -173,13 +180,13 @@ func TestLoadNoveltySourcesRejectsOversizedConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadSourceBundlesIsBoundedAndStrict(t *testing.T) {
+func TestLoadSourceBundleSourcesIsBoundedAndStrict(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bundles.json")
 	valid := `[{"name":"mirror","repository":"repo","bundles":[{"commit":"0123456789abcdef0123456789abcdef01234567","url":"https://sources.example.test/source.tar","sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}]`
 	if err := os.WriteFile(path, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sources, err := loadSourceBundles(path)
+	sources, err := loadSourceBundleSources(path)
 	if err != nil || len(sources) != 1 || sources[0].Name != "mirror" || len(sources[0].Bundles) != 1 {
 		t.Fatalf("sources=%#v err=%v", sources, err)
 	}
@@ -187,13 +194,61 @@ func TestLoadSourceBundlesIsBoundedAndStrict(t *testing.T) {
 	if err := os.WriteFile(path, []byte(unknown), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadSourceBundles(path); err == nil {
+	if _, err := loadSourceBundleSources(path); err == nil {
 		t.Fatal("unknown source-bundle configuration field accepted")
 	}
 	if err := os.WriteFile(path, []byte(valid+strings.Repeat(" ", 1<<20)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadSourceBundles(path); err == nil {
+	if _, err := loadSourceBundleSources(path); err == nil {
 		t.Fatal("oversized source-bundle configuration accepted")
+	}
+}
+
+func TestSignAndLoadVerifiedSourceManifest(t *testing.T) {
+	directory := t.TempDir()
+	sourcesPath := filepath.Join(directory, "sources.json")
+	privatePath := filepath.Join(directory, "private.pem")
+	publicPath := filepath.Join(directory, "public.pem")
+	signedPath := filepath.Join(directory, "signed.json")
+	sources := `[{"name":"mirror","repository":"repo","bundles":[{"commit":"0123456789abcdef0123456789abcdef01234567","url":"https://sources.example.test/source.tar","sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}]`
+	if err := os.WriteFile(sourcesPath, []byte(sources), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDER, _ := x509.MarshalPKCS8PrivateKey(privateKey)
+	publicDER, _ := x509.MarshalPKIXPublicKey(publicKey)
+	if err := os.WriteFile(privatePath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publicPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runSignSourceBundles(flags{signResearchSourceBundles: sourcesPath, researchSourcePrivateKey: privatePath, researchSourceManifestLifetime: time.Hour}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(signedPath, output.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := loadVerifiedSourceManifest(signedPath, publicPath, time.Now().UTC())
+	if err != nil || verified.KeyID() == "" || len(verified.Sources()) != 1 {
+		t.Fatalf("verified=%#v err=%v", verified, err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(output.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	manifest := envelope["manifest"].(map[string]any)
+	manifest["sources"].([]any)[0].(map[string]any)["repository"] = "tampered"
+	tampered, _ := json.Marshal(envelope)
+	if err := os.WriteFile(signedPath, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadVerifiedSourceManifest(signedPath, publicPath, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "signature mismatch") {
+		t.Fatalf("tampered manifest accepted: %v", err)
 	}
 }

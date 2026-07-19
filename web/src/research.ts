@@ -45,6 +45,8 @@ export interface TargetRevision {
 		source_url?: string;
 		bundle_sha256?: string;
 		bundle_bytes?: number;
+		manifest_key_id?: string;
+		manifest_expires_at?: string;
 		fetched_at?: string;
 	};
   acquired_at: string;

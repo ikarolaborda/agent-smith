@@ -155,7 +155,7 @@ type ResearchModeOptions struct {
 	CampaignConcurrency  int
 	NoveltySources       []novelty.Source
 	NoveltyHTTPClient    novelty.HTTPDoer
-	SourceBundles        []sourcefetch.Source
+	SourceManifest       *sourcefetch.VerifiedManifest
 	SourceHTTPClient     sourcefetch.HTTPDoer
 }
 

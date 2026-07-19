@@ -50,6 +50,9 @@ func run(f flags) error {
 	if f.installRuntime {
 		return runInstallRuntime(ctx, f)
 	}
+	if f.signResearchSourceBundles != "" {
+		return runSignSourceBundles(f, os.Stdout)
+	}
 
 	cfg, err := config.Load(f.configPath)
 	if err != nil {

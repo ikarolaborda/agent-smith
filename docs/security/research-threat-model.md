@@ -90,8 +90,13 @@ pins each connection to the checked address, and caps time and response headers.
 Bundle bytes share the scope disk ceiling with extracted bytes; the parser
 accepts only uncompressed tar directories and regular files and rejects unsafe,
 reserved, case-colliding, linked, special, oversized, or over-inode entries.
-This trusts the locally installed manifest as an authorization root; production
-distribution should sign, review, rotate, and audit those manifests.
+The locally installed policy is a versioned, short-lived Ed25519 envelope. The
+server accepts only a separately trusted PKIX public key, derives its full
+SHA-256 identity, authenticates a domain-separated canonical payload, and
+retains the key identity in target provenance. The signing CLI refuses
+group/world-readable private keys on POSIX hosts. Production operations still
+need offline key custody, rotation/revocation procedures, dual review, and an
+audited manifest publication channel.
 
 Candidate fixes are bounded textual unified-diff artifacts tied to an approved
 finding correlation. The control-plane host never applies them. A read-only
@@ -155,8 +160,8 @@ privilege change, or cross-boundary impact.
 ## Beta blockers
 
 Before a beta claim, run live isolation tests on every supported backend;
-enforce kernel/filesystem disk and inode quotas; sign and operationally govern
-source-bundle/egress manifests; complete repeated clean-corpus discovery and
+enforce kernel/filesystem disk and inode quotas; operationally govern and rotate
+source-bundle/egress signing keys; complete repeated clean-corpus discovery and
 minimization on the real known-bug benchmark (the libpng replay calibration
 alone is not discovery); validate fix and branch workflows end to end; add
 encrypted

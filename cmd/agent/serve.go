@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
@@ -118,7 +120,10 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 			}
 		}
 		if strings.TrimSpace(f.researchSourceBundles) != "" {
-			researchMode.SourceBundles, err = loadSourceBundles(f.researchSourceBundles)
+			if strings.TrimSpace(f.researchSourcePublicKey) == "" {
+				return errors.New("serve: --research-source-bundles requires --research-source-bundle-public-key")
+			}
+			researchMode.SourceManifest, err = loadVerifiedSourceManifest(f.researchSourceBundles, f.researchSourcePublicKey, time.Now().UTC())
 			if err != nil {
 				return err
 			}
@@ -184,7 +189,7 @@ func loadNoveltySources(path string) ([]novelty.Source, error) {
 	return sources, nil
 }
 
-func loadSourceBundles(path string) ([]sourcefetch.Source, error) {
+func loadSourceBundleSources(path string) ([]sourcefetch.Source, error) {
 	file, err := os.Open(strings.TrimSpace(path))
 	if err != nil {
 		return nil, fmt.Errorf("serve: open research source bundles: %w", err)
@@ -212,6 +217,91 @@ func loadSourceBundles(path string) ([]sourcefetch.Source, error) {
 		return nil, errors.New("serve: research source bundles must contain 1..64 entries")
 	}
 	return sources, nil
+}
+
+func loadVerifiedSourceManifest(manifestPath, publicKeyPath string, now time.Time) (*sourcefetch.VerifiedManifest, error) {
+	body, err := readBoundedSourceFile(manifestPath, 1<<20, "signed source manifest")
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var envelope sourcefetch.SignedManifest
+	if err := decoder.Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("serve: decode signed source manifest: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("serve: trailing signed source manifest data")
+	}
+	keyData, err := readBoundedSourceFile(publicKeyPath, 16<<10, "source manifest public key")
+	if err != nil {
+		return nil, err
+	}
+	publicKey, err := sourcefetch.ParsePublicKeyPEM(keyData)
+	if err != nil {
+		return nil, fmt.Errorf("serve: parse source manifest public key: %w", err)
+	}
+	verified, err := sourcefetch.VerifyManifest(envelope, publicKey, now)
+	if err != nil {
+		return nil, fmt.Errorf("serve: verify source manifest: %w", err)
+	}
+	return verified, nil
+}
+
+func runSignSourceBundles(f flags, output io.Writer) error {
+	if strings.TrimSpace(f.researchSourcePrivateKey) == "" {
+		return errors.New("--sign-research-source-bundles requires --research-source-bundle-private-key")
+	}
+	if f.researchSourceManifestLifetime <= 0 || f.researchSourceManifestLifetime > sourcefetch.MaxManifestLifetime {
+		return errors.New("source manifest lifetime must be positive and no more than 90 days")
+	}
+	sources, err := loadSourceBundleSources(f.signResearchSourceBundles)
+	if err != nil {
+		return err
+	}
+	keyInfo, err := os.Stat(strings.TrimSpace(f.researchSourcePrivateKey))
+	if err != nil {
+		return fmt.Errorf("open source manifest private key: %w", err)
+	}
+	if runtime.GOOS != "windows" && keyInfo.Mode().Perm()&0o077 != 0 {
+		return errors.New("source manifest private key must not be accessible by group or others")
+	}
+	keyData, err := readBoundedSourceFile(f.researchSourcePrivateKey, 16<<10, "source manifest private key")
+	if err != nil {
+		return err
+	}
+	privateKey, err := sourcefetch.ParsePrivateKeyPEM(keyData)
+	if err != nil {
+		return fmt.Errorf("parse source manifest private key: %w", err)
+	}
+	now := time.Now().UTC()
+	envelope, err := sourcefetch.SignManifest(sourcefetch.Manifest{SchemaVersion: 1, IssuedAt: now, ExpiresAt: now.Add(f.researchSourceManifestLifetime), Sources: sources}, privateKey)
+	if err != nil {
+		return fmt.Errorf("sign source manifest: %w", err)
+	}
+	encoder := json.NewEncoder(output)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(envelope); err != nil {
+		return fmt.Errorf("write signed source manifest: %w", err)
+	}
+	return nil
+}
+
+func readBoundedSourceFile(path string, maximum int64, label string) ([]byte, error) {
+	file, err := os.Open(strings.TrimSpace(path))
+	if err != nil {
+		return nil, fmt.Errorf("serve: open %s: %w", label, err)
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, fmt.Errorf("serve: read %s: %w", label, err)
+	}
+	if int64(len(body)) > maximum {
+		return nil, fmt.Errorf("serve: %s data exceeds limit", label)
+	}
+	return body, nil
 }
 
 func splitNonEmpty(value string) []string {

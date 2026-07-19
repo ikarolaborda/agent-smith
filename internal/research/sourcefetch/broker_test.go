@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/research/acquisition"
 )
@@ -164,7 +165,7 @@ func TestNewBrokerRejectsUnsafeConfiguration(t *testing.T) {
 		{Commit: testCommit, URL: "https://sources.example.test/source.tar", SHA256: "sha256:bad"},
 	}
 	for index, bundle := range tests {
-		if _, err := NewBroker(doerFunc(func(*http.Request) (*http.Response, error) { return nil, nil }), []Source{{Name: "source", Repository: "repo", Bundles: []Bundle{bundle}}}, 0); err == nil {
+		if _, err := NewBroker(doerFunc(func(*http.Request) (*http.Response, error) { return nil, nil }), []Source{{Name: "source", Repository: "repo", Bundles: []Bundle{bundle}}}, 0, "", time.Time{}); err == nil {
 			t.Fatalf("unsafe configuration %d accepted", index)
 		}
 	}
@@ -183,10 +184,28 @@ func TestPublicAddressRejectsInternalAndReservedNetworks(t *testing.T) {
 	}
 }
 
+func TestBrokerRechecksSignedManifestExpiryBeforeEgress(t *testing.T) {
+	bundle := testTar(t, tar.Header{Name: "source.c", Typeflag: tar.TypeReg, Size: 1}, []byte("x"))
+	digest := sha256.Sum256(bundle)
+	expires := time.Now().UTC().Add(time.Hour)
+	requests := 0
+	broker, err := NewBroker(doerFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		return testResponse(request, bundle), nil
+	}), []Source{{Name: "upstream", Repository: "repo", Bundles: []Bundle{{Commit: testCommit, URL: "https://sources.example.test/source.tar", SHA256: "sha256:" + hex.EncodeToString(digest[:])}}}}, int64(len(bundle)+10), "sha256:"+strings.Repeat("b", 64), expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker.now = func() time.Time { return expires }
+	if _, err := broker.Fetch(context.Background(), "upstream", testCommit, filepath.Join(t.TempDir(), "capture"), acquisition.Limits{MaxFiles: 4, MaxBytes: int64(len(bundle) + 10)}); err == nil || !strings.Contains(err.Error(), "manifest expired") || requests != 0 {
+		t.Fatalf("expired manifest fetch err=%v requests=%d", err, requests)
+	}
+}
+
 func testBroker(t *testing.T, body []byte, doer doerFunc) *Broker {
 	t.Helper()
 	digest := sha256.Sum256(body)
-	broker, err := NewBroker(doer, []Source{{Name: "upstream", Repository: "https://example.test/project.git", Bundles: []Bundle{{Commit: testCommit, URL: "https://sources.example.test/project/source.tar", SHA256: "sha256:" + hex.EncodeToString(digest[:])}}}}, int64(len(body)+1024))
+	broker, err := NewBroker(doer, []Source{{Name: "upstream", Repository: "https://example.test/project.git", Bundles: []Bundle{{Commit: testCommit, URL: "https://sources.example.test/project/source.tar", SHA256: "sha256:" + hex.EncodeToString(digest[:])}}}}, int64(len(body)+1024), "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1070,7 +1070,7 @@ func (s *Service) captureTarget(ctx context.Context, request TargetRequest, dest
 		return "", "", acquisition.Snapshot{}, domain.AcquisitionProvenance{}, err
 	}
 	provenance := domain.AcquisitionProvenance{Method: "https_pinned_tar", SourceName: result.Descriptor.SourceName, SourceURL: result.Descriptor.URL,
-		BundleSHA256: result.Descriptor.SHA256, BundleBytes: result.BundleBytes, FetchedAt: result.FetchedAt}
+		BundleSHA256: result.Descriptor.SHA256, BundleBytes: result.BundleBytes, ManifestKeyID: result.Descriptor.ManifestKeyID, ManifestExpiresAt: result.Descriptor.ManifestExpiresAt, FetchedAt: result.FetchedAt}
 	return result.Descriptor.Commit, result.Descriptor.Commit, result.Snapshot, provenance, nil
 }
 
@@ -1078,7 +1078,7 @@ func sameTargetIdentity(left, right domain.TargetRevision) bool {
 	return left.CampaignID == right.CampaignID && left.Repository == right.Repository && left.RequestedRef == right.RequestedRef && left.Commit == right.Commit &&
 		left.SourceSHA256 == right.SourceSHA256 && left.Language == right.Language && left.Architecture == right.Architecture &&
 		left.Acquisition.Method == right.Acquisition.Method && left.Acquisition.SourceName == right.Acquisition.SourceName && left.Acquisition.SourceURL == right.Acquisition.SourceURL &&
-		left.Acquisition.BundleSHA256 == right.Acquisition.BundleSHA256 && left.Acquisition.BundleBytes == right.Acquisition.BundleBytes
+		left.Acquisition.BundleSHA256 == right.Acquisition.BundleSHA256 && left.Acquisition.BundleBytes == right.Acquisition.BundleBytes && left.Acquisition.ManifestKeyID == right.Acquisition.ManifestKeyID && left.Acquisition.ManifestExpiresAt.Equal(right.Acquisition.ManifestExpiresAt)
 }
 
 func targetAcquisitionDetails(campaignID, findingID string, target domain.TargetRevision) map[string]string {
@@ -1089,6 +1089,7 @@ func targetAcquisitionDetails(campaignID, findingID string, target domain.Target
 	if target.Acquisition.SourceName != "" {
 		details["source_name"] = target.Acquisition.SourceName
 		details["bundle_sha256"] = target.Acquisition.BundleSHA256
+		details["manifest_key_id"] = target.Acquisition.ManifestKeyID
 	}
 	return details
 }

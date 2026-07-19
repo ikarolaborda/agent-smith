@@ -170,12 +170,14 @@ type TargetRevision struct {
 // boundary. Bundle URLs are fixed operator configuration and never contain
 // credentials or caller-controlled query values.
 type AcquisitionProvenance struct {
-	Method       string    `json:"method"`
-	SourceName   string    `json:"source_name,omitempty"`
-	SourceURL    string    `json:"source_url,omitempty"`
-	BundleSHA256 string    `json:"bundle_sha256,omitempty"`
-	BundleBytes  int64     `json:"bundle_bytes,omitempty"`
-	FetchedAt    time.Time `json:"fetched_at,omitempty"`
+	Method            string    `json:"method"`
+	SourceName        string    `json:"source_name,omitempty"`
+	SourceURL         string    `json:"source_url,omitempty"`
+	BundleSHA256      string    `json:"bundle_sha256,omitempty"`
+	BundleBytes       int64     `json:"bundle_bytes,omitempty"`
+	ManifestKeyID     string    `json:"manifest_key_id,omitempty"`
+	ManifestExpiresAt time.Time `json:"manifest_expires_at,omitempty"`
+	FetchedAt         time.Time `json:"fetched_at,omitempty"`
 }
 
 /* ApparatusManifest describes a deterministic, versioned research adapter. */

@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -450,18 +452,34 @@ func TestResearchAPIAcquiresOnlyAuthorizedPinnedSourceBundles(t *testing.T) {
 		requests++
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(bundle)), ContentLength: int64(len(bundle)), Request: request}, nil
 	})
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestNow := time.Now().UTC()
+	signedManifest, err := sourcefetch.SignManifest(sourcefetch.Manifest{SchemaVersion: 1, IssuedAt: manifestNow, ExpiresAt: manifestNow.Add(time.Hour), Sources: []sourcefetch.Source{{Name: "mirror", Repository: repositoryURL, Bundles: []sourcefetch.Bundle{{Commit: revision, URL: bundleURL, SHA256: "sha256:" + hex.EncodeToString(digest[:])}}}}}, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedManifest, err := sourcefetch.VerifyManifest(signedManifest, publicKey, manifestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv, err := New(Options{
 		Config: &config.Config{DefaultProvider: "fake", Providers: map[string]config.ProviderConfig{"fake": {Model: "test"}}}, Providers: map[string]llm.Provider{},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ResearchMode: &ResearchModeOptions{Enabled: true, DataDir: filepath.Join(root, "state"), WorkspaceRoots: []string{workspace},
-			Credentials:   []ResearchCredential{{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}}},
-			SourceBundles: []sourcefetch.Source{{Name: "mirror", Repository: repositoryURL, Bundles: []sourcefetch.Bundle{{Commit: revision, URL: bundleURL, SHA256: "sha256:" + hex.EncodeToString(digest[:])}}}}, SourceHTTPClient: doer,
+			Credentials:    []ResearchCredential{{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}}},
+			SourceManifest: verifiedManifest, SourceHTTPClient: doer,
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer srv.Close()
+	if capabilities := srv.capabilityStatus(); capabilities["research_source_acquisition"] != true || capabilities["research_source_manifest_signed"] != true {
+		t.Fatalf("source acquisition capabilities=%#v", capabilities)
+	}
 
 	createCampaign := func(name string, domains []string) domain.Campaign {
 		t.Helper()
@@ -502,7 +520,7 @@ func TestResearchAPIAcquiresOnlyAuthorizedPinnedSourceBundles(t *testing.T) {
 	}
 	var target domain.TargetRevision
 	_ = json.Unmarshal(response.Body.Bytes(), &target)
-	if target.Commit != revision || target.Acquisition.Method != "https_pinned_tar" || target.Acquisition.SourceName != "mirror" || target.Acquisition.BundleSHA256 != "sha256:"+hex.EncodeToString(digest[:]) || target.SourceSHA256 == "" {
+	if target.Commit != revision || target.Acquisition.Method != "https_pinned_tar" || target.Acquisition.SourceName != "mirror" || target.Acquisition.BundleSHA256 != "sha256:"+hex.EncodeToString(digest[:]) || target.Acquisition.ManifestKeyID != verifiedManifest.KeyID() || target.SourceSHA256 == "" {
 		t.Fatalf("target=%#v", target)
 	}
 	captured, err := os.ReadFile(filepath.Join(srv.research.store.Root(), "worker-inputs", allowedCampaign.ID, "sources", target.ID, "source.c"))

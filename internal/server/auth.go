@@ -28,14 +28,15 @@ type credentialHash struct {
 }
 
 type researchRuntime struct {
-	store          *store.Store
-	service        *service.Service
-	workspaceRoots []string
-	credentials    []credentialHash
-	broker         *runner.Broker
-	noveltyBroker  *novelty.Broker
-	noveltySources map[string]novelty.Source
-	sourceBroker   *sourcefetch.Broker
+	store               *store.Store
+	service             *service.Service
+	workspaceRoots      []string
+	credentials         []credentialHash
+	broker              *runner.Broker
+	noveltyBroker       *novelty.Broker
+	noveltySources      map[string]novelty.Source
+	sourceBroker        *sourcefetch.Broker
+	sourceManifestKeyID string
 }
 
 func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*researchRuntime, error) {
@@ -84,12 +85,12 @@ func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*resea
 		return nil, err
 	}
 	runtime.store, runtime.service = repository, svc
-	if len(opts.SourceBundles) > 0 {
+	if opts.SourceManifest != nil {
 		doer := opts.SourceHTTPClient
 		if doer == nil {
 			doer = sourcefetch.NewHTTPClient()
 		}
-		acquisitionBroker, brokerErr := sourcefetch.NewBroker(doer, opts.SourceBundles, 0)
+		acquisitionBroker, brokerErr := sourcefetch.NewBroker(doer, opts.SourceManifest.Sources(), 0, opts.SourceManifest.KeyID(), opts.SourceManifest.ExpiresAt())
 		if brokerErr != nil {
 			repository.Close()
 			return nil, brokerErr
@@ -99,6 +100,7 @@ func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*resea
 			return nil, err
 		}
 		runtime.sourceBroker = acquisitionBroker
+		runtime.sourceManifestKeyID = opts.SourceManifest.KeyID()
 	}
 	if len(opts.NoveltySources) > 0 {
 		doer := opts.NoveltyHTTPClient

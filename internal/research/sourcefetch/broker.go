@@ -48,12 +48,14 @@ type Bundle struct {
 
 // Descriptor is the validated, immutable fetch policy for one commit.
 type Descriptor struct {
-	SourceName string
-	Repository string
-	Commit     string
-	URL        string
-	Host       string
-	SHA256     string
+	SourceName        string
+	Repository        string
+	Commit            string
+	URL               string
+	Host              string
+	SHA256            string
+	ManifestKeyID     string
+	ManifestExpiresAt time.Time
 }
 
 // Result records the evidence computed during a successful bundle fetch.
@@ -72,40 +74,58 @@ type HTTPDoer interface {
 
 // Broker owns a fixed source map and a bounded HTTP transport.
 type Broker struct {
-	doer           HTTPDoer
-	bundles        map[string]map[string]Descriptor
-	maxBundleBytes int64
+	doer              HTTPDoer
+	bundles           map[string]map[string]Descriptor
+	maxBundleBytes    int64
+	manifestExpiresAt time.Time
+	now               func() time.Time
 }
 
 // NewBroker validates every configured URL and commit before egress is enabled.
-func NewBroker(doer HTTPDoer, sources []Source, maxBundleBytes int64) (*Broker, error) {
+func NewBroker(doer HTTPDoer, sources []Source, maxBundleBytes int64, manifestKeyID string, manifestExpiresAt time.Time) (*Broker, error) {
 	if doer == nil || len(sources) == 0 {
 		return nil, errors.New("sourcefetch: HTTP client and at least one fixed source required")
 	}
 	if maxBundleBytes <= 0 || maxBundleBytes > defaultBundleLimit {
 		maxBundleBytes = defaultBundleLimit
 	}
-	broker := &Broker{doer: doer, bundles: make(map[string]map[string]Descriptor), maxBundleBytes: maxBundleBytes}
+	if manifestKeyID != "" && !digestPattern.MatchString(manifestKeyID) {
+		return nil, errors.New("sourcefetch: invalid manifest signing key identity")
+	}
+	if (manifestKeyID != "" && manifestExpiresAt.IsZero()) || (manifestKeyID == "" && !manifestExpiresAt.IsZero()) {
+		return nil, errors.New("sourcefetch: signed manifest identity and expiry must be configured together")
+	}
+	broker := &Broker{doer: doer, bundles: make(map[string]map[string]Descriptor), maxBundleBytes: maxBundleBytes, manifestExpiresAt: manifestExpiresAt, now: func() time.Time { return time.Now().UTC() }}
+	descriptors, err := validateSources(sources, manifestKeyID, manifestExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	broker.bundles = descriptors
+	return broker, nil
+}
+
+func validateSources(sources []Source, manifestKeyID string, manifestExpiresAt time.Time) (map[string]map[string]Descriptor, error) {
+	descriptors := make(map[string]map[string]Descriptor, len(sources))
 	for _, source := range sources {
 		if !sourceNamePattern.MatchString(source.Name) || source.Repository != strings.TrimSpace(source.Repository) || source.Repository == "" || len(source.Bundles) == 0 || len(source.Bundles) > 1024 {
 			return nil, fmt.Errorf("sourcefetch: invalid fixed source %q", source.Name)
 		}
-		if _, duplicate := broker.bundles[source.Name]; duplicate {
+		if _, duplicate := descriptors[source.Name]; duplicate {
 			return nil, fmt.Errorf("sourcefetch: duplicate source %q", source.Name)
 		}
-		broker.bundles[source.Name] = make(map[string]Descriptor, len(source.Bundles))
+		descriptors[source.Name] = make(map[string]Descriptor, len(source.Bundles))
 		for _, bundle := range source.Bundles {
-			descriptor, err := validateBundle(source, bundle)
+			descriptor, err := validateBundle(source, bundle, manifestKeyID, manifestExpiresAt)
 			if err != nil {
 				return nil, err
 			}
-			if _, duplicate := broker.bundles[source.Name][bundle.Commit]; duplicate {
+			if _, duplicate := descriptors[source.Name][bundle.Commit]; duplicate {
 				return nil, fmt.Errorf("sourcefetch: duplicate commit in source %q", source.Name)
 			}
-			broker.bundles[source.Name][bundle.Commit] = descriptor
+			descriptors[source.Name][bundle.Commit] = descriptor
 		}
 	}
-	return broker, nil
+	return descriptors, nil
 }
 
 // Describe resolves only preconfigured source/commit pairs without egress.
@@ -129,6 +149,9 @@ func (b *Broker) Describe(sourceName, commit string) (Descriptor, error) {
 func (b *Broker) Fetch(ctx context.Context, sourceName, commit, destination string, limits acquisition.Limits) (Result, error) {
 	descriptor, err := b.Describe(sourceName, commit)
 	if err != nil {
+		return Result{}, err
+	}
+	if err := b.validateManifestTime(); err != nil {
 		return Result{}, err
 	}
 	if !filepath.IsAbs(destination) || limits.MaxBytes <= 0 || limits.MaxFiles <= 0 {
@@ -209,6 +232,9 @@ func (b *Broker) Fetch(ctx context.Context, sourceName, commit, destination stri
 	if err != nil {
 		return Result{}, err
 	}
+	if err := b.validateManifestTime(); err != nil {
+		return Result{}, err
+	}
 	if info, err := os.Lstat(destination); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return Result{}, errors.New("sourcefetch: destination is a symlink")
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -228,7 +254,7 @@ func (b *Broker) Fetch(ctx context.Context, sourceName, commit, destination stri
 	return Result{Descriptor: descriptor, Snapshot: snapshot, BundleBytes: written, FetchedAt: time.Now().UTC()}, nil
 }
 
-func validateBundle(source Source, bundle Bundle) (Descriptor, error) {
+func validateBundle(source Source, bundle Bundle, manifestKeyID string, manifestExpiresAt time.Time) (Descriptor, error) {
 	parsed, err := url.Parse(bundle.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Port() != "" && parsed.Port() != "443") || parsed.String() != bundle.URL || !commitPattern.MatchString(bundle.Commit) || !digestPattern.MatchString(bundle.SHA256) {
 		return Descriptor{}, fmt.Errorf("sourcefetch: invalid pinned bundle for source %q", source.Name)
@@ -236,7 +262,21 @@ func validateBundle(source Source, bundle Bundle) (Descriptor, error) {
 	if address, parseErr := netip.ParseAddr(parsed.Hostname()); parseErr == nil && !publicAddress(address) {
 		return Descriptor{}, fmt.Errorf("sourcefetch: private or reserved bundle address for source %q", source.Name)
 	}
-	return Descriptor{SourceName: source.Name, Repository: source.Repository, Commit: bundle.Commit, URL: bundle.URL, Host: strings.ToLower(parsed.Hostname()), SHA256: bundle.SHA256}, nil
+	return Descriptor{SourceName: source.Name, Repository: source.Repository, Commit: bundle.Commit, URL: bundle.URL, Host: strings.ToLower(parsed.Hostname()), SHA256: bundle.SHA256, ManifestKeyID: manifestKeyID, ManifestExpiresAt: manifestExpiresAt}, nil
+}
+
+func (b *Broker) validateManifestTime() error {
+	if b.manifestExpiresAt.IsZero() {
+		return nil
+	}
+	now := time.Now().UTC()
+	if b.now != nil {
+		now = b.now()
+	}
+	if !now.Before(b.manifestExpiresAt) {
+		return errors.New("sourcefetch: signed manifest expired")
+	}
+	return nil
 }
 
 func extractTar(bundlePath, destination string, limits acquisition.Limits) error {
