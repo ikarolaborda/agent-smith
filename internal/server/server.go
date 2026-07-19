@@ -31,6 +31,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/llm/openai"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
 	"github.com/ikarolaborda/agent-smith/internal/refine"
+	"github.com/ikarolaborda/agent-smith/internal/research/apparatus"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/novelty"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
@@ -152,6 +153,7 @@ type ResearchModeOptions struct {
 	MaxArtifactBytes       int64
 	ArtifactEncryptionKeys [][]byte
 	ArtifactRetention      time.Duration
+	ApparatusAdmission     *apparatus.VerifiedAdmissionCatalog
 	RunnerBackend          runner.Backend
 	GlobalConcurrency      int
 	CampaignConcurrency    int

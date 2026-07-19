@@ -5,7 +5,10 @@ propose them, but deterministic services validate and persist every state change
 */
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 /* Operation is a closed research action vocabulary used by scope policy. */
 type Operation string
@@ -183,18 +186,32 @@ type AcquisitionProvenance struct {
 
 /* ApparatusManifest describes a deterministic, versioned research adapter. */
 type ApparatusManifest struct {
-	SchemaVersion int               `json:"schema_version"`
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	Version       string            `json:"version"`
-	ImageDigest   string            `json:"image_digest"`
-	Engine        string            `json:"engine"`
-	Sanitizers    []string          `json:"sanitizers"`
-	Architectures []string          `json:"architectures"`
-	Harnesses     []HarnessManifest `json:"harnesses"`
-	Operations    []Operation       `json:"operations"`
-	Environment   map[string]string `json:"environment,omitempty"`
-	Limits        ResourceBudget    `json:"limits"`
+	SchemaVersion int                   `json:"schema_version"`
+	ID            string                `json:"id"`
+	Name          string                `json:"name"`
+	Version       string                `json:"version"`
+	ImageDigest   string                `json:"image_digest"`
+	Engine        string                `json:"engine"`
+	Sanitizers    []string              `json:"sanitizers"`
+	Architectures []string              `json:"architectures"`
+	Harnesses     []HarnessManifest     `json:"harnesses"`
+	Operations    []Operation           `json:"operations"`
+	Environment   map[string]string     `json:"environment,omitempty"`
+	Limits        ResourceBudget        `json:"limits"`
+	SupplyChain   *ApparatusSupplyChain `json:"supply_chain,omitempty"`
+}
+
+/* ApparatusSupplyChain is populated only by verified signed admission. */
+type ApparatusSupplyChain struct {
+	SchemaVersion      int             `json:"schema_version"`
+	SBOMSHA256         string          `json:"sbom_sha256"`
+	ProvenanceSHA256   string          `json:"provenance_sha256"`
+	AdmissionKeyID     string          `json:"admission_key_id"`
+	AdmissionExpiresAt time.Time       `json:"admission_expires_at"`
+	BuilderID          string          `json:"builder_id"`
+	DependencyCount    int             `json:"dependency_count"`
+	SBOM               json.RawMessage `json:"sbom,omitempty"`
+	Provenance         json.RawMessage `json:"provenance,omitempty"`
 }
 
 /* HarnessManifest is one named, typed fuzz entrypoint. */

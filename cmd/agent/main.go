@@ -53,6 +53,9 @@ func run(f flags) error {
 	if f.signResearchSourceBundles != "" {
 		return runSignSourceBundles(f, os.Stdout)
 	}
+	if f.signResearchApparatusCatalog != "" {
+		return runSignApparatusCatalog(f, os.Stdout)
+	}
 
 	cfg, err := config.Load(f.configPath)
 	if err != nil {

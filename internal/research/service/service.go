@@ -33,13 +33,14 @@ const artifactPurgeApprovalLifetime = 24 * time.Hour
 
 // Service coordinates policy, evidence transitions, durable objects, and audit.
 type Service struct {
-	store          repository.ControlPlane
-	machine        domain.StateMachine
-	now            func() time.Time
-	broker         JobBroker
-	sourceBroker   *sourcefetch.Broker
-	workspaceRoots []string
-	internalRoot   string
+	store              repository.ControlPlane
+	machine            domain.StateMachine
+	now                func() time.Time
+	broker             JobBroker
+	sourceBroker       *sourcefetch.Broker
+	apparatusAdmission *apparatus.VerifiedAdmissionCatalog
+	workspaceRoots     []string
+	internalRoot       string
 }
 
 // TargetRequest describes either an operator-authorized local Git acquisition
@@ -124,6 +125,16 @@ func (s *Service) AttachSourceBroker(broker *sourcefetch.Broker) error {
 	return nil
 }
 
+// AttachApparatusAdmission installs the separately verified, signed SBOM and
+// provenance catalog used by apparatus registration.
+func (s *Service) AttachApparatusAdmission(catalog *apparatus.VerifiedAdmissionCatalog) error {
+	if catalog == nil {
+		return errors.New("research service: apparatus admission catalog required")
+	}
+	s.apparatusAdmission = catalog
+	return nil
+}
+
 // CreateScope validates and persists a scope owned by the authenticated actor.
 func (s *Service) CreateScope(ctx context.Context, actor domain.Principal, scope domain.AuthorizationScope) (domain.AuthorizationScope, error) {
 	if !hasRole(actor, domain.RoleAdmin) && !hasRole(actor, domain.RoleOperator) {
@@ -173,13 +184,23 @@ func (s *Service) RegisterApparatus(ctx context.Context, actor domain.Principal,
 	if !hasRole(actor, domain.RoleAdmin) {
 		return manifest, s.denied(ctx, actor, "apparatus.register", "apparatus_manifest", manifest.ID, "admin role required")
 	}
-	if err := apparatus.ValidateManifest(manifest); err != nil {
+	if s.apparatusAdmission == nil {
+		return manifest, s.denied(ctx, actor, "apparatus.register", "apparatus_manifest", manifest.ID, "verified apparatus supply-chain admission required")
+	}
+	admitted, err := s.apparatusAdmission.Admit(manifest, s.now())
+	if err != nil {
 		return manifest, s.denied(ctx, actor, "apparatus.register", "apparatus_manifest", manifest.ID, err.Error())
 	}
-	if err := s.store.SaveApparatus(ctx, manifest); err != nil {
-		return manifest, err
+	if err := apparatus.ValidateManifest(admitted); err != nil {
+		return manifest, s.denied(ctx, actor, "apparatus.register", "apparatus_manifest", manifest.ID, err.Error())
 	}
-	return manifest, s.allowed(ctx, actor, "apparatus.register", "apparatus_manifest", manifest.ID, "")
+	if err := s.store.SaveApparatus(ctx, admitted); err != nil {
+		return admitted, err
+	}
+	return admitted, s.allowedWithDetails(ctx, actor, "apparatus.register", "apparatus_manifest", admitted.ID, "", map[string]string{
+		"image_digest": admitted.ImageDigest, "sbom_sha256": admitted.SupplyChain.SBOMSHA256, "provenance_sha256": admitted.SupplyChain.ProvenanceSHA256,
+		"admission_key_id": admitted.SupplyChain.AdmissionKeyID, "admission_expires_at": admitted.SupplyChain.AdmissionExpiresAt.Format(time.RFC3339Nano),
+	})
 }
 
 // RevokeScope permanently removes a scope from future authorization decisions.
@@ -738,6 +759,9 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 	manifest, err := s.store.GetApparatus(ctx, manifestID)
 	if err != nil {
 		return domain.ExperimentRun{}, err
+	}
+	if s.apparatusAdmission == nil || s.apparatusAdmission.ValidateAdmitted(manifest, s.now()) != nil {
+		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "apparatus supply-chain admission is missing, expired, or no longer trusted")
 	}
 	if manifest.ImageDigest != job.ImageDigest || !containsOperation(manifest.Operations, job.Operation) || !manifestHasHarness(manifest, job.Arguments["harness"]) {
 		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job does not match registered apparatus manifest")

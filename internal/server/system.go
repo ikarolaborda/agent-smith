@@ -91,6 +91,7 @@ func (s *Server) capabilityStatus() map[string]any {
 		"artifact_persistence":            researchEnabled,
 		"research_artifact_encryption":    researchEnabled && s.research.store.ArtifactEncryptionEnabled(),
 		"research_artifact_retention":     researchEnabled,
+		"research_supply_chain_admission": researchEnabled && s.research.apparatusAdmissionKeyID != "",
 		"research_persistence":            researchEnabled,
 		"authentication":                  researchEnabled,
 		"research_mode":                   researchEnabled,

@@ -24,6 +24,7 @@ import (
 
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
+	"github.com/ikarolaborda/agent-smith/internal/research/apparatus"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
 	"github.com/ikarolaborda/agent-smith/internal/research/service"
@@ -32,6 +33,30 @@ import (
 )
 
 const reviewerToken = "reviewer-token-0123456789-abcdef-0003"
+
+func verifiedTestApparatusAdmission(t *testing.T, manifests ...domain.ApparatusManifest) *apparatus.VerifiedAdmissionCatalog {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	entries := make([]apparatus.AdmissionEntry, 0, len(manifests))
+	for _, manifest := range manifests {
+		sbom := json.RawMessage(`{"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","dataLicense":"CC0-1.0","documentNamespace":"https://example.test/sbom","packages":[{"name":"fixture","SPDXID":"SPDXRef-Package","versionInfo":"1.0.0","checksums":[{"algorithm":"SHA256","checksumValue":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}]}`)
+		provenance := json.RawMessage(fmt.Sprintf(`{"_type":"https://in-toto.io/Statement/v1","subject":[{"digest":{"sha256":%q}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildDefinition":{"buildType":"https://example.test/build/v1","resolvedDependencies":[{"uri":"pkg:docker/base@1","digest":{"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}]},"runDetails":{"builder":{"id":"https://builder.example.test/research"}}}}`, strings.TrimPrefix(manifest.ImageDigest, "sha256:")))
+		entries = append(entries, apparatus.AdmissionEntry{Manifest: manifest, SBOM: sbom, Provenance: provenance})
+	}
+	envelope, err := apparatus.SignAdmissionCatalog(apparatus.AdmissionCatalog{SchemaVersion: 1, IssuedAt: now, ExpiresAt: now.Add(time.Hour), Entries: entries}, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := apparatus.VerifyAdmissionCatalog(envelope, publicKey, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return verified
+}
 
 type researchToolCaptureProvider struct {
 	request llm.ChatRequest
@@ -96,6 +121,13 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 	if err := privateDirForTest(workspace); err != nil {
 		t.Fatal(err)
 	}
+	manifest := domain.ApparatusManifest{
+		SchemaVersion: 1, ID: "apparatus", Name: "fixture", Version: "1", Engine: "libfuzzer",
+		ImageDigest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Sanitizers:    []string{"address"},
+		Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}},
+		Operations: []domain.Operation{domain.OperationFuzz}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxCPUSeconds: 30, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1},
+	}
 	srv, err := New(Options{
 		Config:    &config.Config{DefaultProvider: "fake", Providers: map[string]config.ProviderConfig{"fake": {Model: "test"}}},
 		Providers: map[string]llm.Provider{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -103,6 +135,7 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 			Enabled: true, DataDir: filepath.Join(root, "state"), WorkspaceRoots: []string{workspace},
 			ArtifactEncryptionKeys: [][]byte{bytes.Repeat([]byte{0x5a}, 32)},
 			ArtifactRetention:      store.MinimumArtifactRetention,
+			ApparatusAdmission:     verifiedTestApparatusAdmission(t, manifest),
 			Credentials: []ResearchCredential{
 				{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}},
 				{Token: reviewerToken, Principal: domain.Principal{ID: "reviewer", Roles: []domain.Role{domain.RoleReviewer}}},
@@ -114,17 +147,20 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer srv.Close()
-
-	manifest := domain.ApparatusManifest{
-		SchemaVersion: 1, ID: "apparatus", Name: "fixture", Version: "1", Engine: "libfuzzer",
-		ImageDigest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Sanitizers:    []string{"address"},
-		Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}},
-		Operations: []domain.Operation{domain.OperationFuzz}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxCPUSeconds: 30, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1},
+	if srv.capabilityStatus()["research_supply_chain_admission"] != true {
+		t.Fatal("verified apparatus supply-chain capability not reported")
 	}
+
 	response := researchJSONRequest(srv, http.MethodPost, "/v1/research/apparatuses", operatorToken, manifest)
-	if response.Code != http.StatusCreated {
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"supply_chain"`) || strings.Contains(response.Body.String(), `"sbom":`) || strings.Contains(response.Body.String(), `"provenance":`) {
 		t.Fatalf("apparatus status=%d body=%s", response.Code, response.Body.String())
+	}
+	storedManifest, err := srv.research.store.GetApparatus(context.Background(), manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedManifest.SupplyChain == nil || len(storedManifest.SupplyChain.SBOM) == 0 || len(storedManifest.SupplyChain.Provenance) == 0 {
+		t.Fatalf("trusted store did not retain signed supply-chain evidence: %#v", storedManifest.SupplyChain)
 	}
 	scopeRequest := domain.AuthorizationScope{
 		Purpose: "authorized API test", MemberIDs: []string{"reviewer"}, TargetRepository: "repo", AllowedRevisions: []string{"abc"},
@@ -249,6 +285,9 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	revision := initializeServerGitFixture(t, workspace)
+	manifest := domain.ApparatusManifest{SchemaVersion: 1, ID: "apparatus", Name: "fixture", Version: "1", Engine: "libfuzzer", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Sanitizers: []string{"address"}, Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}},
+		Operations: []domain.Operation{domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationSymbolize}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 30, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 8, MaxConcurrent: 1}}
 	backend := &runner.FakeBackend{ExecuteFunc: func(_ context.Context, job domain.WorkerJob, staging string) (runner.Execution, error) {
 		switch job.Operation {
 		case domain.OperationBuild:
@@ -287,16 +326,14 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 		Config:    &config.Config{DefaultProvider: "fake", Providers: map[string]config.ProviderConfig{"fake": {Model: "test"}}},
 		Providers: map[string]llm.Provider{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ResearchMode: &ResearchModeOptions{Enabled: true, DataDir: filepath.Join(root, "state"), WorkspaceRoots: []string{workspace}, RunnerBackend: backend,
-			Credentials: []ResearchCredential{{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}}},
+			ApparatusAdmission: verifiedTestApparatusAdmission(t, manifest),
+			Credentials:        []ResearchCredential{{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}}},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer srv.Close()
-	manifest := domain.ApparatusManifest{SchemaVersion: 1, ID: "apparatus", Name: "fixture", Version: "1", Engine: "libfuzzer", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Sanitizers: []string{"address"}, Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}},
-		Operations: []domain.Operation{domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationSymbolize}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 30, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 8, MaxConcurrent: 1}}
 	if response := researchJSONRequest(srv, http.MethodPost, "/v1/research/apparatuses", operatorToken, manifest); response.Code != http.StatusCreated {
 		t.Fatalf("apparatus status=%d body=%s", response.Code, response.Body.String())
 	}

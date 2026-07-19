@@ -1,0 +1,84 @@
+[
+  {
+    "manifest": {
+      "schema_version": 1,
+      "id": "authorized-native-apparatus",
+      "name": "authorized-native-apparatus",
+      "version": "1.0.0",
+      "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "engine": "libfuzzer",
+      "sanitizers": ["address"],
+      "architectures": ["amd64"],
+      "harnesses": [
+        {
+          "name": "parser",
+          "binary": "/build/fuzz_target",
+          "max_input_len": 1048576
+        }
+      ],
+      "operations": ["inspect", "build", "smoke_test", "fuzz", "reproduce", "minimize", "coverage", "symbolize"],
+      "environment": {
+        "ASAN_OPTIONS": "abort_on_error=1"
+      },
+      "limits": {
+        "max_wall_seconds": 3600,
+        "max_memory_bytes": 2147483648,
+        "max_cpu_seconds": 3600,
+        "max_disk_bytes": 1073741824,
+        "max_inodes": 65536,
+        "max_pids": 64,
+        "max_concurrent": 1
+      }
+    },
+    "sbom": {
+      "spdxVersion": "SPDX-2.3",
+      "SPDXID": "SPDXRef-DOCUMENT",
+      "name": "replace-with-scanner-produced-apparatus-sbom",
+      "dataLicense": "CC0-1.0",
+      "documentNamespace": "https://security.example.org/sbom/replace-me",
+      "packages": [
+        {
+          "name": "replace-with-every-resolved-package",
+          "SPDXID": "SPDXRef-Package-replace-me",
+          "versionInfo": "replace-with-pinned-version",
+          "checksums": [
+            {
+              "algorithm": "SHA256",
+              "checksumValue": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ]
+        }
+      ]
+    },
+    "provenance": {
+      "_type": "https://in-toto.io/Statement/v1",
+      "subject": [
+        {
+          "name": "authorized-native-apparatus",
+          "digest": {
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ],
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "predicate": {
+        "buildDefinition": {
+          "buildType": "https://security.example.org/build-types/rootless-container/v1",
+          "resolvedDependencies": [
+            {
+              "uri": "pkg:docker/replace-with-pinned-base",
+              "digest": {
+                "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+              }
+            }
+          ]
+        },
+        "runDetails": {
+          "builder": {
+            "id": "https://security.example.org/builders/research-apparatus"
+          }
+        }
+      }
+    }
+  }
+]

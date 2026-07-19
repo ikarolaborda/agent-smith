@@ -78,8 +78,14 @@ and no tracked, untracked, or ignored changes. It disables ambient Git behavior,
 rejects submodules, links, special modes, unsafe/reserved paths, and bounded Git
 output overruns, then exports regular-file bytes directly from verified commit
 objects. The read-only capture is atomically installed in a private campaign
-tree and rehashed before every worker mount. A production deployment still
-needs a curated image registry and signature verification/SBOM policy.
+tree and rehashed before every worker mount. Apparatus registration and every
+job launch require an exact manifest match in a short-lived Ed25519-signed
+catalog. Each entry embeds an SPDX 2.x JSON SBOM and SLSA provenance v1;
+packages require pinned versions and SHA-256 checksums, and provenance must bind
+the exact image plus resolved dependency URI/digests. Derived admission metadata
+is persisted and audited. A production deployment still needs trusted scanners
+and builders, a curated transparent registry, offline signing-key custody,
+revocation, and mirrored dependency availability.
 
 Optional network acquisition does not run `git fetch`, credential helpers, or
 target-controlled checkout filters. An operator-owned manifest pre-resolves a

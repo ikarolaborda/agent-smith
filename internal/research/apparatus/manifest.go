@@ -3,6 +3,8 @@ package apparatus
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,6 +79,26 @@ func ValidateManifest(manifest domain.ApparatusManifest) error {
 	}
 	if err := manifest.Limits.Validate(); err != nil {
 		return fmt.Errorf("apparatus: %w", err)
+	}
+	if supply := manifest.SupplyChain; supply != nil {
+		if supply.SchemaVersion != 1 || !digestPattern.MatchString(supply.SBOMSHA256) || !digestPattern.MatchString(supply.ProvenanceSHA256) ||
+			!digestPattern.MatchString(supply.AdmissionKeyID) || supply.AdmissionExpiresAt.IsZero() || strings.TrimSpace(supply.BuilderID) == "" ||
+			supply.DependencyCount <= 0 || supply.DependencyCount > 10000 || len(supply.SBOM) == 0 || len(supply.SBOM) > 4<<20 || len(supply.Provenance) == 0 || len(supply.Provenance) > 4<<20 {
+			return errors.New("apparatus: invalid verified supply-chain admission metadata")
+		}
+		sbom, err := canonicalJSON(supply.SBOM)
+		if err != nil {
+			return err
+		}
+		provenance, err := canonicalJSON(supply.Provenance)
+		if err != nil {
+			return err
+		}
+		sbomDigest := sha256.Sum256(sbom)
+		provenanceDigest := sha256.Sum256(provenance)
+		if supply.SBOMSHA256 != "sha256:"+hex.EncodeToString(sbomDigest[:]) || supply.ProvenanceSHA256 != "sha256:"+hex.EncodeToString(provenanceDigest[:]) {
+			return errors.New("apparatus: persisted supply-chain evidence hash mismatch")
+		}
 	}
 	return nil
 }

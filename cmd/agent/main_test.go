@@ -19,6 +19,8 @@ import (
 
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/rag"
+	"github.com/ikarolaborda/agent-smith/internal/research/apparatus"
+	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 )
 
 func TestConfiguredLlamaDownloadUsesSafeOperationalDefaults(t *testing.T) {
@@ -284,5 +286,61 @@ func TestLoadArtifactEncryptionKeysIsOrderedStrictAndPrivate(t *testing.T) {
 		if _, err := loadArtifactEncryptionKeys(activePath); err == nil || !strings.Contains(err.Error(), "group or others") {
 			t.Fatalf("broad key permissions accepted: %v", err)
 		}
+	}
+}
+
+func TestSignAndLoadVerifiedApparatusAdmissionCatalog(t *testing.T) {
+	directory := t.TempDir()
+	entriesPath := filepath.Join(directory, "entries.json")
+	privatePath := filepath.Join(directory, "apparatus-private.pem")
+	publicPath := filepath.Join(directory, "apparatus-public.pem")
+	signedPath := filepath.Join(directory, "apparatus-signed.json")
+	manifest := domain.ApparatusManifest{
+		SchemaVersion: 1, ID: "apparatus", Name: "fixture", Version: "1", ImageDigest: "sha256:" + strings.Repeat("a", 64), Engine: "libfuzzer",
+		Sanitizers: []string{"address"}, Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}}, Operations: []domain.Operation{domain.OperationFuzz},
+		Limits: domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1024, MaxCPUSeconds: 60, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1},
+	}
+	entries := []apparatus.AdmissionEntry{{
+		Manifest:   manifest,
+		SBOM:       json.RawMessage(`{"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","dataLicense":"CC0-1.0","documentNamespace":"https://example.test/cli-sbom","packages":[{"name":"fixture","SPDXID":"SPDXRef-Package","versionInfo":"1.0.0","checksums":[{"algorithm":"SHA256","checksumValue":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}]}`),
+		Provenance: json.RawMessage(`{"_type":"https://in-toto.io/Statement/v1","subject":[{"digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildDefinition":{"buildType":"https://example.test/build/v1","resolvedDependencies":[{"uri":"pkg:docker/base@1","digest":{"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}]},"runDetails":{"builder":{"id":"https://builder.example.test/research"}}}}`),
+	}}
+	entryData, _ := json.Marshal(entries)
+	if err := os.WriteFile(entriesPath, entryData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publicKey, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+	privateDER, _ := x509.MarshalPKCS8PrivateKey(privateKey)
+	publicDER, _ := x509.MarshalPKIXPublicKey(publicKey)
+	if err := os.WriteFile(privatePath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publicPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runSignApparatusCatalog(flags{signResearchApparatusCatalog: entriesPath, researchApparatusPrivateKey: privatePath, researchApparatusLifetime: time.Hour}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(signedPath, output.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := loadVerifiedApparatusCatalog(signedPath, publicPath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := verified.Admit(manifest, time.Now().UTC())
+	if err != nil || admitted.SupplyChain == nil || admitted.SupplyChain.DependencyCount != 1 {
+		t.Fatalf("admitted=%#v err=%v", admitted, err)
+	}
+	var envelope map[string]any
+	_ = json.Unmarshal(output.Bytes(), &envelope)
+	envelope["catalog"].(map[string]any)["entries"].([]any)[0].(map[string]any)["sbom"].(map[string]any)["name"] = "tampered"
+	tampered, _ := json.Marshal(envelope)
+	if err := os.WriteFile(signedPath, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadVerifiedApparatusCatalog(signedPath, publicPath, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "signature mismatch") {
+		t.Fatalf("tampered apparatus catalog accepted: %v", err)
 	}
 }

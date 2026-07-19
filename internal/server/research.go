@@ -63,6 +63,9 @@ func (s *Server) handleResearchApparatuses(w http.ResponseWriter, r *http.Reques
 		switch r.Method {
 		case http.MethodGet:
 			values, err := s.research.store.ListApparatus(r.Context(), queryLimit(r, 100))
+			for index := range values {
+				values[index] = redactApparatusEvidence(values[index])
+			}
 			s.writeResearchList(w, values, err)
 		case http.MethodPost:
 			var manifest domain.ApparatusManifest
@@ -74,7 +77,7 @@ func (s *Server) handleResearchApparatuses(w http.ResponseWriter, r *http.Reques
 				s.writeResearchError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusCreated, created)
+			writeJSON(w, http.StatusCreated, redactApparatusEvidence(created))
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET or POST required")
 		}
@@ -89,7 +92,18 @@ func (s *Server) handleResearchApparatuses(w http.ResponseWriter, r *http.Reques
 		s.writeResearchError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, manifest)
+	writeJSON(w, http.StatusOK, redactApparatusEvidence(manifest))
+}
+
+func redactApparatusEvidence(manifest domain.ApparatusManifest) domain.ApparatusManifest {
+	if manifest.SupplyChain == nil {
+		return manifest
+	}
+	supply := *manifest.SupplyChain
+	supply.SBOM = nil
+	supply.Provenance = nil
+	manifest.SupplyChain = &supply
+	return manifest
 }
 
 func (s *Server) handleResearchScopes(w http.ResponseWriter, r *http.Request, principal domain.Principal, rest []string) {

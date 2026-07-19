@@ -17,6 +17,7 @@ import (
 
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
+	"github.com/ikarolaborda/agent-smith/internal/research/apparatus"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/novelty"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
@@ -117,11 +118,19 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		if f.researchArtifactRetention < store.MinimumArtifactRetention || f.researchArtifactRetention > store.MaximumArtifactRetention {
 			return errors.New("serve: research artifact retention must be between 24 hours and 10 years")
 		}
+		if strings.TrimSpace(f.researchApparatusCatalog) == "" || strings.TrimSpace(f.researchApparatusPublicKey) == "" {
+			return errors.New("serve: --research-mode requires --research-apparatus-catalog and --research-apparatus-public-key")
+		}
+		apparatusAdmission, admissionErr := loadVerifiedApparatusCatalog(f.researchApparatusCatalog, f.researchApparatusPublicKey, time.Now().UTC())
+		if admissionErr != nil {
+			return admissionErr
+		}
 		researchMode = &server.ResearchModeOptions{
 			Enabled: true, DataDir: f.researchDir, WorkspaceRoots: roots,
 			GlobalConcurrency: f.researchWorkers, CampaignConcurrency: 1,
 			ArtifactEncryptionKeys: artifactKeys,
 			ArtifactRetention:      f.researchArtifactRetention,
+			ApparatusAdmission:     apparatusAdmission,
 			Credentials: []server.ResearchCredential{{
 				Token:     token,
 				Principal: domain.Principal{ID: f.researchActor, Name: f.researchActor, Roles: []domain.Role{domain.RoleAdmin}},
@@ -298,6 +307,87 @@ func runSignSourceBundles(f flags, output io.Writer) error {
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(envelope); err != nil {
 		return fmt.Errorf("write signed source manifest: %w", err)
+	}
+	return nil
+}
+
+func loadVerifiedApparatusCatalog(catalogPath, publicKeyPath string, now time.Time) (*apparatus.VerifiedAdmissionCatalog, error) {
+	body, err := readBoundedSourceFile(catalogPath, 8<<20, "signed apparatus admission catalog")
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var envelope apparatus.SignedAdmissionCatalog
+	if err := decoder.Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("serve: decode signed apparatus catalog: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("serve: trailing signed apparatus catalog data")
+	}
+	keyData, err := readBoundedSourceFile(publicKeyPath, 16<<10, "apparatus admission public key")
+	if err != nil {
+		return nil, err
+	}
+	publicKey, err := sourcefetch.ParsePublicKeyPEM(keyData)
+	if err != nil {
+		return nil, fmt.Errorf("serve: parse apparatus admission public key: %w", err)
+	}
+	verified, err := apparatus.VerifyAdmissionCatalog(envelope, publicKey, now)
+	if err != nil {
+		return nil, fmt.Errorf("serve: verify apparatus admission catalog: %w", err)
+	}
+	return verified, nil
+}
+
+func runSignApparatusCatalog(f flags, output io.Writer) error {
+	if strings.TrimSpace(f.researchApparatusPrivateKey) == "" {
+		return errors.New("--sign-research-apparatus-catalog requires --research-apparatus-private-key")
+	}
+	if f.researchApparatusLifetime <= 0 || f.researchApparatusLifetime > apparatus.MaxAdmissionLifetime {
+		return errors.New("apparatus catalog lifetime must be positive and no more than 90 days")
+	}
+	body, err := readBoundedSourceFile(f.signResearchApparatusCatalog, 8<<20, "unsigned apparatus admission entries")
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var entries []apparatus.AdmissionEntry
+	if err := decoder.Decode(&entries); err != nil {
+		return fmt.Errorf("decode apparatus admission entries: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("trailing apparatus admission entry data")
+	}
+	keyInfo, err := os.Stat(strings.TrimSpace(f.researchApparatusPrivateKey))
+	if err != nil {
+		return fmt.Errorf("open apparatus admission private key: %w", err)
+	}
+	if runtime.GOOS != "windows" && keyInfo.Mode().Perm()&0o077 != 0 {
+		return errors.New("apparatus admission private key must not be accessible by group or others")
+	}
+	keyData, err := readBoundedSourceFile(f.researchApparatusPrivateKey, 16<<10, "apparatus admission private key")
+	if err != nil {
+		return err
+	}
+	privateKey, err := sourcefetch.ParsePrivateKeyPEM(keyData)
+	if err != nil {
+		return fmt.Errorf("parse apparatus admission private key: %w", err)
+	}
+	now := time.Now().UTC()
+	envelope, err := apparatus.SignAdmissionCatalog(apparatus.AdmissionCatalog{
+		SchemaVersion: 1, IssuedAt: now, ExpiresAt: now.Add(f.researchApparatusLifetime), Entries: entries,
+	}, privateKey)
+	if err != nil {
+		return fmt.Errorf("sign apparatus admission catalog: %w", err)
+	}
+	encoder := json.NewEncoder(output)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(envelope); err != nil {
+		return fmt.Errorf("write signed apparatus admission catalog: %w", err)
 	}
 	return nil
 }

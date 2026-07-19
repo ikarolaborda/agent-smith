@@ -78,6 +78,28 @@ must also allow the repository, commit, `acquire` operation, and bundle
 hostname. Manifests expire after at most 90 days; rotate them and protect the
 private key outside the application host used for research.
 
+Apparatus registration also requires a separately signed supply-chain catalog.
+Start with `configs/research-apparatus-admission.example.json`, replace every
+placeholder with the exact manifest, a scanner-produced SPDX 2.x JSON SBOM, and
+an in-toto SLSA provenance v1 statement. Every SBOM package must have a pinned
+version and SHA-256; provenance must bind the apparatus image and every resolved
+dependency material. Review the documents before signing:
+
+```sh
+openssl genpkey -algorithm ed25519 -out apparatus-admission-private.pem
+chmod 600 apparatus-admission-private.pem
+openssl pkey -in apparatus-admission-private.pem -pubout -out apparatus-admission-public.pem
+./bin/agent \
+  --sign-research-apparatus-catalog configs/research-apparatus-admission.example.json \
+  --research-apparatus-private-key apparatus-admission-private.pem \
+  > research-apparatus-admission.signed.json
+```
+
+The catalog is valid for 30 days by default and at most 90 days. Registration
+and every job launch recheck the exact manifest and catalog expiry. Protect and
+rotate this signing key through the same offline review process as the source
+manifest key.
+
 ```sh
 export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"
 openssl rand -hex 32 > .agent-smith-artifact.key
@@ -86,7 +108,9 @@ chmod 600 .agent-smith-artifact.key
   --workspace /absolute/path/to/authorized/project \
   --research-workspace-roots /absolute/path/to/authorized/project \
   --research-artifact-keys .agent-smith-artifact.key \
-  --research-artifact-retention 2160h
+  --research-artifact-retention 2160h \
+  --research-apparatus-catalog research-apparatus-admission.signed.json \
+  --research-apparatus-public-key apparatus-admission-public.pem
 ```
 
 The first file in `--research-artifact-keys` is the active AES-256 key; later
@@ -199,7 +223,7 @@ These live in `pkg/prompt` and are covered by tests that fail if any directive i
 | Agentic tools | `file_read` and `read_dir` always on; `file_write` / `file_edit` sandboxed behind `--workspace`; structured contained `run` behind `--workspace --allow-exec`. No host shell or arbitrary model-controlled HTTP tool. |
 | Embeddings | OpenAI `text-embedding-3-small`, Ollama `nomic-embed-text`. |
 | Web UI | React + Vite + react-bootstrap SPA embedded via `go:embed`. Per-conversation provider/model picker, cluster-mode indicator, markdown + code highlighting, scroll-contained long messages and wide tables. |
-| Research control plane | Authenticated scopes/campaigns/approvals, encrypted SHA-256 artifact custody with retention/purge tombstones, hash-chained audit events, typed runner v2, conservative triage/novelty/fix/report gates, and campaign UI. |
+| Research control plane | Authenticated scopes/campaigns/approvals, signed SPDX/SLSA apparatus admission, encrypted SHA-256 artifact custody with retention/purge tombstones, hash-chained audit events, typed runner v2, conservative triage/novelty/fix/report gates, and campaign UI. |
 | RAG | Built-in lexical retrieval plus optional dense cosine retrieval, per-collection JSON persistence, eleven curated corpora. `--rag-max-chunks` explicitly tunes injection depth for larger contexts. |
 | Context7 | Live, authoritative library documentation fetched per request for tech/library questions; bounded timeout, silent failure, rendered as a clearly-labelled section. On when `CONTEXT7_API_KEY` is set; `--no-context7` kills it. |
 | Long-term memory | Per-profile namespace; kinds `project_fact`, `preference`, `correction`. Instruction-injection filter on writes; `/remember` + per-message corrections. |
@@ -258,6 +282,8 @@ export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmen
 | `--research-token`   | Bootstrap bearer token (prefer `AGENT_SMITH_RESEARCH_TOKEN`; minimum 32 characters). |
 | `--research-artifact-keys` | Ordered comma-separated `0600` files containing hex AES-256 custody keys; the first key is active. |
 | `--research-artifact-retention` | Minimum evidence custody period before approved purge (default 90 days; range 24 hours–10 years). |
+| `--research-apparatus-catalog` | Short-lived signed catalog of exact manifests, SPDX SBOMs, and SLSA provenance. |
+| `--research-apparatus-public-key` | Separately trusted Ed25519 public key for apparatus admission. |
 | `--research-container-runtime` | Optional required Docker runtime such as `runsc`; rootless Docker is mandatory for runner v2. |
 | `--research-novelty-sources` | Bounded JSON file of operator-fixed HTTPS novelty sources; empty disables lookup egress. |
 | `--ingest`           | Ingest markdown into a RAG collection and exit (with `--collection` + `--source`). |

@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +16,20 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
 	"github.com/ikarolaborda/agent-smith/internal/research/store"
 )
+
+func TestRegisterApparatusRequiresVerifiedSupplyChainAdmission(t *testing.T) {
+	ctx := context.Background()
+	svc, repository := newTestService(t)
+	defer repository.Close()
+
+	_, err := svc.RegisterApparatus(ctx, domain.Principal{ID: "admin", Roles: []domain.Role{domain.RoleAdmin}}, domain.ApparatusManifest{ID: "untrusted"})
+	if !errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "supply-chain admission required") {
+		t.Fatalf("untrusted apparatus registration error=%v", err)
+	}
+	if _, err := repository.GetApparatus(ctx, "untrusted"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("untrusted apparatus was persisted: %v", err)
+	}
+}
 
 func TestServiceEnforcesScopeOwnershipBudgetAndEvidenceTransitions(t *testing.T) {
 	ctx := context.Background()
@@ -259,6 +276,7 @@ func TestUnapprovedOrOutOfScopeJobNeverReachesBroker(t *testing.T) {
 	manifest := domain.ApparatusManifest{SchemaVersion: 1, ID: "apparatus", Name: "test", Version: "1", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Engine: "libfuzzer",
 		Sanitizers: []string{"address"}, Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}}, Operations: []domain.Operation{domain.OperationFuzz},
 		Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1024, MaxCPUSeconds: 30, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1}}
+	manifest = attachTestApparatusAdmission(t, svc, manifest, now)
 	if err := repository.SaveApparatus(ctx, manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -347,4 +365,30 @@ func newTestService(t *testing.T) (*Service, *store.Store) {
 		t.Fatal(err)
 	}
 	return svc, repository
+}
+
+func attachTestApparatusAdmission(t *testing.T, svc *Service, manifest domain.ApparatusManifest, now time.Time) domain.ApparatusManifest {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sbom := json.RawMessage(`{"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","dataLicense":"CC0-1.0","documentNamespace":"https://example.test/service-sbom","packages":[{"name":"fixture","SPDXID":"SPDXRef-Package","versionInfo":"1.0.0","checksums":[{"algorithm":"SHA256","checksumValue":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}]}`)
+	provenance := json.RawMessage(`{"_type":"https://in-toto.io/Statement/v1","subject":[{"digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildDefinition":{"buildType":"https://example.test/build/v1","resolvedDependencies":[{"uri":"pkg:docker/base@1","digest":{"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}]},"runDetails":{"builder":{"id":"https://builder.example.test/research"}}}}`)
+	envelope, err := apparatus.SignAdmissionCatalog(apparatus.AdmissionCatalog{SchemaVersion: 1, IssuedAt: now, ExpiresAt: now.Add(time.Hour), Entries: []apparatus.AdmissionEntry{{Manifest: manifest, SBOM: sbom, Provenance: provenance}}}, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := apparatus.VerifyAdmissionCatalog(envelope, publicKey, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AttachApparatusAdmission(verified); err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := verified.Admit(manifest, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return admitted
 }

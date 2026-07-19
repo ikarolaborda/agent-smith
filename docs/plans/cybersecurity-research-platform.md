@@ -61,8 +61,8 @@ disclosure records. No-match novelty results remain `novelty_unverified`.
 
 The implementation is not beta-ready. A clean stochastic real-program
 discovery/minimization campaign, end-to-end real-program branch/novelty/fix
-validation, dependency/SBOM admission, kernel/filesystem disk and inode
-enforcement, backup/restore validation, and an independent security review
+validation, kernel/filesystem disk and inode enforcement, backup/restore
+validation, and an independent security review
 remain release blockers. The current host reports neither rootless Docker nor
 gVisor, so the production CLI correctly refuses to start its research runner
 here; rootful Docker results are functional lab evidence only.
@@ -439,8 +439,15 @@ only through a versioned Ed25519 envelope with a separately trusted PKIX public
 key, derived SHA-256 key identity, a maximum 90-day lifetime, canonical signing
 payload, strict JSON/PEM decoding, and key identity retained in target
 provenance. The CLI creates canonical envelopes while refusing broadly readable
-private-key files. Operational key rotation/revocation, SBOM policy, and pinned
-dependency mirrors remain beta blockers.
+private-key files. Apparatus registration and every job launch also require an
+exact match in a separate short-lived Ed25519 catalog. Each signed entry embeds
+the manifest, an SPDX 2.x JSON SBOM, and SLSA provenance v1. Admission requires
+a pinned version and SHA-256 for every SBOM package, exact image-subject
+binding, and URI/SHA-256 identities for all provenance dependencies; derived
+SBOM, provenance, key, builder, expiry, and dependency-count metadata are
+persisted and audited. Operational key rotation/revocation, scanner and builder
+trust, registry transparency, and pinned dependency mirrors remain beta
+blockers.
 
 ## APIs and user experience
 
