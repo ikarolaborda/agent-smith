@@ -17,7 +17,7 @@ func TestPrivateDraftIsEvidenceLinkedAndNeverClaimsNovelty(t *testing.T) {
 			NoveltyChecks: []domain.GateCheck{{Name: "nvd", Status: "no_match", EvidenceIDs: []string{"lookup"}}},
 		},
 		Group: domain.CrashGroup{ID: "group"},
-		Primitive: domain.PrimitiveAssessment{ID: "primitive", CampaignID: "campaign", CrashGroupID: "group", Operation: domain.PrimitiveOOBWrite,
+		Primitive: domain.PrimitiveAssessment{ID: "primitive", CampaignID: "campaign", CrashGroupID: "group", Operation: domain.PrimitiveOOBWrite, OperationEvidence: []string{"observation"},
 			AttackerControl: unknown, AccessWidth: unknown, ValueControl: unknown, TargetRelation: unknown, Repeatability: unknown, Reachability: unknown, Mitigations: unknown, ExploitabilityGap: unknown},
 		Reviewer:      domain.Approval{ID: "approval", CampaignID: "campaign", Operation: domain.OperationDraftReport, Status: "approved"},
 		NoveltyStatus: "novel",

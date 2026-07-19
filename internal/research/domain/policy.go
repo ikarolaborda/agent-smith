@@ -200,8 +200,16 @@ func exceeds(requested, maximum int64) bool {
 
 /* ValidatePrimitive ensures every asserted primitive dimension cites evidence. */
 func ValidatePrimitive(p PrimitiveAssessment) error {
-	if p.ID == "" || p.CampaignID == "" || p.CrashGroupID == "" || p.Operation == "" {
-		return errors.New("research: primitive identity, crash group, and operation required")
+	if p.ID == "" || p.CampaignID == "" || p.CrashGroupID == "" || p.Operation == "" || len(p.OperationEvidence) == 0 {
+		return errors.New("research: primitive identity, crash group, operation, and operation evidence required")
+	}
+	switch p.Operation {
+	case PrimitiveCrash, PrimitiveOOBRead, PrimitiveOOBWrite, PrimitiveUseAfterFree, PrimitiveTypeConfusion, PrimitiveInvalidFree, PrimitiveControlData, PrimitiveOther:
+	default:
+		return errors.New("research: unknown primitive operation")
+	}
+	if !validEvidenceIDs(p.OperationEvidence) {
+		return errors.New("research: primitive operation evidence contains an empty or duplicate id")
 	}
 	fields := map[string]EvidenceValue{
 		"attacker_control":   p.AttackerControl,
@@ -214,7 +222,7 @@ func ValidatePrimitive(p PrimitiveAssessment) error {
 		"exploitability_gap": p.ExploitabilityGap,
 	}
 	for name, field := range fields {
-		if field.Known && (strings.TrimSpace(field.Value) == "" || len(field.EvidenceIDs) == 0) {
+		if field.Known && (strings.TrimSpace(field.Value) == "" || !validEvidenceIDs(field.EvidenceIDs)) {
 			return fmt.Errorf("research: primitive field %s is known without evidence", name)
 		}
 		if !field.Known && (field.Value != "" || len(field.EvidenceIDs) != 0) {
@@ -222,4 +230,18 @@ func ValidatePrimitive(p PrimitiveAssessment) error {
 		}
 	}
 	return nil
+}
+
+func validEvidenceIDs(ids []string) bool {
+	if len(ids) == 0 {
+		return false
+	}
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
 }

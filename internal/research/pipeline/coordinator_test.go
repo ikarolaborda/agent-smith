@@ -200,6 +200,35 @@ SUMMARY: AddressSanitizer: heap-buffer-overflow /source/fuzz_target.cc:16:38 in 
 	if err != nil || len(groups) != 1 || groups[0].MinimizedArtifactID != minimized.ID {
 		t.Fatalf("groups after minimization=%#v err=%v", groups, err)
 	}
+	addresses, err := PrepareEvidence(ctx, repository, campaign.ID, stderr.ID, domain.OperationSymbolize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(addresses, "addresses.txt")); err != nil || !strings.Contains(string(data), "0x51933a") {
+		t.Fatalf("addresses=%q err=%v", data, err)
+	}
+	symbolized, err := repository.PutArtifact(ctx, domain.Artifact{CampaignID: campaign.ID, RunID: "run-symbolize", Role: "symbolized_stack", MediaType: "text/plain"}, strings.NewReader("LLVMFuzzerTestOneInput\n/source/fuzz_target.cc:16:38\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Ingest(ctx,
+		domain.WorkerJob{RunID: "run-symbolize", CampaignID: campaign.ID, BuildID: "build", InputArtifactID: stderr.ID, Operation: domain.OperationSymbolize, AuditCorrelationID: "symbolize"},
+		domain.RunResult{RunID: "run-symbolize", Operation: domain.OperationSymbolize, Status: domain.RunCompleted, ArtifactIDs: []string{symbolized.ID}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	campaign, err = repository.GetCampaign(ctx, campaign.ID)
+	if err != nil || campaign.State != domain.CampaignPrimitiveAssessed {
+		t.Fatalf("campaign after primitive assessment=%#v err=%v", campaign, err)
+	}
+	primitives, err := repository.ListPrimitives(ctx, campaign.ID, 10)
+	if err != nil || len(primitives) != 1 || primitives[0].Operation != domain.PrimitiveOOBWrite || primitives[0].AttackerControl.Known {
+		t.Fatalf("primitives=%#v err=%v", primitives, err)
+	}
+	findings, err := repository.ListFindings(ctx, campaign.ID, 10)
+	if err != nil || len(findings) != 1 || findings[0].Label != domain.FindingPrimitiveConfirmed || findings[0].CWE != "CWE-787" {
+		t.Fatalf("findings=%#v err=%v", findings, err)
+	}
 }
 
 const testDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

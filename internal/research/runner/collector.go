@@ -38,6 +38,10 @@ func (c *Collector) Collect(ctx context.Context, job domain.WorkerJob, staging s
 	}
 	result.Apparatus.ImageDigest = job.ImageDigest
 	result.Apparatus.Runtime = assurance.Runtime
+	var parentIDs []string
+	if job.InputArtifactID != "" {
+		parentIDs = []string{job.InputArtifactID}
+	}
 	stdout, stdoutTruncated, stdoutDropped := boundedBytes(execution.Stdout, c.maxCapturedOutputBytes)
 	stderr, stderrTruncated, stderrDropped := boundedBytes(execution.Stderr, c.maxCapturedOutputBytes)
 	result.Output.StdoutTruncated = execution.StdoutTruncated || stdoutTruncated
@@ -45,7 +49,7 @@ func (c *Collector) Collect(ctx context.Context, job domain.WorkerJob, staging s
 	result.Output.BytesDropped = execution.BytesDropped + stdoutDropped + stderrDropped
 	if len(stdout) > 0 {
 		artifact, err := c.sink.PutArtifact(ctx, domain.Artifact{
-			SchemaVersion: 1, CampaignID: job.CampaignID, RunID: job.RunID, Role: "stdout_log", MediaType: "text/plain; charset=utf-8", Sensitivity: "research",
+			SchemaVersion: 1, CampaignID: job.CampaignID, RunID: job.RunID, ParentIDs: parentIDs, Role: "stdout_log", MediaType: "text/plain; charset=utf-8", Sensitivity: "research",
 		}, bytes.NewReader(stdout))
 		if err != nil {
 			return result, err
@@ -55,7 +59,7 @@ func (c *Collector) Collect(ctx context.Context, job domain.WorkerJob, staging s
 	}
 	if len(stderr) > 0 {
 		artifact, err := c.sink.PutArtifact(ctx, domain.Artifact{
-			SchemaVersion: 1, CampaignID: job.CampaignID, RunID: job.RunID, Role: "stderr_log", MediaType: "text/plain; charset=utf-8", Sensitivity: "research",
+			SchemaVersion: 1, CampaignID: job.CampaignID, RunID: job.RunID, ParentIDs: parentIDs, Role: "stderr_log", MediaType: "text/plain; charset=utf-8", Sensitivity: "research",
 		}, bytes.NewReader(stderr))
 		if err != nil {
 			return result, err
@@ -110,7 +114,7 @@ func (c *Collector) Collect(ctx context.Context, job domain.WorkerJob, staging s
 		}
 		artifact, ingestErr := c.sink.PutArtifact(ctx, domain.Artifact{
 			SchemaVersion: 1, CampaignID: job.CampaignID, RunID: job.RunID, Role: rule.Role, MediaType: rule.MediaType,
-			Sensitivity: "research", CreatedAt: time.Now().UTC(),
+			Sensitivity: "research", ParentIDs: parentIDs, CreatedAt: time.Now().UTC(),
 		}, file)
 		file.Close()
 		if ingestErr != nil {

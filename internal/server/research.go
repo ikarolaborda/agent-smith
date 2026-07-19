@@ -278,6 +278,14 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 			s.writeResearchError(w, err)
 			return
 		}
+		preflightBudget := request.Job.Budget
+		if preflightBudget == (domain.ResourceBudget{}) {
+			preflightBudget = manifest.Limits
+		}
+		if err := s.research.service.PreauthorizeEnqueue(r.Context(), principal, campaignID, request.Job.Operation, request.Job.Revision, preflightBudget, request.ApprovalID, request.Job.CorrelationID); err != nil {
+			s.writeResearchError(w, err)
+			return
+		}
 		request.Job.CampaignID = campaign.ID
 		request.Job.ScopeID = campaign.ScopeID
 		request.Job.SourceDir = ""

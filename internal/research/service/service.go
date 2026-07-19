@@ -470,6 +470,48 @@ func (s *Service) CanReadCampaign(ctx context.Context, actor domain.Principal, c
 	return scopeMember(scope, actor), nil
 }
 
+// PreauthorizeEnqueue checks state, actor, target, approval, and resource policy
+// before an API adapter creates any campaign-owned corpus/evidence views.
+// Enqueue repeats the checks against the final manifest-built job envelope.
+func (s *Service) PreauthorizeEnqueue(ctx context.Context, actor domain.Principal, campaignID string, operation domain.Operation, revision string, budget domain.ResourceBudget, approvalID, correlationID string) error {
+	if correlationID == "" {
+		return s.denied(ctx, actor, "job.preauthorize", "campaign", campaignID, "audit correlation id is required")
+	}
+	campaign, err := s.store.GetCampaign(ctx, campaignID)
+	if err != nil {
+		return err
+	}
+	if !campaignAllowsOperation(campaign.State, operation) {
+		return s.denied(ctx, actor, "job.preauthorize", "campaign", campaignID, "operation is not permitted in the current evidence state")
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return err
+	}
+	repository := scope.TargetRepository
+	if campaign.TargetID != "" {
+		target, targetErr := s.store.GetTarget(ctx, campaign.TargetID)
+		if targetErr != nil {
+			return targetErr
+		}
+		repository = target.Repository
+		if revision != target.Commit {
+			return s.denied(ctx, actor, "job.preauthorize", "campaign", campaignID, "requested revision does not match the immutable target")
+		}
+	}
+	decision, err := s.AuthorizeAction(ctx, campaignID, domain.Action{
+		Principal: actor, Operation: operation, Repository: repository, Revision: revision,
+		WallSeconds: budget.MaxWallSeconds, MemoryBytes: budget.MaxMemoryBytes, DiskBytes: budget.MaxDiskBytes, PIDs: budget.MaxPIDs, ApprovalID: approvalID,
+	}, correlationID)
+	if err != nil {
+		return err
+	}
+	if !decision.Allowed {
+		return s.denied(ctx, actor, "job.preauthorize", "campaign", campaignID, decision.Reason)
+	}
+	return nil
+}
+
 // Enqueue authorizes every mount and exact approval before touching the queue.
 func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignID string, job domain.WorkerJob, approvalID string) (domain.ExperimentRun, error) {
 	if s.broker == nil {
@@ -484,6 +526,9 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 	}
 	if job.CampaignID != campaign.ID || job.ScopeID != campaign.ScopeID || job.AuditCorrelationID == "" {
 		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job identity does not match campaign")
+	}
+	if err := s.PreauthorizeEnqueue(ctx, actor, campaignID, job.Operation, job.Arguments["revision"], job.Budget, approvalID, job.AuditCorrelationID); err != nil {
+		return domain.ExperimentRun{}, err
 	}
 	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
 	if err != nil {
@@ -829,7 +874,7 @@ func deterministicID(prefix string, values ...string) string {
 func campaignAllowsOperation(state domain.CampaignState, operation domain.Operation) bool {
 	switch operation {
 	case domain.OperationInspect, domain.OperationListHarnesses:
-		return state != domain.CampaignDraft && state != domain.CampaignPaused && state != domain.CampaignCancelled && state != domain.CampaignFailed
+		return state != domain.CampaignDraft && state != domain.CampaignScoped && state != domain.CampaignPaused && state != domain.CampaignCancelled && state != domain.CampaignFailed
 	case domain.OperationBuild:
 		return state == domain.CampaignAcquired
 	case domain.OperationSmokeTest, domain.OperationSeed:

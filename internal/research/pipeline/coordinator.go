@@ -23,6 +23,7 @@ import (
 
 var safeSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,160}$`)
 var addressPattern = regexp.MustCompile(`0x[0-9a-fA-F]+`)
+var sourceLinePattern = regexp.MustCompile(`(?m)(?:^|\s)(?:/[^\s:]+|[A-Za-z0-9_.-]+):[1-9][0-9]*(?::[0-9]+)?(?:$|\s)`)
 
 // Coordinator is the deterministic post-run evidence ingestion boundary.
 type Coordinator struct {
@@ -253,6 +254,8 @@ func (c *Coordinator) Ingest(ctx context.Context, job domain.WorkerJob, result d
 		return c.ingestBuild(ctx, job, result)
 	case domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationRegressionTest, domain.OperationCompareBranch:
 		return c.ingestObservation(ctx, job, result)
+	case domain.OperationSymbolize:
+		return c.ingestSymbolization(ctx, job, result)
 	default:
 		return nil
 	}
@@ -600,6 +603,182 @@ func (c *Coordinator) advanceMinimization(ctx context.Context, job domain.Worker
 		return err
 	}
 	return c.advanceCampaign(ctx, job.CampaignID, domain.CampaignReproduced, domain.CampaignMinimized, facts, job.AuditCorrelationID)
+}
+
+func (c *Coordinator) ingestSymbolization(ctx context.Context, job domain.WorkerJob, result domain.RunResult) error {
+	if job.InputArtifactID == "" {
+		return errors.New("research pipeline: symbolization requires an input log")
+	}
+	input, err := c.store.GetArtifact(ctx, job.InputArtifactID)
+	if err != nil {
+		return err
+	}
+	if input.CampaignID != job.CampaignID {
+		return errors.New("research pipeline: symbolization input belongs to another campaign")
+	}
+	var symbolized domain.Artifact
+	for _, artifactID := range result.ArtifactIDs {
+		artifact, getErr := c.store.GetArtifact(ctx, artifactID)
+		if getErr != nil {
+			return getErr
+		}
+		if artifact.CampaignID != job.CampaignID || artifact.RunID != result.RunID {
+			return errors.New("research pipeline: symbolization artifact identity mismatch")
+		}
+		if artifact.Role == "symbolized_stack" {
+			symbolized = artifact
+		}
+	}
+	if result.Status != domain.RunCompleted || symbolized.ID == "" {
+		return nil
+	}
+	_, output, err := c.store.OpenArtifact(ctx, symbolized.ID)
+	if err != nil {
+		return err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(output, 4<<20+1))
+	output.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if len(data) > 4<<20 {
+		return errors.New("research pipeline: symbolized stack exceeds limit")
+	}
+	frameCount := len(sourceLinePattern.FindAll(data, -1))
+	if frameCount == 0 {
+		return errors.New("research pipeline: symbolized stack has no source locations")
+	}
+	observations, err := c.store.ListCrashes(ctx, job.CampaignID, 10000)
+	if err != nil {
+		return err
+	}
+	var observation domain.CrashObservation
+	for _, candidate := range observations {
+		if candidate.RunID == input.RunID && candidate.SecurityRelevant && candidate.Signature != "" {
+			observation = candidate
+			break
+		}
+	}
+	if observation.ID == "" {
+		return errors.New("research pipeline: symbolization input is not linked to a security observation")
+	}
+	group, err := c.store.GetCrashGroup(ctx, groupID(job.CampaignID, observation.Signature))
+	if err != nil {
+		return err
+	}
+	group.RootCause = observation.Summary
+	group.UpdatedAt = time.Now().UTC()
+	if err := c.store.SaveCrashGroup(ctx, group); err != nil {
+		return err
+	}
+	if _, err := c.store.AppendAudit(ctx, domain.AuditEvent{ActorID: "evidence-pipeline", Action: "root_cause.ingest", ResourceType: "crash_group", ResourceID: group.ID, CorrelationID: job.AuditCorrelationID, Decision: "machine_parsed", Details: map[string]string{"campaign_id": job.CampaignID, "symbolized_artifact_id": symbolized.ID}}); err != nil {
+		return err
+	}
+	if err := c.advanceCampaign(ctx, job.CampaignID, domain.CampaignMinimized, domain.CampaignRootCaused,
+		domain.EvidenceFacts{SymbolizedFrameCount: frameCount, RootCause: group.RootCause, CrashGroupID: group.ID}, job.AuditCorrelationID); err != nil {
+		return err
+	}
+	primitive := primitiveFromObservation(job.CampaignID, group, observation, symbolized.ID, time.Now().UTC())
+	if err := domain.ValidatePrimitive(primitive); err != nil {
+		return err
+	}
+	if err := c.store.SavePrimitive(ctx, primitive); err != nil {
+		return err
+	}
+	if _, err := c.store.AppendAudit(ctx, domain.AuditEvent{ActorID: "evidence-pipeline", Action: "primitive.assess", ResourceType: "primitive_assessment", ResourceID: primitive.ID, CorrelationID: job.AuditCorrelationID, Decision: "evidence_bounded", Details: map[string]string{"campaign_id": job.CampaignID, "crash_group_id": group.ID}}); err != nil {
+		return err
+	}
+	if err := c.savePrimitiveFinding(ctx, group, observation, primitive, symbolized.ID, job.AuditCorrelationID); err != nil {
+		return err
+	}
+	return c.advanceCampaign(ctx, job.CampaignID, domain.CampaignRootCaused, domain.CampaignPrimitiveAssessed,
+		domain.EvidenceFacts{PrimitiveAssessmentID: primitive.ID, PrimitiveEvidenceValid: true}, job.AuditCorrelationID)
+}
+
+func primitiveFromObservation(campaignID string, group domain.CrashGroup, observation domain.CrashObservation, symbolizedArtifactID string, now time.Time) domain.PrimitiveAssessment {
+	operation := domain.PrimitiveCrash
+	bug := strings.ToLower(observation.BugType)
+	access := strings.ToLower(observation.Access)
+	switch {
+	case strings.Contains(bug, "use-after-free"):
+		operation = domain.PrimitiveUseAfterFree
+	case strings.Contains(bug, "double-free") || strings.Contains(bug, "invalid-free"):
+		operation = domain.PrimitiveInvalidFree
+	case strings.Contains(bug, "buffer-overflow") && strings.Contains(access, "write"):
+		operation = domain.PrimitiveOOBWrite
+	case strings.Contains(bug, "buffer-overflow") && strings.Contains(access, "read"):
+		operation = domain.PrimitiveOOBRead
+	}
+	primitive := domain.PrimitiveAssessment{SchemaVersion: 1, ID: "primitive_" + strings.TrimPrefix(group.ID, "group_"), CampaignID: campaignID, CrashGroupID: group.ID, Operation: operation, OperationEvidence: []string{observation.ID, symbolizedArtifactID}, CreatedAt: now}
+	if observation.AccessSize > 0 {
+		primitive.AccessWidth = domain.EvidenceValue{Known: true, Value: fmt.Sprintf("%d byte(s)", observation.AccessSize), EvidenceIDs: []string{observation.ID, symbolizedArtifactID}}
+	}
+	if len(group.ObservationIDs) > 1 {
+		primitive.Repeatability = domain.EvidenceValue{Known: true, Value: fmt.Sprintf("%d same-signature observations", len(group.ObservationIDs)), EvidenceIDs: append([]string(nil), group.ObservationIDs...)}
+	}
+	return primitive
+}
+
+func (c *Coordinator) savePrimitiveFinding(ctx context.Context, group domain.CrashGroup, observation domain.CrashObservation, primitive domain.PrimitiveAssessment, symbolizedArtifactID, correlationID string) error {
+	now := time.Now().UTC()
+	findingID := "finding_" + strings.TrimPrefix(group.ID, "group_")
+	finding, err := c.store.GetFinding(ctx, findingID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		finding = domain.Finding{
+			SchemaVersion: 1, ID: findingID, CampaignID: group.CampaignID, CrashGroupID: group.ID, PrimitiveID: primitive.ID,
+			Title: observation.Summary, Label: domain.FindingHypothesis, RootCause: group.RootCause,
+			EvidenceIDs:      append(append([]string(nil), group.ObservationIDs...), group.MinimizedArtifactID, symbolizedArtifactID, primitive.ID),
+			DisclosureStatus: "not_disclosed", CreatedAt: now, UpdatedAt: now,
+		}
+		finding.CWE = cweForPrimitive(primitive.Operation)
+	}
+	steps := []struct {
+		label domain.FindingLabel
+		facts domain.EvidenceFacts
+	}{
+		{domain.FindingObservation, domain.EvidenceFacts{}},
+		{domain.FindingCrashObserved, domain.EvidenceFacts{CrashInputArtifactID: observation.InputArtifactID, CrashMachineParsed: true}},
+		{domain.FindingReproducedMemoryIssue, domain.EvidenceFacts{ReproductionCount: c.minimumReproductions}},
+		{domain.FindingPrimitiveCandidate, domain.EvidenceFacts{PrimitiveAssessmentID: primitive.ID}},
+		{domain.FindingPrimitiveConfirmed, domain.EvidenceFacts{PrimitiveAssessmentID: primitive.ID, PrimitiveEvidenceValid: true}},
+	}
+	for _, step := range steps {
+		if finding.Label == step.label {
+			continue
+		}
+		promoted, promoteErr := c.machine.PromoteFinding(finding, step.label, step.facts, now)
+		if promoteErr != nil {
+			return promoteErr
+		}
+		finding = promoted
+	}
+	finding.UpdatedAt = now
+	if err := c.store.SaveFinding(ctx, finding); err != nil {
+		return err
+	}
+	_, err = c.store.AppendAudit(ctx, domain.AuditEvent{ActorID: "evidence-pipeline", Action: "finding.promote", ResourceType: "finding", ResourceID: finding.ID, CorrelationID: correlationID, Decision: "evidence_bounded", Details: map[string]string{"campaign_id": finding.CampaignID, "label": string(finding.Label)}})
+	return err
+}
+
+func cweForPrimitive(operation domain.PrimitiveOperation) string {
+	switch operation {
+	case domain.PrimitiveOOBWrite:
+		return "CWE-787"
+	case domain.PrimitiveOOBRead:
+		return "CWE-125"
+	case domain.PrimitiveUseAfterFree:
+		return "CWE-416"
+	case domain.PrimitiveInvalidFree:
+		return "CWE-415"
+	default:
+		return ""
+	}
 }
 
 func (c *Coordinator) advanceCampaign(ctx context.Context, campaignID string, from, to domain.CampaignState, facts domain.EvidenceFacts, correlationID string) error {

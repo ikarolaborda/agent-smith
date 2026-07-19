@@ -438,6 +438,7 @@ type PrimitiveAssessment struct {
 	CampaignID        string             `json:"campaign_id"`
 	CrashGroupID      string             `json:"crash_group_id"`
 	Operation         PrimitiveOperation `json:"operation"`
+	OperationEvidence []string           `json:"operation_evidence_ids"`
 	AttackerControl   EvidenceValue      `json:"attacker_control"`
 	AccessWidth       EvidenceValue      `json:"access_width"`
 	ValueControl      EvidenceValue      `json:"value_control"`

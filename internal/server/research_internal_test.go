@@ -151,6 +151,11 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 			}
 			log := "==3==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\nWRITE of size 1 at 0x1 thread T0\n    #0 0x51933a in LLVMFuzzerTestOneInput /source/fuzz_target.cc:16:38\nSUMMARY: AddressSanitizer: heap-buffer-overflow /source/fuzz_target.cc:16:38 in LLVMFuzzerTestOneInput\n"
 			return runner.Execution{Status: domain.RunFailed, Stderr: []byte(log)}, nil
+		case domain.OperationSymbolize:
+			if err := os.WriteFile(filepath.Join(staging, "symbolized.txt"), []byte("LLVMFuzzerTestOneInput\n/source/fuzz_target.cc:16:38\n"), 0o444); err != nil {
+				return runner.Execution{}, err
+			}
+			return runner.Execution{Status: domain.RunCompleted}, nil
 		default:
 			return runner.Execution{Status: domain.RunCompleted}, nil
 		}
@@ -168,12 +173,12 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	defer srv.Close()
 	manifest := domain.ApparatusManifest{SchemaVersion: 1, ID: "apparatus", Name: "fixture", Version: "1", Engine: "libfuzzer", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Sanitizers: []string{"address"}, Architectures: []string{"amd64"}, Harnesses: []domain.HarnessManifest{{Name: "parser", Binary: "/build/fuzz_target"}},
-		Operations: []domain.Operation{domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1 << 20, MaxDiskBytes: 1 << 20, MaxPIDs: 8}}
+		Operations: []domain.Operation{domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationSymbolize}, Limits: domain.ResourceBudget{MaxWallSeconds: 30, MaxMemoryBytes: 1 << 20, MaxDiskBytes: 1 << 20, MaxPIDs: 8}}
 	if response := researchJSONRequest(srv, http.MethodPost, "/v1/research/apparatuses", operatorToken, manifest); response.Code != http.StatusCreated {
 		t.Fatalf("apparatus status=%d body=%s", response.Code, response.Body.String())
 	}
 	scopeRequest := domain.AuthorizationScope{Purpose: "pipeline test", TargetRepository: "repo", AllowedRevisions: []string{"abc"}, WorkspaceRoots: []string{workspace},
-		AllowedOperations: []domain.Operation{domain.OperationAcquire, domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize}, AllowedApparatusIDs: []string{manifest.ID}, Budget: manifest.Limits, ExpiresAt: time.Now().UTC().Add(time.Hour)}
+		AllowedOperations: []domain.Operation{domain.OperationAcquire, domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationSymbolize}, AllowedApparatusIDs: []string{manifest.ID}, Budget: manifest.Limits, ExpiresAt: time.Now().UTC().Add(time.Hour)}
 	response := researchJSONRequest(srv, http.MethodPost, "/v1/research/scopes", operatorToken, scopeRequest)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("scope status=%d body=%s", response.Code, response.Body.String())
@@ -207,6 +212,16 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	_ = json.Unmarshal(response.Body.Bytes(), &buildRun)
 	if result, err := srv.research.broker.Wait(t.Context(), buildRun.ID); err != nil || result.Status != domain.RunCompleted {
 		t.Fatalf("build result=%#v err=%v", result, err)
+	}
+	corpusPath := filepath.Join(srv.research.store.Root(), "worker-inputs", campaign.ID, "corpora", "parser")
+	response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
+		"operation": "fuzz", "harness": "parser", "revision": "abc", "sanitizer": "address", "build_id": buildRun.ID,
+	}})
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing correlation status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(corpusPath); !os.IsNotExist(err) {
+		t.Fatalf("unauthorized request materialized corpus path: %v", err)
 	}
 	response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
 		"operation": "fuzz", "harness": "parser", "revision": "abc", "sanitizer": "address", "build_id": buildRun.ID, "correlation_id": "fuzz-correlation", "arguments": map[string]string{"max-total-time": "1"},
@@ -264,6 +279,40 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	response = researchJSONRequest(srv, http.MethodGet, "/v1/research/campaigns/"+campaign.ID, operatorToken, nil)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"minimized"`) {
 		t.Fatalf("minimized state status=%d body=%s", response.Code, response.Body.String())
+	}
+	artifacts, err := srv.research.store.ListArtifacts(t.Context(), campaign.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crashLogID string
+	for _, artifact := range artifacts {
+		if artifact.RunID == fuzzRun.ID && artifact.Role == "stderr_log" {
+			crashLogID = artifact.ID
+			break
+		}
+	}
+	if crashLogID == "" {
+		t.Fatal("fuzz crash log was not retained")
+	}
+	response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
+		"operation": "symbolize", "harness": "parser", "revision": "abc", "sanitizer": "address", "build_id": buildRun.ID,
+		"input_artifact_id": crashLogID, "correlation_id": "symbolize-correlation",
+	}})
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("symbolize enqueue status=%d body=%s", response.Code, response.Body.String())
+	}
+	var symbolizeRun domain.ExperimentRun
+	_ = json.Unmarshal(response.Body.Bytes(), &symbolizeRun)
+	if result, err := srv.research.broker.Wait(t.Context(), symbolizeRun.ID); err != nil || result.Status != domain.RunCompleted {
+		t.Fatalf("symbolize result=%#v err=%v", result, err)
+	}
+	response = researchJSONRequest(srv, http.MethodGet, "/v1/research/campaigns/"+campaign.ID, operatorToken, nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"primitive_assessed"`) {
+		t.Fatalf("primitive state status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = researchJSONRequest(srv, http.MethodGet, "/v1/research/campaigns/"+campaign.ID+"/primitive-assessments", operatorToken, nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"operation":"out_of_bounds_write"`) || !strings.Contains(response.Body.String(), `"attacker_control":{"known":false}`) {
+		t.Fatalf("primitive list status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

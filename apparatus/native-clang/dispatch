@@ -118,9 +118,56 @@ case "$operation" in
     minimize)
         test -x "$binary"
         test -f /evidence/reproducer
-        LLVM_PROFILE_FILE=/tmp/minimize.profraw "$binary" \
-            -minimize_crash=1 -exact_artifact_path=/out/minimized /evidence/reproducer
+		input_size="$(wc -c < /evidence/reproducer)"
+		case "$input_size" in ''|*[!0-9]*) echo "invalid reproducer size" >&2; exit 65 ;; esac
+		if [ "$input_size" -eq 0 ] || [ "$input_size" -gt 4096 ]; then
+			echo "reproducer must contain 1..4096 bytes" >&2
+			exit 65
+		fi
+		cp /evidence/reproducer /tmp/minimize-current
+		set +e
+		LLVM_PROFILE_FILE=/tmp/minimize-verify.profraw "$binary" -runs=1 /tmp/minimize-current >/dev/null 2>&1
+		crash_status="$?"
+		set -e
+		if [ "$crash_status" -eq 0 ]; then
+			echo "reproducer did not crash" >&2
+			exit 65
+		fi
+		changed=1
+		while [ "$changed" -eq 1 ] && [ "$input_size" -gt 1 ]; do
+			changed=0
+			index=0
+			while [ "$index" -lt "$input_size" ]; do
+				: > /tmp/minimize-candidate
+				dd if=/tmp/minimize-current of=/tmp/minimize-candidate bs=1 count="$index" status=none
+				tail_start="$((index + 1))"
+				dd if=/tmp/minimize-current of=/tmp/minimize-candidate bs=1 skip="$tail_start" seek="$index" conv=notrunc status=none
+				set +e
+				LLVM_PROFILE_FILE=/tmp/minimize-candidate.profraw "$binary" -runs=1 /tmp/minimize-candidate >/dev/null 2>&1
+				candidate_status="$?"
+				set -e
+				if [ "$candidate_status" -ne 0 ]; then
+					mv /tmp/minimize-candidate /tmp/minimize-current
+					input_size="$((input_size - 1))"
+					changed=1
+					break
+				fi
+				index="$((index + 1))"
+			done
+		done
+		cp /tmp/minimize-current /out/minimized
         chmod 0644 /out/minimized
+		# Emit the retained crash signal for deterministic signature comparison
+		# by the control-plane parser. A zero exit is a failed minimization.
+		set +e
+		LLVM_PROFILE_FILE=/tmp/minimize-final.profraw "$binary" -runs=1 /out/minimized
+		final_status="$?"
+		set -e
+		if [ "$final_status" -eq 0 ]; then
+			echo "minimized input did not preserve the crash" >&2
+			exit 65
+		fi
+		exit "$final_status"
         ;;
     merge_corpus)
         test -x "$binary"

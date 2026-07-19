@@ -15,6 +15,7 @@ import {
   type PrimitiveAssessment,
   type ResearchBuild,
   type ResearchScope,
+  type TargetRevision,
 } from '../research';
 
 interface Props {
@@ -34,6 +35,7 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
   const [observations, setObservations] = useState<CrashObservation[]>([]);
   const [primitives, setPrimitives] = useState<PrimitiveAssessment[]>([]);
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [target, setTarget] = useState<TargetRevision | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -69,6 +71,7 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
   const loadCampaign = useCallback(async (id: string) => {
     if (!id) return;
     try {
+	  const campaign = await researchJSON<Campaign>(`/v1/research/campaigns/${id}`);
       const [nextRuns, nextBuilds, nextArtifacts, nextApprovals, nextGroups, nextObservations, nextPrimitives, nextFindings, nextEvents] = await Promise.all([
         listResearch<ExperimentRun>(`/v1/research/campaigns/${id}/runs`),
         listResearch<ResearchBuild>(`/v1/research/campaigns/${id}/builds`),
@@ -89,6 +92,8 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
       setPrimitives(nextPrimitives);
       setFindings(nextFindings);
       setEvents(nextEvents);
+	  setCampaigns((current) => current.map((item) => item.id === campaign.id ? campaign : item));
+	  setTarget(campaign.target_id ? await researchJSON<TargetRevision>(`/v1/research/campaigns/${id}/target`) : null);
     } catch (error) {
       handleError(error);
     }
@@ -103,6 +108,7 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
   }, [loadCampaign, selectedID]);
 
   const selected = useMemo(() => campaigns.find((campaign) => campaign.id === selectedID), [campaigns, selectedID]);
+  const selectedScope = useMemo(() => scopes.find((scope) => scope.id === selected?.scope_id), [scopes, selected]);
 
   async function createCampaign(event: React.FormEvent) {
     event.preventDefault();
@@ -189,6 +195,10 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
               <div><span className="eyebrow">Authorized campaign</span><h2>{selected.name}</h2><p>{selected.goal || 'No campaign goal supplied.'}</p></div>
               <div className="research-heading-state"><StatusBadge value={selected.state} /><small>version {selected.version}</small></div>
             </div>
+			<div className="scope-banner">
+			  <div><strong>{selectedScope?.target_repository ?? 'Scope unavailable'}</strong><small>authorization expires {selectedScope ? new Date(selectedScope.expires_at).toLocaleString() : 'unknown'}</small></div>
+			  <StatusBadge value={new Date(selectedScope?.expires_at ?? 0) > new Date() ? 'scope active' : 'scope expired'} />
+			</div>
             <div className="metric-grid">
               <Metric label="Runs" value={runs.length} detail={`${runs.filter((run) => run.status === 'running').length} active`} />
               <Metric label="Builds" value={builds.length} detail={builds[0]?.sanitizer ?? 'none retained'} />
@@ -207,6 +217,9 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
                   <div className="research-row" key={build.id}><div><strong>{build.provenance?.harness || shortID(build.id)}</strong><small>{build.toolchain?.compiler || 'compiler pending'} · {build.sanitizer} · {shortID(build.image_digest)}</small></div><StatusBadge value={build.status} /></div>
                 ))}
               </Panel>
+			  <Panel title="Target provenance" icon="bi-git">
+				{!target ? <Empty text="No immutable target has been acquired." /> : <div className="target-provenance"><strong>{target.repository}</strong><small>{target.commit} · {target.language}/{target.architecture}</small><code>{target.source_sha256}</code></div>}
+			  </Panel>
               <Panel title="Approvals" icon="bi-person-check">
                 {approvals.length === 0 ? <Empty text="No approval decisions." /> : approvals.map((approval) => (
                   <div className="approval-row" key={approval.id}>
@@ -225,7 +238,7 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
                 {primitives.length === 0 ? <Empty text="No primitive assessment yet; all exploitability dimensions remain unknown." /> : primitives.map((primitive) => (
                   <div className="primitive-matrix" key={primitive.id}>
                     <strong>{primitive.operation}</strong>
-                    {Object.entries(primitive).filter(([key]) => !['id', 'operation'].includes(key)).map(([key, value]) => {
+                    {Object.entries(primitive).filter(([key]) => !['id', 'operation', 'operation_evidence_ids'].includes(key)).map(([key, value]) => {
                       const evidence = value as { known?: boolean; value?: string; evidence_ids?: string[] };
                       return <div key={key}><small>{key.replaceAll('_', ' ')}</small><span>{evidence.known ? evidence.value : 'unknown'}</span><code>{evidence.evidence_ids?.length ?? 0} evidence</code></div>;
                     })}

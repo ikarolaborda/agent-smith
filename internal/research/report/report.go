@@ -52,7 +52,7 @@ func RenderPrivateDraft(input DraftInputs) (string, error) {
 	fmt.Fprintf(&output, "- Campaign: `%s`\n- Target commit: `%s`\n- Evidence label: `%s`\n- Novelty: `%s`\n- Disclosure: not performed\n\n",
 		input.Campaign.ID, input.Target.Commit, input.Finding.Label, novelty)
 	fmt.Fprintf(&output, "## Summary\n\n%s\n\n## Root cause\n\n%s\n\n", clean(input.Finding.Title), clean(input.Finding.RootCause))
-	fmt.Fprintf(&output, "## Demonstrated primitive\n\n- Operation: `%s`\n", input.Primitive.Operation)
+	fmt.Fprintf(&output, "## Demonstrated primitive\n\n- Operation: `%s` (evidence: %s)\n", input.Primitive.Operation, strings.Join(input.Primitive.OperationEvidence, ", "))
 	for _, field := range []struct {
 		name  string
 		value domain.EvidenceValue

@@ -54,7 +54,7 @@ export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"
   --research-workspace-roots /absolute/path/to/authorized/project
 ```
 
-The browser asks for the token and keeps it in tab-scoped `sessionStorage`. Add `--allow-exec` to enable runner v2 only when the local Docker daemon reports rootless mode; add `--research-container-runtime runsc` to require gVisor. Apparatus images and base images must be exact SHA-256 identities. Build the first libFuzzer apparatus with `apparatus/native-clang/build-image.sh`, register the generated manifest through `POST /v1/research/apparatuses`, then include its ID in an `AuthorizationScope`.
+The browser asks for the token and keeps it in tab-scoped `sessionStorage`. Add `--allow-exec` to enable runner v2 only when the local Docker daemon reports rootless mode; add `--research-container-runtime runsc` to require gVisor. Apparatus images and base images must be exact SHA-256 identities. Build the first libFuzzer apparatus with `BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 apparatus/native-clang/build-image.sh`, register the generated manifest through `POST /v1/research/apparatuses`, then include its ID in an `AuthorizationScope`.
 
 See the [research architecture plan](docs/plans/cybersecurity-research-platform.md) and [threat model](docs/security/research-threat-model.md). The deliberately vulnerable micro-fixture is evaluation-only and must never be reported as novel.
 
@@ -199,7 +199,7 @@ When `--serve` is on, the binary exposes:
 - `POST /v1/title` — generate a short conversation title.
 - `GET/POST /v1/rag/...` — `collections`, `search`, `remember`, `forget`, `memory`, `correction` for inspecting RAG and editing per-profile memory.
 - `GET  /healthz` — `{"status":"ok"}`.
-- `GET/POST /v1/research/...` — authenticated apparatus, scope, campaign, approval, run, artifact, event, and audit APIs when research mode is enabled.
+- `GET/POST /v1/research/...` — authenticated apparatus, scope, campaign/target, job/run/cancellation, build, crash, primitive, finding, approval, artifact, event, and audit APIs when research mode is enabled.
 - `GET  /` — the embedded SPA.
 
 ## RAG corpora

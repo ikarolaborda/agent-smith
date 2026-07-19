@@ -1,6 +1,6 @@
 # Cybersecurity research and exploit-primitive discovery plan
 
-- Status: Proposed
+- Status: Implemented baseline; beta release gates outstanding
 - Assessment date: 2026-07-19
 - Scope: defensive, authorized source-code vulnerability research
 - Supersedes: none; extends ADR 0003 beyond its phase-1 contained runner
@@ -28,6 +28,34 @@ trace, deduplicate the root cause, characterize the demonstrated primitive,
 propose a fix and regression test, and produce an evidence-complete report. It
 must never promote the known fixture as novel.
 
+## Implementation outcome (2026-07-19)
+
+Phases 0 and 1 are implemented. The repository now has truthful capability
+reporting, authenticated research APIs, fixed operator roots, durable SQLite
+campaign/job/evidence state, a private SHA-256 artifact store, approvals, and a
+hash-chained audit journal. Phase 2's typed broker, restart recovery,
+cancellation, concurrency control, hostile artifact collector, exact-image
+Docker backend, rootless/seccomp/cgroup preflight, and remote signed-envelope
+primitives are implemented; production enablement still requires a host that
+passes the rootless Docker or gVisor preflight and enforces disk/inode quotas.
+
+The native Clang apparatus implements the closed operation vocabulary and has
+been live-tested with real libFuzzer/ASan against a vulnerable fixture and a
+clean twin. The API evidence pipeline now performs immutable local source
+capture, build materialization, fuzz crash ingestion, three independent replay
+gates, bounded deletion minimization, offline symbolization, crash grouping,
+and conservative primitive/finding creation. Every unmeasured primitive field
+remains `unknown`; the pipeline stops at `primitive_confirmed` until branch,
+novelty, remediation, and human-review evidence exists.
+
+The implementation is not beta-ready. A pinned real-program known-bug campaign
+(Magma or equivalent), end-to-end branch/novelty/fix validation, deployable
+constrained network acquisition, disk/inode enforcement, encrypted retention
+operations, and an independent security review remain release blockers. The
+current host reports neither rootless Docker nor gVisor, so the production CLI
+correctly refuses to start its research runner here; rootful Docker results are
+functional lab evidence only.
+
 ## Operating boundary
 
 This plan supports research on code the operator owns or is explicitly
@@ -43,7 +71,7 @@ sentence in a prompt. It identifies the permitted repository/revision, operator,
 purpose, expiry, permitted operations, resource budget, network policy, and
 disclosure contact. Expired, absent, or mismatched scope stops execution.
 
-## Current architecture: code versus capability
+## Baseline architecture assessment (before implementation)
 
 | Area | Current implementation | Readiness | Assessment |
 | --- | --- | --- | --- |

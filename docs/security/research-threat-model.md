@@ -22,7 +22,8 @@ The following invariants are enforced outside model output:
 5. Worker network is disabled, credentials are absent, the root filesystem is
    read-only, capabilities are dropped, privilege escalation is disabled, and
    memory/PID/wall limits are set. Runner v2 refuses startup unless Docker reports
-   rootless mode; an optional runtime such as `runsc` must exist when configured.
+   rootless mode, built-in seccomp, and usable cgroups (cgroup v2 for rootless);
+   an optional runtime such as `runsc` must exist when configured.
 6. Worker output is hostile. Only regular files matching typed role/count/size
    rules are ingested; symlinks, devices, unexpected files, path escapes, changed
    files, excess logs, and hash mismatches are rejected.
@@ -61,9 +62,11 @@ Repository/ref resolution, base images, apparatus images, compilers, build
 scripts, dependencies, and seed corpora can be malicious or compromised. Scopes
 pin permitted repositories/revisions; target records retain source hashes;
 apparatus images are exact IDs; the native image build requires a digest-pinned
-base and emits compiler/build provenance. A production deployment still needs a
-curated image registry, signature verification/SBOM policy, and an explicit
-acquisition broker before accepting third-party targets.
+base and emits compiler/build provenance. Local acquisition rejects links and
+special files, applies file/byte ceilings, copies atomically into a private
+campaign tree, and rehashes that tree before every worker mount. A production
+deployment still needs a curated image registry, signature verification/SBOM
+policy, and an explicit acquisition broker before accepting third-party targets.
 
 ### Worker runtime
 

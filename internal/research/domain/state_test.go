@@ -70,7 +70,7 @@ func TestFindingPromotionCannotSkipOrInventEvidence(t *testing.T) {
 }
 
 func TestValidatePrimitiveRejectsUnsupportedKnownClaim(t *testing.T) {
-	p := PrimitiveAssessment{ID: "p", CampaignID: "c", CrashGroupID: "g", Operation: PrimitiveOOBWrite, AccessWidth: EvidenceValue{Known: true, Value: "1 byte"}}
+	p := PrimitiveAssessment{ID: "p", CampaignID: "c", CrashGroupID: "g", Operation: PrimitiveOOBWrite, OperationEvidence: []string{"observation"}, AccessWidth: EvidenceValue{Known: true, Value: "1 byte"}}
 	if err := ValidatePrimitive(p); err == nil {
 		t.Fatal("known value without evidence accepted")
 	}

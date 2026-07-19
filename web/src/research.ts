@@ -23,10 +23,22 @@ export interface Campaign {
   name: string;
   goal: string;
   state: string;
+  target_id?: string;
   version: number;
   budget: ResourceBudget;
   created_at: string;
   updated_at: string;
+}
+
+export interface TargetRevision {
+  id: string;
+  repository: string;
+  requested_ref: string;
+  commit: string;
+  source_sha256: string;
+  language: string;
+  architecture: string;
+  acquired_at: string;
 }
 
 export interface ExperimentRun {
@@ -100,6 +112,7 @@ export interface EvidenceValue {
 export interface PrimitiveAssessment {
   id: string;
   operation: string;
+  operation_evidence_ids: string[];
   attacker_control: EvidenceValue;
   access_width: EvidenceValue;
   value_control: EvidenceValue;
