@@ -110,9 +110,12 @@ func procPPID(pid int) int {
 	return parsePPIDFromStat(string(raw))
 }
 
-/* parsePPIDFromStat extracts the ppid (field 4) from /proc/<pid>/stat content,
+/*
+	parsePPIDFromStat extracts the ppid (field 4) from /proc/<pid>/stat content,
+
 scanning past the final ')' so a comm value containing spaces or parentheses
-cannot shift the field positions. Returns 0 when the line is unparseable. */
+cannot shift the field positions. Returns 0 when the line is unparseable.
+*/
 func parsePPIDFromStat(s string) int {
 	i := strings.LastIndexByte(s, ')')
 	if i < 0 || i+2 >= len(s) {
