@@ -67,6 +67,42 @@ func TestRun_StopsOnUsable(t *testing.T) {
 	}
 }
 
+func TestRun_GenErrorMidLoopDoesNotAbortRemainingBudget(t *testing.T) {
+	// Round 1 succeeds (not usable), round 2's generation errors, round 3 succeeds
+	// and is usable. A single mid-loop generation error must not discard rounds 3+.
+	callErr := errors.New("provider timeout")
+	calls := 0
+	gen := func(_ context.Context, _, _ string) (string, error) {
+		calls++
+		switch calls {
+		case 1:
+			return "grounded-but-thin", nil
+		case 2:
+			return "", callErr
+		default:
+			return "grounded-and-usable", nil
+		}
+	}
+	judge := &scriptedJudge{verdicts: []Verdict{
+		{Usable: false, FailureModes: []string{"unsupported-primitive"}},
+		{Usable: true, Reasons: "grounded and well scoped"},
+	}}
+
+	res, err := Run(context.Background(), "task", gen, judge, LoopConfig{MaxIters: 3})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Usable || res.FinalAnswer != "grounded-and-usable" {
+		t.Fatalf("expected usable round 3 to be reached, got usable=%v answer=%q", res.Usable, res.FinalAnswer)
+	}
+	if len(res.Rounds) != 3 {
+		t.Fatalf("expected 3 recorded rounds (incl. the errored one), got %d", len(res.Rounds))
+	}
+	if len(res.Rounds[1].Verdict.FailureModes) == 0 || res.Rounds[1].Verdict.FailureModes[0] != "generation-error" {
+		t.Errorf("errored round should be recorded with a generation-error failure mode, got %+v", res.Rounds[1].Verdict)
+	}
+}
+
 func TestRun_ExhaustionNeverReportsSuccess(t *testing.T) {
 	gen := &scriptedGen{answers: []string{"a", "b", "c"}}
 	/* Distinct failure modes each round so no-progress does not fire first. */

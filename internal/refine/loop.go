@@ -108,11 +108,26 @@ func Run(ctx context.Context, task string, gen Generator, judge Judge, cfg LoopC
 		answer, genErr := gen(rctx, task, brief)
 		if genErr != nil {
 			cancel()
-			/* A generation failure ends the loop; surface it only if we have nothing yet. */
+			/*
+				A single round's generation error (timeout, transient provider error, a
+				context overflow on one prompt) must not discard the remaining budget.
+				With nothing to fall back on yet, surface it. Otherwise record the failed
+				round in the ledger and continue: the next round is a fresh generation and
+				may well succeed, which is strictly better than returning the earlier
+				least-fabricated attempt as if the loop had run its course.
+			*/
 			if !bestSet {
 				return res, genErr
 			}
-			return res, nil
+			res.Rounds = append(res.Rounds, Round{
+				Iter:       i,
+				Verdict:    Verdict{Usable: false, Reasons: "generation error: " + genErr.Error(), FailureModes: []string{"generation-error"}},
+				DurationMs: time.Since(start).Milliseconds(),
+			})
+			if cfg.OnRound != nil {
+				cfg.OnRound(res.Rounds[len(res.Rounds)-1])
+			}
+			continue
 		}
 
 		verdict, jErr := judge.Judge(rctx, task, answer)

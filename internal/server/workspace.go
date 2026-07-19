@@ -192,33 +192,78 @@ func (s *Server) handleWorkspaceTree(w http.ResponseWriter, r *http.Request) {
 		consistent with the file tools, which already operate through the symlink.
 		Relative paths are still reported against the displayed root.
 	*/
+	resp.Entries, resp.Truncated = walkWorkspaceTree(root, workspaceTreeMaxEntries)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+/*
+walkWorkspaceTree returns a bounded, noise-filtered, sorted listing of root,
+skipping the same directories as the tree endpoint and stopping at max entries.
+It resolves a symlinked root so the walk matches what the file tools see. Shared
+by the /workspace/tree endpoint and the prompt-grounding listing.
+*/
+func walkWorkspaceTree(root string, max int) ([]workspaceTreeEntry, bool) {
+	entries := []workspaceTreeEntry{}
+	truncated := false
 	walkRoot := root
 	if real, err := filepath.EvalSymlinks(root); err == nil {
 		walkRoot = real
 	}
-
 	_ = filepath.WalkDir(walkRoot, func(p string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		if p == walkRoot {
+		if walkErr != nil || p == walkRoot {
 			return nil
 		}
 		if d.IsDir() && workspaceSkip[d.Name()] {
 			return filepath.SkipDir
 		}
-		if len(resp.Entries) >= workspaceTreeMaxEntries {
-			resp.Truncated = true
+		if len(entries) >= max {
+			truncated = true
 			return filepath.SkipAll
 		}
 		rel, err := filepath.Rel(walkRoot, p)
 		if err != nil {
 			return nil
 		}
-		resp.Entries = append(resp.Entries, workspaceTreeEntry{Path: rel, Dir: d.IsDir()})
+		entries = append(entries, workspaceTreeEntry{Path: rel, Dir: d.IsDir()})
 		return nil
 	})
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	return entries, truncated
+}
 
-	sort.Slice(resp.Entries, func(i, j int) bool { return resp.Entries[i].Path < resp.Entries[j].Path })
-	writeJSON(w, http.StatusOK, resp)
+/*
+	workspaceListingMaxEntries bounds the auto-injected prompt listing (kept smaller
+
+than the API tree so it never dominates the context window).
+*/
+const workspaceListingMaxEntries = 300
+
+/*
+buildWorkspaceListing renders a compact, deterministic file tree of the open
+workspace for injection into the prompt, so the model always has ground truth of
+what the folder contains and never disclaims access or invents files. It lists
+paths only — never contents — so it stays small; the model reads specific files
+via file_read/read_dir. Empty when no workspace is open or it is empty.
+*/
+func buildWorkspaceListing(root string) string {
+	if root == "" {
+		return ""
+	}
+	entries, truncated := walkWorkspaceTree(root, workspaceListingMaxEntries)
+	if len(entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Open workspace contents (ground truth — these files exist and are readable with file_read/read_dir):\n")
+	for _, e := range entries {
+		if e.Dir {
+			b.WriteString(e.Path + "/\n")
+			continue
+		}
+		b.WriteString(e.Path + "\n")
+	}
+	if truncated {
+		b.WriteString("… (listing truncated; use read_dir on a subpath for the rest)\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

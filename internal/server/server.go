@@ -826,6 +826,7 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 	reg := builtin.NewDefaultRegistryWithExec(workspace, s.allowExec, execOpts...)
 	a := agent.New(prov, reg, s.cfg.Agent.SystemPrompt, s.cfg.Agent.MaxIterations, s.logger)
 	a.Workspace = workspace
+	a.WorkspaceListing = buildWorkspaceListing(workspace)
 	ragOn := s.rag != nil && !s.disableRAG
 	if ragOn {
 		a.RAG = s.rag

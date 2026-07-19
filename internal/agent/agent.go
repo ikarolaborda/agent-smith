@@ -105,6 +105,13 @@ type Agent struct {
 		the server from the active workspace.
 	*/
 	Workspace string
+	/*
+		WorkspaceListing, when non-empty, is a compact file tree of the open
+		workspace injected into the prompt as ground truth, so the model always knows
+		which files exist without first having to call a tool — a hard guarantee
+		against disclaiming access or inventing files. Set per-request by the server.
+	*/
+	WorkspaceListing string
 }
 
 /*
@@ -497,7 +504,7 @@ func (a *Agent) composeFrom(ctx context.Context, msgs []llm.Message) []llm.Messa
 		and the remote abliteration model — regardless of the configured system
 		prompt.
 	*/
-	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, prompt.WorkspaceDirective(a.Workspace), agenticSection, aug, a.convoBlock)
+	system := prompt.JoinSections(a.SystemPrompt, prompt.PersonaDirective, prompt.CodingParadigmDirective, prompt.EngineeringDirective, prompt.GroundingGuardrailDirective, prompt.WorkspaceDirective(a.Workspace), a.WorkspaceListing, agenticSection, aug, a.convoBlock)
 	if system == "" {
 		return msgs
 	}
