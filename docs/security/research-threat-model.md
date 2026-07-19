@@ -55,6 +55,10 @@ logs, and filenames are untrusted. Models may propose plans and experiments but
 cannot promote evidence, register an apparatus, approve their own action, change
 fixed roots, choose arbitrary egress, or disclose. Raw logs and binary artifacts
 stay outside model context; bounded summaries and opaque IDs are the interface.
+The model's `research_query` capability is bound to the authenticated request
+principal, applies campaign membership on every lookup, omits artifact storage
+paths and bytes, filters private-disclosure metadata by role, and enforces a hard
+response-size ceiling.
 
 Novelty egress is disabled without an operator-owned source file. Enabled
 lookups use fixed HTTPS origins, refuse redirects and credential headers, apply

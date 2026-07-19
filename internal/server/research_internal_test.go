@@ -23,6 +23,57 @@ import (
 
 const reviewerToken = "reviewer-token-0123456789-abcdef-0003"
 
+type researchToolCaptureProvider struct {
+	request llm.ChatRequest
+}
+
+func (p *researchToolCaptureProvider) Name() string { return "capture" }
+
+func (p *researchToolCaptureProvider) Chat(_ context.Context, request llm.ChatRequest) (*llm.ChatResponse, error) {
+	p.request = request
+	return &llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: "ok"}}, nil
+}
+
+func (p *researchToolCaptureProvider) ChatStream(_ context.Context, request llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	p.request = request
+	stream := make(chan llm.StreamChunk, 1)
+	stream <- llm.StreamChunk{Done: true}
+	close(stream)
+	return stream, nil
+}
+
+func TestResearchChatRegistersPrincipalScopedQueryTool(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := privateDirForTest(workspace); err != nil {
+		t.Fatal(err)
+	}
+	provider := &researchToolCaptureProvider{}
+	srv, err := New(Options{
+		Config:    &config.Config{DefaultProvider: "fake", Providers: map[string]config.ProviderConfig{"fake": {Model: "test"}}, Agent: config.AgentConfig{MaxIterations: 1}},
+		Providers: map[string]llm.Provider{"fake": provider}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ResearchMode: &ResearchModeOptions{Enabled: true, DataDir: filepath.Join(root, "state"), WorkspaceRoots: []string{workspace},
+			Credentials: []ResearchCredential{{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	response := researchJSONRequest(srv, http.MethodPost, "/v1/chat/completions", operatorToken, map[string]any{
+		"model": "fake/test", "stream": true, "messages": []map[string]string{{"role": "user", "content": "summarize the campaign"}},
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("chat status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, definition := range provider.request.Tools {
+		if definition.Name == "research_query" {
+			return
+		}
+	}
+	t.Fatalf("research_query missing from provider tools: %#v", provider.request.Tools)
+}
+
 func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "workspace")

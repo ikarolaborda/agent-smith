@@ -96,6 +96,7 @@ func (s *Server) capabilityStatus() map[string]any {
 		"research_apparatus":            researchApparatus,
 		"research_isolation_assurance":  isolationAssurance,
 		"research_images_pinned":        researchRunner,
+		"research_query_tool":           researchEnabled,
 		"research_cpu_rate_limit":       dockerResourceLimits,
 		"research_writable_monitor":     researchRunner,
 		"research_kernel_storage_quota": false,

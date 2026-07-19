@@ -15,6 +15,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/cluster"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/refine"
+	"github.com/ikarolaborda/agent-smith/internal/research/querytool"
 )
 
 /* chatCompletionRequest is the OpenAI-shape request body accepted by /v1/chat/completions. */
@@ -286,6 +287,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "provider_error", err.Error())
 		return
+	}
+	if s.research != nil {
+		principal, authenticated := principalFromContext(r.Context())
+		if !authenticated {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "authenticated research principal required")
+			return
+		}
+		query, queryErr := querytool.New(s.research.store, s.research.service, principal)
+		if queryErr != nil {
+			writeError(w, http.StatusInternalServerError, "research_query_unavailable", queryErr.Error())
+			return
+		}
+		if queryErr = a.Tools.Register(query); queryErr != nil {
+			writeError(w, http.StatusInternalServerError, "research_query_unavailable", queryErr.Error())
+			return
+		}
 	}
 	a.ProfileID = req.ProfileID
 	a.Model = modelID

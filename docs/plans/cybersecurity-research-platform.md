@@ -45,12 +45,14 @@ clean twin. The API evidence pipeline now performs immutable local source
 capture, build materialization, fuzz crash ingestion, three independent replay
 gates, bounded deletion minimization, offline symbolization, crash grouping,
 and conservative primitive/finding creation. Every unmeasured primitive field
-remains `unknown`. The post-triage workflow now retains machine revision
-comparisons or explicit reviewer-owned untested reasons, fixed-source novelty
-responses and immutable reviews, approved candidate diffs, patch-linked builds,
-three-part runtime remediation validation, private reports, and separately
-approved human disclosure records. No-match novelty results remain
-`novelty_unverified`.
+remains `unknown`. Authenticated chat agents receive one principal-bound,
+read-only `research_query` tool that returns bounded campaign metadata and
+opaque evidence IDs; it cannot return artifact bytes or host storage paths. The
+post-triage workflow now retains machine revision comparisons or explicit
+reviewer-owned untested reasons, fixed-source novelty responses and immutable
+reviews, approved candidate diffs, patch-linked builds, three-part runtime
+remediation validation, private reports, and separately approved human
+disclosure records. No-match novelty results remain `novelty_unverified`.
 
 The implementation is not beta-ready. A pinned real-program known-bug campaign
 (Magma or equivalent), end-to-end real-program branch/novelty/fix validation,
@@ -488,6 +490,12 @@ Deliverables:
 Exit criteria: duplicated inputs collapse into the correct root-cause group;
 timeouts/OOM/assertions/benign UBSan observations do not become memory-safety
 findings; a primitive label cannot exist without its required evidence.
+
+Implementation status: the bounded parsers, replay/minimization/symbolization
+gates, crash grouping, primitive matrix, monotonic finding labels, and an
+authenticated campaign-scoped `research_query` model tool are implemented and
+fixture-tested. The query tool exposes metadata and opaque IDs only, filters
+campaign membership, removes artifact storage paths, and caps every response.
 
 ### Phase 5 — branch, novelty, fix, and regression workflow
 
