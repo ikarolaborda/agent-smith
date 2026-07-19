@@ -154,6 +154,15 @@ func (d *DockerBackend) Execute(ctx context.Context, job domain.WorkerJob, stagi
 	if cpuRate < 0.001 {
 		return Execution{}, errors.New("docker backend: CPU budget is too small for the wall-clock envelope")
 	}
+	workerUser := "0:0"
+	if !d.assurance.Rootless {
+		workerUser = hostContainerUser()
+	}
+	tmpfs := "/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=0700"
+	if workerUser != "0:0" {
+		identity := strings.Split(workerUser, ":")
+		tmpfs += ",uid=" + identity[0] + ",gid=" + identity[1]
+	}
 	args := []string{
 		"run", "--rm", "--name", containerName,
 		"--network", "none", "--read-only", "--cap-drop", "ALL",
@@ -161,11 +170,11 @@ func (d *DockerBackend) Execute(ctx context.Context, job domain.WorkerJob, stagi
 		"--memory", strconv.FormatInt(job.Budget.MaxMemoryBytes, 10), "--memory-swap", strconv.FormatInt(job.Budget.MaxMemoryBytes, 10),
 		"--cpus", strconv.FormatFloat(cpuRate, 'f', 6, 64),
 		"--ulimit", "core=0:0", "--ulimit", "nofile=1024:1024", "--ulimit", "fsize=" + strconv.FormatInt(job.Budget.MaxDiskBytes, 10) + ":" + strconv.FormatInt(job.Budget.MaxDiskBytes, 10),
-		// In rootless mode container uid 0 maps to the unprivileged daemon user,
-		// allowing writes to the private host staging directory without granting
-		// host root. Capabilities and privilege escalation remain disabled.
-		"--user", "0:0", "--workdir", "/work",
-		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=0700",
+		// Rootless container uid 0 maps to the unprivileged daemon user. With a
+		// rootful daemon, use the invoking host identity so the quota monitor can
+		// inspect every transient entry and no root-owned host artifacts remain.
+		"--user", workerUser, "--workdir", "/work",
+		"--tmpfs", tmpfs,
 		"--mount", dockerMount(staging, "/out", false),
 		"--env", "HOME=/tmp", "--env", "PATH=/usr/local/bin:/usr/bin:/bin", "--env", "AGENT_SMITH_RESEARCH=1",
 		"--label", "agent-smith.research.run=" + job.RunID,

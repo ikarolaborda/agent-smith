@@ -1,0 +1,7 @@
+png_signature="\x89PNG\x0d\x0a\x1a\x0a"
+ihdr="IHDR"
+plte="PLTE"
+trns="tRNS"
+gama="gAMA"
+idat="IDAT"
+iend="IEND"

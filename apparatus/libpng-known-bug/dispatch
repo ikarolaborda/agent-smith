@@ -1,0 +1,243 @@
+#!/bin/sh
+set -eu
+
+operation="${1:-}"
+if [ -z "$operation" ]; then
+    echo "operation required" >&2
+    exit 64
+fi
+shift
+
+harness=""
+max_total_time="30"
+revision=""
+sanitizer="address"
+validation_kind=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --harness) harness="${2:-}"; shift 2 ;;
+        --max-total-time) max_total_time="${2:-}"; shift 2 ;;
+        --revision) revision="${2:-}"; shift 2 ;;
+        --sanitizer) sanitizer="${2:-}"; shift 2 ;;
+        --validation-kind) validation_kind="${2:-}"; shift 2 ;;
+        --manifest) shift 2 ;;
+        *) echo "unsupported apparatus argument: $1" >&2; exit 64 ;;
+    esac
+done
+
+case "$harness" in
+    libpng_read_fuzzer) ;;
+    "") if [ "$operation" != "list_harnesses" ]; then echo "harness required" >&2; exit 64; fi ;;
+    *) echo "unknown harness" >&2; exit 64 ;;
+esac
+case "$max_total_time" in
+    ""|*[!0-9]*) echo "invalid max-total-time" >&2; exit 64 ;;
+esac
+if [ "$max_total_time" -gt 3600 ]; then
+    echo "max-total-time exceeds apparatus ceiling" >&2
+    exit 64
+fi
+
+case "$sanitizer" in
+    address) sanitizer_flags="address" ;;
+    undefined) sanitizer_flags="undefined" ;;
+    address,undefined|undefined,address) sanitizer_flags="address,undefined" ;;
+    *) echo "unsupported sanitizer variant" >&2; exit 64 ;;
+esac
+
+binary="/build/fuzz_target"
+compile_flags="-O1 -g -fno-omit-frame-pointer -fno-pie -fdebug-prefix-map=/out/.build-work/source=/source -fsanitize=$sanitizer_flags -fprofile-instr-generate -fcoverage-mapping"
+link_flags="-no-pie -fsanitize=fuzzer,$sanitizer_flags -fprofile-instr-generate -fcoverage-mapping"
+source_files="png.c pngerror.c pngget.c pngmem.c pngpread.c pngread.c pngrio.c pngrtran.c pngrutil.c pngset.c pngtrans.c pngwio.c pngwrite.c pngwtran.c pngwutil.c"
+
+require_source() {
+    test -r /source/png.h
+    test -r /source/png.c
+    test -r /source/pngread.c
+    test -r /source/scripts/pnglibconf.h.prebuilt
+}
+
+source_digest() {
+    source_root="$1"
+    (
+        cd "$source_root"
+        # shellcheck disable=SC2086 -- source_files is a fixed adapter-owned list.
+        sha256sum png.h pngconf.h scripts/pnglibconf.h.prebuilt $source_files | sha256sum | awk '{print $1}'
+    )
+}
+
+case "$operation" in
+    inspect)
+        require_source
+        version="$(sed -n 's/^#define PNG_LIBPNG_VER_STRING "\([^"]*\)"/\1/p' /source/png.h | head -n 1)"
+        source_sha256="$(source_digest /source)"
+        harness_sha256="$(sha256sum /apparatus/harness_png.cc | awk '{print $1}')"
+        clang_version="$(clang++ --version | sed -n '1p')"
+        jq -n \
+            --arg harness "$harness" \
+            --arg source_sha256 "sha256:$source_sha256" \
+            --arg harness_sha256 "sha256:$harness_sha256" \
+            --arg target_version "$version" \
+            --arg sanitizer "$sanitizer" \
+            --arg compiler "$clang_version" \
+            '{schema_version:1,harness:$harness,source_sha256:$source_sha256,harness_sha256:$harness_sha256,target_version:$target_version,sanitizers:$sanitizer,compiler:$compiler}' \
+            > /out/apparatus-inspection.json
+        chmod 0444 /out/apparatus-inspection.json
+        ;;
+    list_harnesses)
+        printf '%s\n' '{"harnesses":["libpng_read_fuzzer"]}'
+        ;;
+    build)
+        require_source
+        work_dir="/out/.build-work"
+        cleanup_build_work() { rm -rf "$work_dir"; }
+        trap cleanup_build_work EXIT HUP INT TERM
+        mkdir -p "$work_dir/objects" "$work_dir/include"
+        source_root="/source"
+        patch_sha256=""
+        if [ -f /patch/patch.diff ]; then
+            mkdir -p "$work_dir/source"
+            # Copy regular source files only. Git metadata and symlinks are not
+            # build inputs and never enter the monitored writable tree.
+            (cd /source && find . -path ./.git -prune -o -type f -exec cp --parents '{}' "$work_dir/source" \;)
+            patch --batch --forward --directory="$work_dir/source" --strip=1 < /patch/patch.diff
+            source_root="$work_dir/source"
+            patch_sha256="sha256:$(sha256sum /patch/patch.diff | awk '{print $1}')"
+        fi
+        cp "$source_root/scripts/pnglibconf.h.prebuilt" "$work_dir/include/pnglibconf.h"
+        for source_name in $source_files; do
+            object_name="$(basename "$source_name" .c).o"
+            clang -I"$work_dir/include" -I"$source_root" $compile_flags \
+                -c "$source_root/$source_name" -o "$work_dir/objects/$object_name"
+        done
+        clang++ -std=c++17 -I"$work_dir/include" -I"$source_root" $compile_flags \
+            /apparatus/harness_png.cc \
+            -o /out/fuzz_target $link_flags "$work_dir"/objects/*.o -lz -lm
+        chmod 0555 /out/fuzz_target
+        version="$(sed -n 's/^#define PNG_LIBPNG_VER_STRING "\([^"]*\)"/\1/p' "$source_root/png.h" | head -n 1)"
+        clang_version="$(clang++ --version | sed -n '1p')"
+        harness_sha256="sha256:$(sha256sum /apparatus/harness_png.cc | awk '{print $1}')"
+        source_sha256="sha256:$(source_digest "$source_root")"
+        jq -n \
+            --arg harness "$harness" \
+            --arg revision "$revision" \
+            --arg target_version "$version" \
+            --arg sanitizer "$sanitizer" \
+            --arg compiler "$clang_version" \
+            --arg flags "$compile_flags $link_flags" \
+            --arg harness_sha256 "$harness_sha256" \
+            --arg source_sha256 "$source_sha256" \
+            --arg patch_sha256 "$patch_sha256" \
+            --arg benchmark "CVE-2025-64720" \
+            '{schema_version:1,harness:$harness,harness_sha256:$harness_sha256,source_sha256:$source_sha256,target_revision:$revision,target_version:$target_version,sanitizers:$sanitizer,compiler:$compiler,compiler_flags:$flags,patch_sha256:$patch_sha256,known_benchmark:$benchmark}' \
+            > /out/build-provenance.json
+        chmod 0444 /out/build-provenance.json
+        cleanup_build_work
+        trap - EXIT HUP INT TERM
+        ;;
+    smoke_test)
+        test -x "$binary"
+        base64 -d /apparatus/seed.png.b64 > /tmp/seed.png
+        LLVM_PROFILE_FILE=/tmp/smoke.profraw "$binary" -runs=1 /tmp/seed.png
+        ;;
+    seed)
+        mkdir -p /corpus
+        base64 -d /apparatus/seed.png.b64 > /corpus/seed-png
+        cp /corpus/seed-png /out/seed-png
+        chmod 0644 /out/seed-png
+        ;;
+    fuzz)
+        test -x "$binary"
+        mkdir -p /corpus
+        LLVM_PROFILE_FILE=/tmp/fuzz.profraw "$binary" \
+            -artifact_prefix=/out/ -max_total_time="$max_total_time" \
+            -timeout=5 -rss_limit_mb=1024 -max_len=1048576 \
+            -dict=/apparatus/png.dict /corpus
+        ;;
+    reproduce)
+        test -x "$binary"
+        test -f /evidence/reproducer
+        LLVM_PROFILE_FILE=/tmp/reproduce.profraw "$binary" -runs=3 /evidence/reproducer
+        ;;
+    minimize)
+        test -x "$binary"
+        test -f /evidence/reproducer
+        set +e
+        LLVM_PROFILE_FILE=/tmp/minimize.profraw "$binary" \
+            -minimize_crash=1 -max_total_time="$max_total_time" \
+            -exact_artifact_path=/out/minimized /evidence/reproducer
+        minimize_status="$?"
+        set -e
+        test -s /out/minimized
+        chmod 0644 /out/minimized
+        set +e
+        LLVM_PROFILE_FILE=/tmp/minimize-verify.profraw "$binary" -runs=1 /out/minimized
+        verify_status="$?"
+        set -e
+        if [ "$verify_status" -eq 0 ]; then
+            echo "minimized input did not preserve the crash (minimizer status $minimize_status)" >&2
+            exit 65
+        fi
+        exit "$verify_status"
+        ;;
+    merge_corpus)
+        test -x "$binary"
+        mkdir -p /out/merged
+        LLVM_PROFILE_FILE=/tmp/merge.profraw "$binary" -merge=1 /out/merged /corpus
+        find /out/merged -type f -exec chmod 0644 {} \;
+        ;;
+    coverage)
+        test -x "$binary"
+        LLVM_PROFILE_FILE=/tmp/coverage.profraw "$binary" -runs=0 /corpus
+        llvm-profdata merge -sparse /tmp/coverage.profraw -o /tmp/coverage.profdata
+        llvm-cov export "$binary" -instr-profile=/tmp/coverage.profdata > /out/coverage.json
+        chmod 0444 /out/coverage.json
+        ;;
+    symbolize)
+        test -x "$binary"
+        test -f /evidence/addresses.txt
+        llvm-symbolizer --obj="$binary" < /evidence/addresses.txt > /out/symbolized.txt
+        chmod 0444 /out/symbolized.txt
+        ;;
+    compare_revision)
+        test -x "$binary"
+        test -f /evidence/reproducer
+        set +e
+        LLVM_PROFILE_FILE=/tmp/compare.profraw "$binary" -runs=3 /evidence/reproducer > /out/comparison.log 2>&1
+        comparison_exit="$?"
+        set -e
+        jq -n --arg revision "$revision" --argjson exit_code "$comparison_exit" \
+            '{schema_version:1,target_revision:$revision,reproducer_exit_code:$exit_code,signal_absent:($exit_code == 0)}' \
+            > /out/comparison.json
+        chmod 0444 /out/comparison.log /out/comparison.json
+        ;;
+    regression_test)
+        test -x "$binary"
+        case "$validation_kind" in
+            reproducer|negative_control)
+                test -f /evidence/reproducer
+                set +e
+                LLVM_PROFILE_FILE=/tmp/regression.profraw "$binary" -runs=3 /evidence/reproducer > /out/regression.log 2>&1
+                regression_exit="$?"
+                set -e
+                ;;
+            regression)
+                test -d /corpus
+                set +e
+                LLVM_PROFILE_FILE=/tmp/regression.profraw "$binary" -runs=0 /corpus > /out/regression.log 2>&1
+                regression_exit="$?"
+                set -e
+                ;;
+            *) echo "invalid regression validation kind" >&2; exit 64 ;;
+        esac
+        jq -n --arg revision "$revision" --arg validation_kind "$validation_kind" --argjson exit_code "$regression_exit" \
+            '{schema_version:1,target_revision:$revision,validation_kind:$validation_kind,exit_code:$exit_code,signal_absent:($exit_code == 0)}' \
+            > /out/regression.json
+        chmod 0444 /out/regression.log /out/regression.json
+        exit "$regression_exit"
+        ;;
+    *)
+        echo "unsupported operation: $operation" >&2
+        exit 64
+        ;;
+esac

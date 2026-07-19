@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "libpng-cve-2025-64720-v1",
+  "name": "libpng known-bug libFuzzer benchmark",
+  "version": "1.0.0",
+  "image_digest": "${IMAGE_DIGEST}",
+  "engine": "libfuzzer",
+  "sanitizers": ["address", "undefined", "address,undefined"],
+  "architectures": ["amd64"],
+  "harnesses": [
+    {
+      "name": "libpng_read_fuzzer",
+      "binary": "/build/fuzz_target",
+      "seed_corpus": "/corpus",
+      "dictionary": "/apparatus/png.dict",
+      "options": ["-timeout=5", "-max_len=1048576"],
+      "max_input_len": 1048576
+    }
+  ],
+  "operations": [
+    "inspect", "build", "list_harnesses", "smoke_test", "seed", "fuzz",
+    "reproduce", "minimize", "merge_corpus", "coverage", "symbolize",
+    "compare_revision", "regression_test"
+  ],
+  "environment": {
+    "ASAN_OPTIONS": "abort_on_error=1:symbolize=1",
+    "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"
+  },
+  "limits": {
+    "max_wall_seconds": 3600,
+    "max_memory_bytes": 2147483648,
+    "max_cpu_seconds": 3600,
+    "max_disk_bytes": 1073741824,
+    "max_inodes": 131072,
+    "max_pids": 64,
+    "max_concurrent": 1
+  }
+}

@@ -284,13 +284,39 @@ func TestDockerBackendPreflightAndHardenedArgv(t *testing.T) {
 		t.Fatalf("execution=%#v err=%v", execution, err)
 	}
 	argv := strings.Join(executor.lastRun(), " ")
-	for _, required := range []string{"--network none", "--read-only", "--cap-drop ALL", "no-new-privileges", "--cpus 1.000000", "core=0:0", "nofile=1024:1024", "fsize=1024:1024", "--runtime runsc", testDigest, "/apparatus/dispatch fuzz", "--harness parser"} {
+	for _, required := range []string{"--network none", "--read-only", "--cap-drop ALL", "no-new-privileges", "--cpus 1.000000", "core=0:0", "nofile=1024:1024", "fsize=1024:1024", "--user 0:0", "--runtime runsc", testDigest, "/apparatus/dispatch fuzz", "--harness parser"} {
 		if !strings.Contains(argv, required) {
 			t.Fatalf("argv missing %q: %s", required, argv)
 		}
 	}
 	if strings.Contains(argv, "sh -c") {
 		t.Fatalf("shell found in argv: %s", argv)
+	}
+}
+
+func TestDockerBackendRootfulUsesHostIdentity(t *testing.T) {
+	executor := &recordingExecutor{digest: testDigest, seccomp: true, cgroupVersion: 2}
+	backend := NewDockerBackend(DockerOptions{Executor: executor})
+	if _, err := backend.Preflight(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	job := domain.WorkerJob{
+		RunID: "run-rootful", CampaignID: "campaign", ScopeID: "scope", Operation: domain.OperationInspect, ImageDigest: testDigest,
+		Arguments: map[string]string{"harness": "parser"}, Budget: domain.ResourceBudget{MaxWallSeconds: 10, MaxMemoryBytes: 1024, MaxCPUSeconds: 10, MaxDiskBytes: 1024, MaxInodes: 64, MaxPIDs: 8, MaxConcurrent: 1},
+	}
+	if _, err := backend.Execute(context.Background(), job, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	argv := strings.Join(executor.lastRun(), " ")
+	workerUser := hostContainerUser()
+	if !strings.Contains(argv, "--user "+workerUser) {
+		t.Fatalf("rootful worker identity missing: %s", argv)
+	}
+	if workerUser != "0:0" {
+		identity := strings.Split(workerUser, ":")
+		if !strings.Contains(argv, "uid="+identity[0]+",gid="+identity[1]) {
+			t.Fatalf("rootful tmpfs identity missing: %s", argv)
+		}
 	}
 }
 

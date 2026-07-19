@@ -141,8 +141,9 @@ privilege change, or cross-boundary impact.
 
 Before a beta claim, run live isolation tests on every supported backend;
 enforce kernel/filesystem disk and inode quotas; add an acquisition/egress
-deployment policy; complete a real known-bug ground-truth campaign plus clean
-controls; validate fix and branch workflows end to end; add encrypted
+deployment policy; complete repeated clean-corpus discovery/minimization on the
+real known-bug benchmark (the libpng replay calibration alone is not
+discovery); validate fix and branch workflows end to end; add encrypted
 retention/backup guidance; commission an independent review of authentication,
 container escape surface, artifact ingestion, supply chain, prompt injection,
 and multi-campaign isolation.

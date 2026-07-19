@@ -54,13 +54,13 @@ reviews, approved candidate diffs, patch-linked builds, three-part runtime
 remediation validation, private reports, and separately approved human
 disclosure records. No-match novelty results remain `novelty_unverified`.
 
-The implementation is not beta-ready. A pinned real-program known-bug campaign
-(Magma or equivalent), end-to-end real-program branch/novelty/fix validation,
-constrained network acquisition, kernel/filesystem disk and inode enforcement,
-encrypted retention operations, and an independent security review remain
-release blockers. The current host reports neither rootless Docker nor gVisor,
-so the production CLI correctly refuses to start its research runner here;
-rootful Docker results are functional lab evidence only.
+The implementation is not beta-ready. A clean stochastic real-program
+discovery/minimization campaign, end-to-end real-program branch/novelty/fix
+validation, constrained network acquisition, kernel/filesystem disk and inode
+enforcement, encrypted retention operations, and an independent security review
+remain release blockers. The current host reports neither rootless Docker nor
+gVisor, so the production CLI correctly refuses to start its research runner
+here; rootful Docker results are functional lab evidence only.
 
 The runner now treats CPU seconds and inode count as required finite scope,
 campaign, manifest, and job ceilings. Docker applies a CFS CPU rate derived from
@@ -77,6 +77,20 @@ exhaustion through the real Docker backend. All nine controls passed on the
 assessment host with the exact local image ID
 `sha256:1758e9e26b768681fc41e46bf8e324f36826a69e4cf88b431ac5c24c6caf4f27`.
 This is reproducible rootful-lab evidence, not production isolation evidence.
+
+A second opt-in apparatus now calibrates the real broker against public libpng
+CVE-2025-64720 evidence. It pins vulnerable 1.6.50 commit
+`2b978915d82377df13fcbb1fb56660195ded868a`, fixed 1.6.52 commit
+`fbed16182b92eeb3a06d96e49f0836d450318098`, a digest-pinned offline Clang 14
+image, an independently hashed 1x1 PNG seed, and the separately retained public
+reproducer. The live test builds both exact source trees, requires the
+vulnerable build to emit the ASan global out-of-bounds read in
+`png_image_read_composite`, requires the independent seed to remain clean on
+the vulnerable build, and requires the fixed build to remain clean. It passed
+through the real rootful lab backend with image ID
+`sha256:3dd0b529373b49c9cf6bcb083da81d79b8696f62872314f74aba19518885ef3e`.
+This proves build/reproduction/negative-control calibration, not clean-corpus
+autonomous discovery, minimization, novelty, or production isolation.
 
 ## Operating boundary
 
@@ -475,6 +489,14 @@ Deliverables:
 
 Exit criteria: both fixtures are found from a clean campaign, a non-trigger
 control stays clean, and the known bug is never labelled novel.
+
+Implementation status: the adapter SDK, pinned native Clang apparatus,
+micro-fixture, and the real-program libpng known-bug apparatus are implemented.
+The libpng calibration uses an independent seed and keeps its public reproducer
+as explicitly known benchmark evidence. Exact vulnerable/fixed builds and the
+positive/negative replay controls pass through the real Docker broker. A
+repeated clean-corpus discovery/minimization run through the complete campaign
+state machine is still required to close this phase's exit criterion.
 
 ### Phase 4 — ingestion, triage, and primitive evidence
 

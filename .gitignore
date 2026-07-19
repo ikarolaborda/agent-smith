@@ -40,6 +40,7 @@ Thumbs.db
 .agent/
 .agent-smith/
 apparatus/native-clang/manifest.json
+apparatus/libpng-known-bug/manifest.json
 .serena/
 .claude/
 
