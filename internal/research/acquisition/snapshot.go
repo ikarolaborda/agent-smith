@@ -41,7 +41,23 @@ func CaptureDirectory(internalRoot, campaignID, targetID string) (string, error)
 	if !filepath.IsAbs(internalRoot) || !safeIDPattern.MatchString(campaignID) || !safeIDPattern.MatchString(targetID) {
 		return "", errors.New("research acquisition: unsafe capture identity")
 	}
-	return filepath.Join(internalRoot, campaignID, "sources", targetID), nil
+	realRoot, err := filepath.EvalSymlinks(internalRoot)
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(realRoot); err != nil || !info.IsDir() {
+		return "", errors.New("research acquisition: internal storage root is not a directory")
+	}
+	destination := filepath.Join(realRoot, campaignID, "sources", targetID)
+	if err := existingPathWithin(realRoot, filepath.Dir(destination)); err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(destination); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("research acquisition: capture destination is a symlink")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return destination, nil
 }
 
 // VerifiedCapture rehashes a captured tree immediately before it is mounted.
@@ -77,10 +93,17 @@ func HashTree(root string, limits Limits) (Snapshot, error) {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			if relative != "." && ignoredDirectory(entry.Name()) {
+		skip, err := controlEntry(relative, entry)
+		if err != nil {
+			return err
+		}
+		if skip {
+			if entry.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
@@ -91,10 +114,10 @@ func HashTree(root string, limits Limits) (Snapshot, error) {
 			return err
 		}
 		result.Files++
-		result.Bytes += info.Size()
-		if result.Files > limits.MaxFiles || result.Bytes > limits.MaxBytes {
+		if info.Size() > limits.MaxBytes-result.Bytes || result.Files > limits.MaxFiles {
 			return errors.New("research acquisition: source tree exceeds configured limits")
 		}
+		result.Bytes += info.Size()
 		if err := writeIdentity(hash, filepath.ToSlash(relative), info); err != nil {
 			return err
 		}
@@ -127,6 +150,11 @@ func Capture(source, destination, expectedSHA256 string, limits Limits) (Snapsho
 	if !filepath.IsAbs(destination) || strings.TrimSpace(expectedSHA256) == "" {
 		return Snapshot{}, errors.New("research acquisition: absolute destination and expected hash required")
 	}
+	if info, err := os.Lstat(destination); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return Snapshot{}, errors.New("research acquisition: capture destination is a symlink")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Snapshot{}, err
+	}
 	if existing, err := HashTree(destination, limits); err == nil {
 		if existing.SourceSHA256 != expectedSHA256 {
 			return existing, errors.New("research acquisition: existing capture hash mismatch")
@@ -158,10 +186,17 @@ func Capture(source, destination, expectedSHA256 string, limits Limits) (Snapsho
 		if relative == "." {
 			return nil
 		}
-		if entry.IsDir() {
-			if ignoredDirectory(entry.Name()) {
+		skip, err := controlEntry(relative, entry)
+		if err != nil {
+			return err
+		}
+		if skip {
+			if entry.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if entry.IsDir() {
 			return os.Mkdir(filepath.Join(temporary, relative), 0o700)
 		}
 		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
@@ -264,4 +299,39 @@ func copyRegular(sourcePath, destinationPath string, mode fs.FileMode, before fs
 	return nil
 }
 
-func ignoredDirectory(name string) bool { return name == ".git" || name == ".agent-smith" }
+func controlEntry(relative string, entry fs.DirEntry) (bool, error) {
+	if relative == "." || (entry.Name() != ".git" && entry.Name() != ".agent-smith") {
+		return false, nil
+	}
+	if relative == entry.Name() {
+		return true, nil
+	}
+	return false, fmt.Errorf("research acquisition: nested control entry %q", filepath.ToSlash(relative))
+}
+
+func existingPathWithin(root, candidate string) error {
+	current := candidate
+	for {
+		_, err := os.Lstat(current)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return errors.New("research acquisition: capture parent is unavailable")
+		}
+		current = parent
+	}
+	realCurrent, err := filepath.EvalSymlinks(current)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(root, realCurrent)
+	if err != nil || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("research acquisition: capture path escapes internal storage")
+	}
+	return nil
+}

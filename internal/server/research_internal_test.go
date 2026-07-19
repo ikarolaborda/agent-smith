@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -177,6 +178,10 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	if err := privateDirForTest(workspace); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(workspace, "fixture.cc"), []byte("int fixture = 1;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	revision := initializeServerGitFixture(t, workspace)
 	backend := &runner.FakeBackend{ExecuteFunc: func(_ context.Context, job domain.WorkerJob, staging string) (runner.Execution, error) {
 		switch job.Operation {
 		case domain.OperationBuild:
@@ -228,7 +233,7 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	if response := researchJSONRequest(srv, http.MethodPost, "/v1/research/apparatuses", operatorToken, manifest); response.Code != http.StatusCreated {
 		t.Fatalf("apparatus status=%d body=%s", response.Code, response.Body.String())
 	}
-	scopeRequest := domain.AuthorizationScope{Purpose: "pipeline test", TargetRepository: "repo", AllowedRevisions: []string{"abc"}, WorkspaceRoots: []string{workspace},
+	scopeRequest := domain.AuthorizationScope{Purpose: "pipeline test", TargetRepository: "repo", AllowedRevisions: []string{revision, "HEAD"}, WorkspaceRoots: []string{workspace},
 		AllowedOperations: []domain.Operation{domain.OperationAcquire, domain.OperationBuild, domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationSymbolize}, AllowedApparatusIDs: []string{manifest.ID}, Budget: manifest.Limits, ExpiresAt: time.Now().UTC().Add(time.Hour)}
 	response := researchJSONRequest(srv, http.MethodPost, "/v1/research/scopes", operatorToken, scopeRequest)
 	if response.Code != http.StatusCreated {
@@ -247,14 +252,32 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 		t.Fatalf("scope transition status=%d body=%s", response.Code, response.Body.String())
 	}
 	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns/"+campaign.ID+"/target", operatorToken, map[string]any{
-		"repository": "repo", "revision": "abc", "source_dir": workspace, "language": "c++", "architecture": "amd64", "correlation_id": "acquire-correlation",
+		"repository": "repo", "revision": "HEAD", "source_dir": workspace, "language": "c++", "architecture": "amd64", "correlation_id": "symbolic-acquire",
+	})
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "exact lowercase Git commit required") {
+		t.Fatalf("symbolic target status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "untracked.cc"), []byte("untrusted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns/"+campaign.ID+"/target", operatorToken, map[string]any{
+		"repository": "repo", "revision": revision, "source_dir": workspace, "language": "c++", "architecture": "amd64", "correlation_id": "dirty-acquire",
+	})
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "checkout content does not match requested commit") {
+		t.Fatalf("dirty target status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := os.Remove(filepath.Join(workspace, "untracked.cc")); err != nil {
+		t.Fatal(err)
+	}
+	response = researchJSONRequest(srv, http.MethodPost, "/v1/research/campaigns/"+campaign.ID+"/target", operatorToken, map[string]any{
+		"repository": "repo", "revision": revision, "source_dir": workspace, "language": "c++", "architecture": "amd64", "correlation_id": "acquire-correlation",
 	})
 	if response.Code != http.StatusCreated {
 		t.Fatalf("target acquisition status=%d body=%s", response.Code, response.Body.String())
 	}
 	jobURL := "/v1/research/campaigns/" + campaign.ID + "/jobs"
 	response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
-		"operation": "build", "harness": "parser", "revision": "abc", "sanitizer": "address", "correlation_id": "build-correlation",
+		"operation": "build", "harness": "parser", "revision": revision, "sanitizer": "address", "correlation_id": "build-correlation",
 	}})
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("build enqueue status=%d body=%s", response.Code, response.Body.String())
@@ -266,7 +289,7 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	}
 	corpusPath := filepath.Join(srv.research.store.Root(), "worker-inputs", campaign.ID, "corpora", "parser")
 	response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
-		"operation": "fuzz", "harness": "parser", "revision": "abc", "sanitizer": "address", "build_id": buildRun.ID,
+		"operation": "fuzz", "harness": "parser", "revision": revision, "sanitizer": "address", "build_id": buildRun.ID,
 	}})
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("missing correlation status=%d body=%s", response.Code, response.Body.String())
@@ -275,7 +298,7 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 		t.Fatalf("unauthorized request materialized corpus path: %v", err)
 	}
 	response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
-		"operation": "fuzz", "harness": "parser", "revision": "abc", "sanitizer": "address", "build_id": buildRun.ID, "correlation_id": "fuzz-correlation", "arguments": map[string]string{"max-total-time": "1"},
+		"operation": "fuzz", "harness": "parser", "revision": revision, "sanitizer": "address", "build_id": buildRun.ID, "correlation_id": "fuzz-correlation", "arguments": map[string]string{"max-total-time": "1"},
 	}})
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("fuzz enqueue status=%d body=%s", response.Code, response.Body.String())
@@ -303,7 +326,7 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
-			"operation": "reproduce", "harness": "parser", "revision": "abc", "sanitizer": "address", "build_id": buildRun.ID,
+			"operation": "reproduce", "harness": "parser", "revision": revision, "sanitizer": "address", "build_id": buildRun.ID,
 			"input_artifact_id": groups[0].CanonicalInputID, "correlation_id": fmt.Sprintf("reproduce-%d", attempt),
 		}})
 		if response.Code != http.StatusAccepted {
@@ -316,7 +339,7 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 		}
 	}
 	response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
-		"operation": "minimize", "harness": "parser", "revision": "abc", "sanitizer": "address", "build_id": buildRun.ID,
+		"operation": "minimize", "harness": "parser", "revision": revision, "sanitizer": "address", "build_id": buildRun.ID,
 		"input_artifact_id": groups[0].CanonicalInputID, "correlation_id": "minimize-correlation",
 	}})
 	if response.Code != http.StatusAccepted {
@@ -346,7 +369,7 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 		t.Fatal("fuzz crash log was not retained")
 	}
 	response = researchJSONRequest(srv, http.MethodPost, jobURL, operatorToken, map[string]any{"manifest_id": manifest.ID, "job": map[string]any{
-		"operation": "symbolize", "harness": "parser", "revision": "abc", "sanitizer": "address", "build_id": buildRun.ID,
+		"operation": "symbolize", "harness": "parser", "revision": revision, "sanitizer": "address", "build_id": buildRun.ID,
 		"input_artifact_id": crashLogID, "correlation_id": "symbolize-correlation",
 	}})
 	if response.Code != http.StatusAccepted {
@@ -365,6 +388,28 @@ func TestResearchJobAPIBuildToMachineParsedCrash(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"operation":"out_of_bounds_write"`) || !strings.Contains(response.Body.String(), `"attacker_control":{"known":false}`) {
 		t.Fatalf("primitive list status=%d body=%s", response.Code, response.Body.String())
 	}
+}
+
+func initializeServerGitFixture(t *testing.T, root string) string {
+	t.Helper()
+	for _, arguments := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@example.test"},
+		{"config", "user.name", "Test"},
+		{"add", "."},
+		{"commit", "-q", "-m", "fixture"},
+	} {
+		command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	command := exec.Command("git", "-C", root, "rev-parse", "HEAD")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func researchJSONRequest(srv *Server, method, path, token string, value any) *httptest.ResponseRecorder {

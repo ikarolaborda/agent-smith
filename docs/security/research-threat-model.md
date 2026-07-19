@@ -72,11 +72,15 @@ Repository/ref resolution, base images, apparatus images, compilers, build
 scripts, dependencies, and seed corpora can be malicious or compromised. Scopes
 pin permitted repositories/revisions; target records retain source hashes;
 apparatus images are exact IDs; the native image build requires a digest-pinned
-base and emits compiler/build provenance. Local acquisition rejects links and
-special files, applies file/byte ceilings, copies atomically into a private
-campaign tree, and rehashes that tree before every worker mount. A production
-deployment still needs a curated image registry, signature verification/SBOM
-policy, and an explicit acquisition broker before accepting third-party targets.
+base and emits compiler/build provenance. Local acquisition requires a full
+lowercase commit ID, a clean repository-root checkout whose `HEAD` matches it,
+and no tracked, untracked, or ignored changes. It disables ambient Git behavior,
+rejects submodules, links, special modes, unsafe/reserved paths, and bounded Git
+output overruns, then exports regular-file bytes directly from verified commit
+objects. The read-only capture is atomically installed in a private campaign
+tree and rehashed before every worker mount. A production deployment still
+needs a curated image registry, signature verification/SBOM policy, and an
+explicit network acquisition broker before accepting third-party targets.
 
 Candidate fixes are bounded textual unified-diff artifacts tied to an approved
 finding correlation. The control-plane host never applies them. A read-only

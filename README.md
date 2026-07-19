@@ -47,6 +47,12 @@ No code changes are needed to add a local model — see [`docs/josie.md`](docs/j
 
 Research mode is a separate authenticated control plane for code you own or are explicitly authorized to test. It persists scopes, campaigns, approvals, typed runs, evidence, artifacts, and a hash-chained audit log. It does not add a host shell, arbitrary model-controlled HTTP, weaponized exploit generation, or automatic disclosure.
 
+Local target acquisition accepts only a clean Git repository root whose `HEAD`
+matches an allowlisted, full lowercase commit ID. It rejects tracked, untracked,
+and ignored changes, links, submodules, and special entries, then exports bounded
+regular-file content directly from the commit object into the private campaign
+tree. Branch names and tags are not immutable acquisition revisions.
+
 ```sh
 export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"
 ./bin/agent --serve --research-mode \

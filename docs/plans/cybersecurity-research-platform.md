@@ -41,8 +41,13 @@ passes the rootless Docker or gVisor preflight and enforces disk/inode quotas.
 
 The native Clang apparatus implements the closed operation vocabulary and has
 been live-tested with real libFuzzer/ASan against a vulnerable fixture and a
-clean twin. The API evidence pipeline now performs immutable local source
-capture, build materialization, fuzz crash ingestion, three independent replay
+clean twin. Local acquisition now requires an allowlisted full Git commit, a
+clean repository-root checkout with matching `HEAD`, and no submodules or
+unsupported tree entries. It exports bounded regular-file bytes from Git blob
+objects—not the mutable worktree—into an atomically installed private capture,
+hashes the result, audits requested/resolved identity, and rehashes it before
+every worker mount. The API evidence pipeline performs build materialization,
+fuzz crash ingestion, three independent replay
 gates, bounded deletion minimization, offline symbolization, crash grouping,
 and conservative primitive/finding creation. Every unmeasured primitive field
 remains `unknown`. Authenticated chat agents receive one principal-bound,
@@ -390,12 +395,20 @@ validated against both the campaign manifest and adapter schema.
 Separate networked acquisition from offline build and execution:
 
 1. The operator approves repository and destination domains.
-2. A constrained fetcher resolves a revision, records upstream identity,
-   downloads with response/size/time caps, and writes a source bundle.
+2. A constrained fetcher resolves a revision to a full commit, records upstream
+   identity, downloads with response/size/time caps, and writes a source bundle.
 3. The bundle is hashed and becomes the only source input to offline workers.
 4. Dependencies are pinned, cached, and represented in build provenance.
 5. Novelty lookups go through dedicated clients; no arbitrary `http` tool is
    required for the model.
+
+Implementation status: the offline half of this boundary is implemented. Local
+registration only accepts an authorized clean repository-root checkout at an
+exact commit, disables ambient Git behavior, rejects dirty/ignored content,
+submodules, links, special modes, unsafe paths, and reserved control entries,
+applies file/byte/output ceilings, and materializes the commit through bounded
+`git cat-file` blob export. The network fetcher, origin authentication/signature
+policy, and dependency mirror remain beta blockers.
 
 ## APIs and user experience
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +176,7 @@ func TestAcquireComparisonTargetRetainsAlternateRevisionWithoutReplacingPrimary(
 	if err := os.WriteFile(source+"/fixture.cc", []byte("int stable = 1;\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	revision := initializeGitFixture(t, source)
 	internalRoot := repository.Root() + "/worker-inputs"
 	if err := os.MkdirAll(internalRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -182,7 +184,7 @@ func TestAcquireComparisonTargetRetainsAlternateRevisionWithoutReplacingPrimary(
 	if err := svc.ConfigureInternalRoot(internalRoot); err != nil {
 		t.Fatal(err)
 	}
-	scope := domain.AuthorizationScope{SchemaVersion: 1, ID: "scope-alt", OperatorID: operator.ID, Purpose: "supported revision", TargetRepository: "repo", AllowedRevisions: []string{"main", "stable"}, WorkspaceRoots: []string{sourceRoot}, AllowedOperations: []domain.Operation{domain.OperationAcquire}, Budget: domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 60, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 16, MaxConcurrent: 1}, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	scope := domain.AuthorizationScope{SchemaVersion: 1, ID: "scope-alt", OperatorID: operator.ID, Purpose: "supported revision", TargetRepository: "repo", AllowedRevisions: []string{"main", revision}, WorkspaceRoots: []string{sourceRoot}, AllowedOperations: []domain.Operation{domain.OperationAcquire}, Budget: domain.ResourceBudget{MaxWallSeconds: 60, MaxMemoryBytes: 1 << 20, MaxCPUSeconds: 60, MaxDiskBytes: 1 << 20, MaxInodes: 1024, MaxPIDs: 16, MaxConcurrent: 1}, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
 	if err := repository.CreateScope(ctx, scope); err != nil {
 		t.Fatal(err)
 	}
@@ -193,9 +195,9 @@ func TestAcquireComparisonTargetRetainsAlternateRevisionWithoutReplacingPrimary(
 	if err := repository.SaveFinding(ctx, domain.Finding{SchemaVersion: 1, ID: "finding-alt", CampaignID: campaign.ID, CrashGroupID: "group", Title: "finding", Label: domain.FindingPrimitiveConfirmed, DisclosureStatus: "not_disclosed", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	request := TargetRequest{Repository: "repo", Revision: "stable", SourceDir: source, Language: "c++", Architecture: "amd64", CorrelationID: "target:finding-alt:stable"}
+	request := TargetRequest{Repository: "repo", Revision: revision, SourceDir: source, Language: "c++", Architecture: "amd64", CorrelationID: "target:finding-alt:" + revision}
 	target, err := svc.AcquireComparisonTarget(ctx, operator, campaign.ID, "finding-alt", request)
-	if err != nil || target.Commit != "stable" || target.ID == campaign.TargetID {
+	if err != nil || target.Commit != revision || target.ID == campaign.TargetID {
 		t.Fatalf("alternate target=%#v err=%v", target, err)
 	}
 	current, err := repository.GetCampaign(ctx, campaign.ID)
@@ -206,4 +208,26 @@ func TestAcquireComparisonTargetRetainsAlternateRevisionWithoutReplacingPrimary(
 	if err != nil || len(targets) != 1 || targets[0].ID != target.ID {
 		t.Fatalf("targets=%#v err=%v", targets, err)
 	}
+}
+
+func initializeGitFixture(t *testing.T, root string) string {
+	t.Helper()
+	for _, arguments := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@example.test"},
+		{"config", "user.name", "Test"},
+		{"add", "."},
+		{"commit", "-q", "-m", "fixture"},
+	} {
+		command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	command := exec.Command("git", "-C", root, "rev-parse", "HEAD")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(output))
 }

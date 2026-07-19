@@ -37,9 +37,10 @@ type Service struct {
 	internalRoot   string
 }
 
-// TargetRequest describes an operator-authorized local source capture. The
-// control plane computes the source hash and copies the tree; callers cannot
-// supply either evidence value.
+// TargetRequest describes an operator-authorized local Git acquisition. The
+// revision must be an exact commit. The control plane exports committed bytes,
+// computes their source hash, and never accepts either evidence value from the
+// caller.
 type TargetRequest struct {
 	Repository    string `json:"repository"`
 	Revision      string `json:"revision"`
@@ -252,21 +253,20 @@ func (s *Service) AcquireTarget(ctx context.Context, actor domain.Principal, cam
 		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire", "campaign", campaignID, "correlation, language, architecture, and internal storage are required")
 	}
 	limits := acquisition.Limits{MaxBytes: scope.Budget.MaxDiskBytes}
-	snapshot, err := acquisition.HashTree(request.SourceDir, limits)
-	if err != nil {
-		return domain.TargetRevision{}, err
-	}
-	targetID := deterministicID("target", campaignID, request.Revision, snapshot.SourceSHA256)
+	targetID := deterministicID("target", campaignID, request.Repository, request.Revision)
 	destination, err := acquisition.CaptureDirectory(s.internalRoot, campaignID, targetID)
 	if err != nil {
 		return domain.TargetRevision{}, err
 	}
-	if _, err := acquisition.Capture(request.SourceDir, destination, snapshot.SourceSHA256, limits); err != nil {
+	acquireCtx, cancelAcquire := acquisitionDeadline(ctx, scope.Budget.MaxWallSeconds)
+	defer cancelAcquire()
+	checkout, snapshot, err := acquisition.CaptureGitCheckout(acquireCtx, request.SourceDir, request.Revision, destination, limits)
+	if err != nil {
 		return domain.TargetRevision{}, err
 	}
 	now := s.now()
-	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: request.Revision,
-		Commit: request.Revision, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, AcquiredAt: now}
+	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: checkout.RequestedRef,
+		Commit: checkout.Commit, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, AcquiredAt: now}
 	if existing, getErr := s.store.GetTarget(ctx, target.ID); getErr == nil {
 		if existing.SourceSHA256 != target.SourceSHA256 || existing.CampaignID != campaignID {
 			return domain.TargetRevision{}, errors.New("research service: target identity collision")
@@ -284,7 +284,7 @@ func (s *Service) AcquireTarget(ctx context.Context, actor domain.Principal, cam
 	if err := s.store.UpdateCampaign(ctx, updated, campaign.Version); err != nil {
 		return domain.TargetRevision{}, err
 	}
-	return target, s.allowedWithDetails(ctx, actor, "target.acquire", "target_revision", target.ID, request.CorrelationID, map[string]string{"campaign_id": campaignID, "source_sha256": target.SourceSHA256})
+	return target, s.allowedWithDetails(ctx, actor, "target.acquire", "target_revision", target.ID, request.CorrelationID, map[string]string{"campaign_id": campaignID, "requested_ref": target.RequestedRef, "commit": target.Commit, "source_sha256": target.SourceSHA256})
 }
 
 // AcquireComparisonTarget captures another authorized supported revision after
@@ -327,20 +327,19 @@ func (s *Service) AcquireComparisonTarget(ctx context.Context, actor domain.Prin
 		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "campaign", campaignID, "language, architecture, and internal storage are required")
 	}
 	limits := acquisition.Limits{MaxBytes: scope.Budget.MaxDiskBytes}
-	snapshot, err := acquisition.HashTree(request.SourceDir, limits)
-	if err != nil {
-		return domain.TargetRevision{}, err
-	}
-	targetID := deterministicID("target", campaignID, request.Revision, snapshot.SourceSHA256)
+	targetID := deterministicID("target", campaignID, request.Repository, request.Revision)
 	destination, err := acquisition.CaptureDirectory(s.internalRoot, campaignID, targetID)
 	if err != nil {
 		return domain.TargetRevision{}, err
 	}
-	if _, err := acquisition.Capture(request.SourceDir, destination, snapshot.SourceSHA256, limits); err != nil {
+	acquireCtx, cancelAcquire := acquisitionDeadline(ctx, scope.Budget.MaxWallSeconds)
+	defer cancelAcquire()
+	checkout, snapshot, err := acquisition.CaptureGitCheckout(acquireCtx, request.SourceDir, request.Revision, destination, limits)
+	if err != nil {
 		return domain.TargetRevision{}, err
 	}
-	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: request.Revision,
-		Commit: request.Revision, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, AcquiredAt: s.now()}
+	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: checkout.RequestedRef,
+		Commit: checkout.Commit, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, AcquiredAt: s.now()}
 	if existing, getErr := s.store.GetTarget(ctx, target.ID); getErr == nil {
 		if existing.SourceSHA256 != target.SourceSHA256 || existing.CampaignID != campaignID {
 			return domain.TargetRevision{}, errors.New("research service: target identity collision")
@@ -999,6 +998,14 @@ func deterministicID(prefix string, values ...string) string {
 		_, _ = digest.Write([]byte{0})
 	}
 	return prefix + "_" + hex.EncodeToString(digest.Sum(nil)[:16])
+}
+
+func acquisitionDeadline(ctx context.Context, seconds int64) (context.Context, context.CancelFunc) {
+	maximum := int64(time.Duration(1<<63-1) / time.Second)
+	if seconds > maximum {
+		seconds = maximum
+	}
+	return context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
 }
 
 func campaignAllowsOperation(state domain.CampaignState, operation domain.Operation) bool {
