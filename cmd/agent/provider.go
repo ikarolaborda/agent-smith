@@ -102,6 +102,13 @@ func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logg
 		return nil, errors.New("llamacpp: provider selected but no llama_cpp config block")
 	}
 
+	/*
+		Free memory a prior agent-smith may have leaked before admission measures it:
+		a llama-server we launched whose supervisor died keeps running and holds VRAM,
+		blocking this load. Reaping is conservative — only our own, only orphaned.
+	*/
+	llamacpp.ReapOrphanedServers(logger)
+
 	rc := llamacpp.RuntimeConfig{
 		Binary:         lc.Binary,
 		ModelPath:      lc.ModelPath,
