@@ -1,7 +1,10 @@
 # Example configuration for the agent-smith binary.
 # Values in ${VAR} form are expanded from the environment at load time.
 
-default_provider: ollama
+# Default is the self-managed llamacpp provider running the abliterated coding
+# model below — no Ollama required. Switch to `ollama` or another provider here,
+# or override per-run with --provider.
+default_provider: llamacpp
 
 providers:
   openai:
@@ -28,35 +31,42 @@ providers:
   # or run with --provider llamacpp. Assess without downloading first:
   #   ./bin/agent --inspect-model hf.co/2lains/Huihui-Step3-VL-10B-abliterated-GGUF:Q4_K_M
   llamacpp:
+    # Default abliterated CODING model: huihui-ai Qwen3-Coder-30B-A3B (MoE, ~3.3B
+    # active/token — fast even when larger than VRAM). See the dedicated,
+    # hardware-annotated copy in configs/qwen3-coder-abliterated.yaml.
     # Model name advertised to callers / echoed to llama-server.
-    model: huihui-step3-vl-10b-q4
+    model: qwen3-coder-30b-abliterated
     llama_cpp:
       # Source repos containing only Safetensors are rejected. Configure an
       # exact GGUF conversion and pin multimodal projectors explicitly.
-      repo: 2lains/Huihui-Step3-VL-10B-abliterated-GGUF
-      file: Huihui-Step3-VL-10B-Q4_K_M.gguf
+      repo: mradermacher/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated-i1-GGUF
+      file: Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated.i1-Q4_K_M.gguf
       quant: Q4_K_M  # consistency assertion: must match the pinned file
-      mmproj_file: Step3-VL-10B-mmproj-F16.gguf
       # Mutable names are resolved to an immutable commit before artifact GETs.
       revision: main
       # Or skip the download and serve an existing local file instead:
       # model_path: /path/to/model.gguf
-      # mmproj_path: /path/to/mmproj.gguf
       # Where downloaded weights are stored (default: ~/.agent-smith/models).
       # models_dir: /volume/with/enough/free/space/agent-smith-models
       # Optional Hugging Face token for gated/private repos (else $HF_TOKEN).
       hf_token: ${HF_TOKEN}
-      # These admitted values are passed explicitly. Never start at a model's
-      # advertised maximum context: KV memory grows with context and parallelism.
       binary: llama-server          # resolved from PATH
       # host: 127.0.0.1             # loopback only; an ephemeral API key is generated
       # port: 0                     # 0 = auto-select a free port
-      ctx_size: 4096
+      # gpu_layers + ctx_size omitted on purpose: the provider auto-tunes both for
+      # the detected GPU/VRAM. Set them to override that decision.
       parallel: 1
-      # gpu_layers: 99              # tune only after measuring the exact backend
       jinja: true                   # use the model's own chat template (tool calls)
       startup_timeout_seconds: 300  # generous: large models load for minutes
       # extra_args: ["--flash-attn"]
+      #
+      # VISION alternative (multimodal): swap the block above for a GGUF with a
+      # pinned mmproj projector, e.g.:
+      #   model: huihui-step3-vl-10b-q4
+      #   repo: 2lains/Huihui-Step3-VL-10B-abliterated-GGUF
+      #   file: Huihui-Step3-VL-10B-Q4_K_M.gguf
+      #   quant: Q4_K_M
+      #   mmproj_file: Step3-VL-10B-mmproj-F16.gguf
 
   # abliteration.ai — OpenAI-compatible REMOTE endpoint (NOT offline). Only
   # registers when ABLITERATION_AI_API_KEY is set; defaults to a low temperature

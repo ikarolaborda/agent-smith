@@ -13,9 +13,12 @@ lifecycle decisions.
 
 ## Prerequisite
 
-Install a recent `llama-server` on `PATH`. Multimodal architecture support moves
-quickly, so build or install current upstream llama.cpp rather than assuming an
-old package can load a new projector. The official
+Install a recent `llama-server` on `PATH`. The fastest path is `./bin/agent
+--install-runtime`, which detects this host's OS/GPU, downloads the matching
+prebuilt upstream build (Vulkan by default, so one artifact serves AMD, NVIDIA,
+and Intel), and links `llama-server` onto `PATH`. Prefer it over a distro package:
+multimodal architecture support moves quickly, so a current upstream build is more
+likely to load a new projector. The official
 [multimodal documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md)
 describes the model-plus-`mmproj` contract.
 
@@ -169,10 +172,12 @@ The `llamacpp` provider is self-contained: it downloads the GGUF from Hugging
 Face and supervises `llama-server` itself, with no Ollama and no cgo. The
 `internal/llm/llamacpp` package imports nothing from `internal/llm/ollama`. To
 run the app with no Ollama at all, set `default_provider: llamacpp` (see
-`configs/qwythos.yaml`) and use a non-Ollama embedder (`--embedder openai`) or
-rely on first-launch lexical retrieval, which needs no embedder. Ollama stays a
-first-class option — it is the default in `configs/config.example.yaml` — but it
-is never a hard dependency.
+`configs/qwythos.yaml`, or `configs/gpt-oss-abliterated.yaml` for the native
+equivalent of the Ollama `huihui_ai/gpt-oss-abliterated:20b` model — the same
+huihui-ai abliterated gpt-oss-20B served directly from its MXFP4 GGUF) and use a
+non-Ollama embedder (`--embedder openai`) or rely on first-launch lexical
+retrieval, which needs no embedder. Ollama stays a first-class option — it is the
+default in `configs/config.example.yaml` — but it is never a hard dependency.
 
 ## Abliterated model downgrade on resource exhaustion
 

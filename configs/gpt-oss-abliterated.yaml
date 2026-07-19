@@ -1,0 +1,38 @@
+# Local run config for the agent's own llama.cpp provider (Go supervisor of
+# llama-server). Downloads the GGUF from Hugging Face itself, then serves it on
+# loopback. This is the NATIVE equivalent of the Ollama model
+# `huihui_ai/gpt-oss-abliterated:20b` (see providers.ollama in
+# configs/config.example.yaml): the same huihui-ai abliterated gpt-oss-20B,
+# served directly via llama.cpp with no Ollama in the loop.
+#
+# gpt-oss is a Mixture-of-Experts model whose native weight format is MXFP4 —
+# the format OpenAI released and the one Ollama serves. Requantizing to Q4/Q5
+# degrades it, so this pins the MXFP4 GGUF (~12.1 GiB on disk). Because it is
+# MoE, it is deliberately absent from the offline fit ladder in
+# internal/llm/llamacpp/catalog.go (the dense params->bytes estimate does not
+# apply); the fit gate still re-checks the real artifact size at pull time.
+#
+# Requires a llama.cpp build recent enough to support gpt-oss / MXFP4_MOE
+# (gpt-oss landed in llama.cpp in Aug 2025). Assess before downloading with:
+#   ./bin/agent --inspect-model hf.co/bartowski/huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-GGUF:MXFP4_MOE
+# Run with:
+#   ./bin/agent --serve --config configs/gpt-oss-abliterated.yaml
+default_provider: llamacpp
+
+agent:
+  max_iterations: 6
+
+providers:
+  llamacpp:
+    model: gpt-oss-20b-abliterated-mxfp4
+    llama_cpp:
+      repo: bartowski/huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-GGUF
+      file: huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-MXFP4_MOE.gguf
+      quant: MXFP4_MOE           # consistency assertion: must match the pinned file
+      revision: main
+      binary: llama-server
+      ctx_size: 4096             # conservative; gpt-oss supports far more but KV grows with it
+      gpu_layers: 99             # full offload; lower it if the fit gate / VRAM rejects
+      parallel: 1
+      jinja: true                # use the model's own (harmony) chat template for tool calls
+      startup_timeout_seconds: 300
