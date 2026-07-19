@@ -30,10 +30,13 @@ providers:
       quant: Q4_K_M              # consistency assertion: must match the pinned file
       revision: main
       binary: llama-server
-      # gpu_layers and ctx_size are intentionally UNSET: with both omitted the
-      # provider auto-tunes for the detected GPU/VRAM (see cmd/agent/provider.go
-      # autoTuneLlama) and picks the partial-offload layer count + a safe context.
-      # Set them explicitly only to override that decision.
+      # gpu_layers is left UNSET so the provider auto-tunes the offload layer count
+      # for the detected GPU/VRAM (see cmd/agent/provider.go autoTuneLlama). ctx_size
+      # is pinned: this 30B model is larger than a 16 GB GPU (partial offload), and
+      # the tuner's conservative partial default (4096) can't hold a system prompt +
+      # RAG grounding. The extra KV cache spills to host RAM/GTT (fine with lots of
+      # RAM). Lower it on a RAM-limited host.
+      ctx_size: 16384
       parallel: 1
       jinja: true                # use the model's own chat template for tool calls
       # Pin the discrete GPU so the auto-tuner's VRAM math (16 GB RX 7800 XT) holds

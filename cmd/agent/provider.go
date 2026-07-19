@@ -148,22 +148,27 @@ func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logg
 	}
 
 	/*
-		Auto-tune when the operator has set neither gpu_layers nor ctx_size:
-		detect the host (GPU/VRAM/RAM) and pick a launch profile that makes the
-		most of it — full GPU offload with a generous context when the accelerator
-		has room, CPU-bounded otherwise. Explicit config always wins.
+		Auto-tune GPU layers whenever the operator has not pinned them: detect the
+		host (GPU/VRAM/RAM) and pick an offload profile that makes the most of it.
+		An explicit ctx_size is honored rather than overwritten — the tuner still
+		chooses the layer count for the detected VRAM, but the operator's larger
+		context wins so a system-prompt + RAG workload is not capped at the tuner's
+		conservative partial-offload default (the extra KV cache then spills to host
+		memory). Pinning gpu_layers disables auto-tuning entirely.
 	*/
-	if lc.GPULayers == 0 && lc.CtxSize == 0 {
+	if lc.GPULayers == 0 {
 		if rec, ok := autoTuneLlama(ctx, lc, rc); ok {
 			rc.GPULayers = rec.GPULayers
-			rc.CtxSize = rec.CtxSize
-			rc.KVCacheType = rec.KVCacheType
-			if rc.Downloader != nil {
-				rc.Downloader.ContextTokens = rc.CtxSize
+			if lc.CtxSize == 0 {
+				rc.CtxSize = rec.CtxSize
+				rc.KVCacheType = rec.KVCacheType
+				if rc.Downloader != nil {
+					rc.Downloader.ContextTokens = rc.CtxSize
+				}
 			}
 			logger.Info("llamacpp: auto-tuned for detected hardware",
-				"gpu_layers", rec.GPULayers, "ctx_size", rec.CtxSize, "backend", rec.Backend,
-				"kv_cache_type", rec.KVCacheType,
+				"gpu_layers", rec.GPULayers, "ctx_size", rc.CtxSize, "backend", rec.Backend,
+				"kv_cache_type", rc.KVCacheType, "operator_ctx", lc.CtxSize != 0,
 				"rationale", strings.Join(rec.Rationale, "; "))
 		}
 	}
@@ -193,7 +198,7 @@ func autoTuneLlama(ctx context.Context, lc *config.LlamaCppConfig, rc llamacpp.R
 		if err != nil {
 			return llamacpp.Recommendation{}, false
 		}
-		return llamacpp.RecommendRuntime(plan.Host, plan.Manifest.ModelBytes(), plan.Manifest.MMProjBytes(), 0), true
+		return llamacpp.RecommendRuntime(plan.Host, plan.Manifest.ModelBytes(), plan.Manifest.MMProjBytes(), lc.CtxSize), true
 	}
 	if lc.ModelPath != "" {
 		host, err := llamacpp.SystemProfiler{}.Profile(ctx, filepath.Dir(lc.ModelPath))
@@ -204,7 +209,7 @@ func autoTuneLlama(ctx context.Context, lc *config.LlamaCppConfig, rc llamacpp.R
 		if modelBytes == 0 {
 			return llamacpp.Recommendation{}, false
 		}
-		return llamacpp.RecommendRuntime(host, modelBytes, statSize(lc.MMProjPath), 0), true
+		return llamacpp.RecommendRuntime(host, modelBytes, statSize(lc.MMProjPath), lc.CtxSize), true
 	}
 	return llamacpp.Recommendation{}, false
 }

@@ -53,8 +53,13 @@ providers:
       binary: llama-server          # resolved from PATH
       # host: 127.0.0.1             # loopback only; an ephemeral API key is generated
       # port: 0                     # 0 = auto-select a free port
-      # gpu_layers + ctx_size omitted on purpose: the provider auto-tunes both for
-      # the detected GPU/VRAM. Set them to override that decision.
+      # gpu_layers omitted on purpose: the provider auto-tunes the offload layer
+      # count for the detected GPU/VRAM. ctx_size is pinned because this model is
+      # larger than a typical GPU (partial offload), and the tuner's conservative
+      # partial-offload default (4096) is too small for a system prompt + RAG
+      # grounding; the extra KV cache spills to host RAM. Lower it on a RAM-limited
+      # host, or unset both to take the fully auto-tuned (smaller) context.
+      ctx_size: 16384
       parallel: 1
       jinja: true                   # use the model's own chat template (tool calls)
       startup_timeout_seconds: 300  # generous: large models load for minutes
