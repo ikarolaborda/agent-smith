@@ -94,6 +94,13 @@ func (s *Server) capabilityStatus() map[string]any {
 		"research_apparatus":           researchApparatus,
 		"research_isolation_assurance": isolationAssurance,
 		"research_images_pinned":       researchRunner,
+		"research_branch_workflow":     researchEnabled,
+		"research_novelty_workflow":    researchEnabled,
+		"research_novelty_egress":      researchEnabled && s.research.noveltyBroker != nil,
+		"research_remediation":         researchEnabled,
+		"research_private_reporting":   researchEnabled,
+		"research_remote_transport":    false,
+		"automatic_disclosure":         false,
 		"rag":                          s.rag != nil && !s.disableRAG,
 		"cve_verifier":                 s.answerVerifier != nil,
 	}

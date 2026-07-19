@@ -45,11 +45,15 @@ clean twin. The API evidence pipeline now performs immutable local source
 capture, build materialization, fuzz crash ingestion, three independent replay
 gates, bounded deletion minimization, offline symbolization, crash grouping,
 and conservative primitive/finding creation. Every unmeasured primitive field
-remains `unknown`; the pipeline stops at `primitive_confirmed` until branch,
-novelty, remediation, and human-review evidence exists.
+remains `unknown`. The post-triage workflow now retains machine revision
+comparisons or explicit reviewer-owned untested reasons, fixed-source novelty
+responses and immutable reviews, approved candidate diffs, patch-linked builds,
+three-part runtime remediation validation, private reports, and separately
+approved human disclosure records. No-match novelty results remain
+`novelty_unverified`.
 
 The implementation is not beta-ready. A pinned real-program known-bug campaign
-(Magma or equivalent), end-to-end branch/novelty/fix validation, deployable
+(Magma or equivalent), end-to-end real-program branch/novelty/fix validation,
 constrained network acquisition, disk/inode enforcement, encrypted retention
 operations, and an independent security review remain release blockers. The
 current host reports neither rootless Docker nor gVisor, so the production CLI
@@ -482,6 +486,16 @@ Deliverables:
 
 Exit criteria: “novelty unverified” is the default; absence from NVD cannot pass
 the novelty gate; every proposed fix has runtime validation and retained logs.
+
+Implementation status: the durable gates, authenticated APIs/UI, fixed HTTPS
+lookup broker, approved patch custody, isolated patched-build path, typed
+reproducer/regression/negative-control runs, private report renderer, and human
+disclosure checkpoint are implemented and fixture-tested. Comparisons against
+the primary or separately captured campaign-owned supported revisions are
+machine-ingested and bound to exact target/build provenance; genuinely
+unavailable revisions can carry an explicit reviewer-owned `untested` reason.
+Automatic upstream supported-version discovery and a pinned real-program
+campaign remain open release work.
 
 ### Phase 6 — research UI and remote workers
 

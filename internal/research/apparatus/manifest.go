@@ -78,8 +78,10 @@ type JobRequest struct {
 	RunID           string                `json:"-"`
 	CampaignID      string                `json:"-"`
 	ScopeID         string                `json:"-"`
+	TargetID        string                `json:"target_id,omitempty"`
 	BuildID         string                `json:"build_id,omitempty"`
 	InputArtifactID string                `json:"input_artifact_id,omitempty"`
+	PatchArtifactID string                `json:"patch_artifact_id,omitempty"`
 	Operation       domain.Operation      `json:"operation"`
 	Harness         string                `json:"harness"`
 	Revision        string                `json:"revision"`
@@ -88,6 +90,7 @@ type JobRequest struct {
 	BuildDir        string                `json:"build_dir,omitempty"`
 	CorpusDir       string                `json:"corpus_dir,omitempty"`
 	EvidenceDir     string                `json:"-"`
+	PatchDir        string                `json:"-"`
 	Arguments       map[string]string     `json:"arguments,omitempty"`
 	Budget          domain.ResourceBudget `json:"budget"`
 	CorrelationID   string                `json:"correlation_id"`
@@ -118,12 +121,19 @@ func NewJob(manifest domain.ApparatusManifest, request JobRequest) (domain.Worke
 	if exceedsBudget(budget, manifest.Limits) {
 		return domain.WorkerJob{}, errors.New("apparatus: requested budget exceeds manifest limits")
 	}
-	if operationNeedsEvidence(request.Operation) {
+	if requestNeedsEvidence(request.Operation, request.Arguments) {
 		if request.InputArtifactID == "" || request.EvidenceDir == "" {
 			return domain.WorkerJob{}, errors.New("apparatus: operation requires a verified evidence artifact")
 		}
 	} else if request.InputArtifactID != "" || request.EvidenceDir != "" {
 		return domain.WorkerJob{}, errors.New("apparatus: operation does not accept an evidence artifact")
+	}
+	if request.Operation == domain.OperationBuild && request.PatchArtifactID != "" {
+		if request.PatchDir == "" {
+			return domain.WorkerJob{}, errors.New("apparatus: patched build requires verified patch evidence")
+		}
+	} else if request.PatchArtifactID != "" || request.PatchDir != "" {
+		return domain.WorkerJob{}, errors.New("apparatus: operation does not accept a patch artifact")
 	}
 	arguments := map[string]string{"manifest": manifest.ID, "harness": harness.Name, "revision": request.Revision}
 	sanitizer := request.Sanitizer
@@ -135,10 +145,18 @@ func NewJob(manifest domain.ApparatusManifest, request JobRequest) (domain.Worke
 	}
 	arguments["sanitizer"] = sanitizer
 	for key, value := range request.Arguments {
-		if key != "max-total-time" || request.Operation != domain.OperationFuzz {
-			return domain.WorkerJob{}, fmt.Errorf("apparatus: unsupported job argument %q", key)
+		if key == "max-total-time" && request.Operation == domain.OperationFuzz {
+			arguments[key] = value
+			continue
 		}
-		arguments[key] = value
+		if key == "validation-kind" && request.Operation == domain.OperationRegressionTest && (value == "reproducer" || value == "regression" || value == "negative_control") {
+			arguments[key] = value
+			continue
+		}
+		return domain.WorkerJob{}, fmt.Errorf("apparatus: unsupported job argument %q", key)
+	}
+	if request.Operation == domain.OperationRegressionTest && arguments["validation-kind"] == "" {
+		return domain.WorkerJob{}, errors.New("apparatus: regression validation kind required")
 	}
 	mounts := []domain.JobMount{{Name: "source", HostPath: request.SourceDir, ContainerPath: "/source", ReadOnly: true}}
 	if request.BuildDir != "" {
@@ -150,8 +168,11 @@ func NewJob(manifest domain.ApparatusManifest, request JobRequest) (domain.Worke
 	if request.EvidenceDir != "" {
 		mounts = append(mounts, domain.JobMount{Name: "evidence", HostPath: request.EvidenceDir, ContainerPath: "/evidence", ReadOnly: true})
 	}
+	if request.PatchDir != "" {
+		mounts = append(mounts, domain.JobMount{Name: "patch", HostPath: request.PatchDir, ContainerPath: "/patch", ReadOnly: true})
+	}
 	return domain.WorkerJob{
-		ID: request.ID, RunID: request.RunID, CampaignID: request.CampaignID, ScopeID: request.ScopeID, BuildID: request.BuildID, InputArtifactID: request.InputArtifactID, Operation: request.Operation,
+		ID: request.ID, RunID: request.RunID, CampaignID: request.CampaignID, ScopeID: request.ScopeID, TargetID: request.TargetID, BuildID: request.BuildID, InputArtifactID: request.InputArtifactID, PatchArtifactID: request.PatchArtifactID, Operation: request.Operation,
 		Arguments: arguments, ImageDigest: manifest.ImageDigest, Runtime: "rootless-docker", Mounts: mounts,
 		Environment:   manifest.Environment,
 		ArtifactRules: ArtifactRules(request.Operation), Budget: budget, AuditCorrelationID: request.CorrelationID,
@@ -243,4 +264,11 @@ func operationNeedsEvidence(operation domain.Operation) bool {
 	default:
 		return false
 	}
+}
+
+func requestNeedsEvidence(operation domain.Operation, arguments map[string]string) bool {
+	if operation == domain.OperationRegressionTest {
+		return arguments["validation-kind"] == "reproducer" || arguments["validation-kind"] == "negative_control"
+	}
+	return operationNeedsEvidence(operation)
 }

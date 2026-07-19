@@ -284,6 +284,73 @@ func (s *Service) AcquireTarget(ctx context.Context, actor domain.Principal, cam
 	return target, s.allowedWithDetails(ctx, actor, "target.acquire", "target_revision", target.ID, request.CorrelationID, map[string]string{"campaign_id": campaignID, "source_sha256": target.SourceSHA256})
 }
 
+// AcquireComparisonTarget captures another authorized supported revision after
+// primitive assessment without replacing the immutable primary campaign target.
+func (s *Service) AcquireComparisonTarget(ctx context.Context, actor domain.Principal, campaignID, findingID string, request TargetRequest) (domain.TargetRevision, error) {
+	if !hasAnyRole(actor, domain.RoleOperator, domain.RoleAdmin) {
+		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "campaign", campaignID, "operator or admin role required")
+	}
+	campaign, err := s.store.GetCampaign(ctx, campaignID)
+	if err != nil {
+		return domain.TargetRevision{}, err
+	}
+	if campaign.State != domain.CampaignPrimitiveAssessed && campaign.State != domain.CampaignBranchChecked {
+		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "campaign", campaignID, "primitive assessment must complete before comparison acquisition")
+	}
+	finding, err := s.store.GetFinding(ctx, findingID)
+	if err != nil {
+		return domain.TargetRevision{}, err
+	}
+	if finding.CampaignID != campaignID || finding.Label != domain.FindingPrimitiveConfirmed {
+		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "finding", findingID, "campaign-owned primitive-confirmed finding required")
+	}
+	scope, err := s.store.GetScope(ctx, campaign.ScopeID)
+	if err != nil {
+		return domain.TargetRevision{}, err
+	}
+	expectedCorrelation := "target:" + findingID + ":" + strings.TrimSpace(request.Revision)
+	if request.CorrelationID != expectedCorrelation {
+		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "finding", findingID, "comparison target correlation does not match finding and revision")
+	}
+	decision, err := s.AuthorizeAction(ctx, campaignID, domain.Action{Principal: actor, Operation: domain.OperationAcquire, Repository: request.Repository,
+		Revision: request.Revision, WorkspacePath: request.SourceDir, DiskBytes: scope.Budget.MaxDiskBytes, ApprovalID: request.ApprovalID}, request.CorrelationID)
+	if err != nil {
+		return domain.TargetRevision{}, err
+	}
+	if !decision.Allowed {
+		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "campaign", campaignID, decision.Reason)
+	}
+	if request.Language == "" || request.Architecture == "" || s.internalRoot == "" {
+		return domain.TargetRevision{}, s.denied(ctx, actor, "target.acquire_comparison", "campaign", campaignID, "language, architecture, and internal storage are required")
+	}
+	limits := acquisition.Limits{MaxBytes: scope.Budget.MaxDiskBytes}
+	snapshot, err := acquisition.HashTree(request.SourceDir, limits)
+	if err != nil {
+		return domain.TargetRevision{}, err
+	}
+	targetID := deterministicID("target", campaignID, request.Revision, snapshot.SourceSHA256)
+	destination, err := acquisition.CaptureDirectory(s.internalRoot, campaignID, targetID)
+	if err != nil {
+		return domain.TargetRevision{}, err
+	}
+	if _, err := acquisition.Capture(request.SourceDir, destination, snapshot.SourceSHA256, limits); err != nil {
+		return domain.TargetRevision{}, err
+	}
+	target := domain.TargetRevision{SchemaVersion: 1, ID: targetID, CampaignID: campaignID, Repository: request.Repository, RequestedRef: request.Revision,
+		Commit: request.Revision, SourceSHA256: snapshot.SourceSHA256, Language: request.Language, Architecture: request.Architecture, AcquiredAt: s.now()}
+	if existing, getErr := s.store.GetTarget(ctx, target.ID); getErr == nil {
+		if existing.SourceSHA256 != target.SourceSHA256 || existing.CampaignID != campaignID {
+			return domain.TargetRevision{}, errors.New("research service: target identity collision")
+		}
+		target = existing
+	} else if !errors.Is(getErr, store.ErrNotFound) {
+		return domain.TargetRevision{}, getErr
+	} else if err := s.store.SaveTarget(ctx, target); err != nil {
+		return domain.TargetRevision{}, err
+	}
+	return target, s.allowedWithDetails(ctx, actor, "target.acquire_comparison", "target_revision", target.ID, request.CorrelationID, map[string]string{"campaign_id": campaignID, "finding_id": findingID, "revision": target.Commit, "source_sha256": target.SourceSHA256})
+}
+
 // Transition advances exactly one evidence-backed state and rejects stale writes.
 func (s *Service) Transition(ctx context.Context, actor domain.Principal, campaignID string, to domain.CampaignState, facts domain.EvidenceFacts) (domain.Campaign, error) {
 	if !hasAnyRole(actor, domain.RoleOperator, domain.RoleAdmin) {
@@ -488,19 +555,8 @@ func (s *Service) PreauthorizeEnqueue(ctx context.Context, actor domain.Principa
 	if err != nil {
 		return err
 	}
-	repository := scope.TargetRepository
-	if campaign.TargetID != "" {
-		target, targetErr := s.store.GetTarget(ctx, campaign.TargetID)
-		if targetErr != nil {
-			return targetErr
-		}
-		repository = target.Repository
-		if revision != target.Commit {
-			return s.denied(ctx, actor, "job.preauthorize", "campaign", campaignID, "requested revision does not match the immutable target")
-		}
-	}
 	decision, err := s.AuthorizeAction(ctx, campaignID, domain.Action{
-		Principal: actor, Operation: operation, Repository: repository, Revision: revision,
+		Principal: actor, Operation: operation, Repository: scope.TargetRepository, Revision: revision,
 		WallSeconds: budget.MaxWallSeconds, MemoryBytes: budget.MaxMemoryBytes, DiskBytes: budget.MaxDiskBytes, PIDs: budget.MaxPIDs, ApprovalID: approvalID,
 	}, correlationID)
 	if err != nil {
@@ -547,15 +603,24 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 	}
 	if !containsString(manifest.Sanitizers, job.Arguments["sanitizer"]) || !reflect.DeepEqual(job.Environment, manifest.Environment) ||
 		!reflect.DeepEqual(job.ArtifactRules, apparatus.ArtifactRules(job.Operation)) || budgetExceeds(job.Budget, manifest.Limits) ||
-		!validApparatusArguments(job.Arguments) || !validApparatusMounts(job.Operation, job.Mounts) {
+		!validApparatusArguments(job) || !validApparatusMounts(job) {
 		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job envelope differs from the registered apparatus schema")
 	}
 	repository, revision := scope.TargetRepository, ""
-	if campaign.TargetID != "" {
-		target, targetErr := s.store.GetTarget(ctx, campaign.TargetID)
+	selectedTargetID := job.TargetID
+	if selectedTargetID == "" {
+		selectedTargetID = campaign.TargetID
+	}
+	var selectedTarget domain.TargetRevision
+	if selectedTargetID != "" {
+		target, targetErr := s.store.GetTarget(ctx, selectedTargetID)
 		if targetErr != nil {
 			return domain.ExperimentRun{}, targetErr
 		}
+		if target.CampaignID != campaignID || target.Repository != scope.TargetRepository {
+			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "target_revision", target.ID, "target does not belong to this campaign and scope")
+		}
+		selectedTarget = target
 		repository, revision = target.Repository, target.Commit
 		verifiedSource, verifyErr := acquisition.VerifiedCapture(s.internalRoot, campaign.ID, target.ID, target.SourceSHA256, acquisition.Limits{MaxBytes: scope.Budget.MaxDiskBytes})
 		if verifyErr != nil {
@@ -574,9 +639,9 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 		revision = scope.AllowedRevisions[0]
 	}
 	if job.Arguments["revision"] != revision {
-		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job revision does not match the immutable campaign target")
+		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "job revision does not match its immutable captured target")
 	}
-	if operationNeedsEvidence(job.Operation) {
+	if jobNeedsEvidence(job) {
 		if job.InputArtifactID == "" {
 			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "operation requires an evidence artifact")
 		}
@@ -584,7 +649,7 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 		if artifactErr != nil {
 			return domain.ExperimentRun{}, artifactErr
 		}
-		if artifact.CampaignID != campaignID || !evidenceRoleAllowed(job.Operation, artifact.Role) {
+		if artifact.CampaignID != campaignID || !evidenceRoleAllowed(job, artifact.Role) {
 			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "evidence artifact does not match the campaign operation")
 		}
 		expected := filepath.Join(s.internalRoot, campaignID, "evidence", string(job.Operation)+"-"+job.InputArtifactID)
@@ -599,6 +664,31 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 	} else if job.InputArtifactID != "" {
 		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "operation does not accept an evidence artifact")
 	}
+	if job.PatchArtifactID != "" {
+		if job.Operation != domain.OperationBuild || campaign.State != domain.CampaignNoveltyReviewed || selectedTarget.ID != campaign.TargetID {
+			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "patch evidence is accepted only for a novelty-reviewed fix build")
+		}
+		patch, patchErr := s.store.GetArtifact(ctx, job.PatchArtifactID)
+		if patchErr != nil {
+			return domain.ExperimentRun{}, patchErr
+		}
+		if patch.CampaignID != campaignID || patch.Role != "candidate_patch" {
+			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "artifact", patch.ID, "campaign-owned candidate patch required")
+		}
+		expected := filepath.Join(s.internalRoot, campaignID, "evidence", string(domain.OperationBuild)+"-"+patch.ID)
+		matched := false
+		for _, mount := range job.Mounts {
+			if mount.Name == "patch" {
+				canonical, canonicalErr := canonicalDirectory(mount.HostPath)
+				matched = canonicalErr == nil && canonical == expected
+			}
+		}
+		if !matched {
+			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "artifact", patch.ID, "patch mount does not match verified evidence")
+		}
+	} else if job.Operation == domain.OperationBuild && campaign.State == domain.CampaignNoveltyReviewed {
+		return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "novelty-reviewed build requires a candidate patch")
+	}
 	if requiresBuild(job.Operation) {
 		if job.BuildID == "" {
 			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "operation requires an evidence-backed build")
@@ -608,7 +698,7 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 			return domain.ExperimentRun{}, buildErr
 		}
 		if build.CampaignID != campaignID || build.Status != string(domain.RunCompleted) || build.ManifestID != manifest.ID ||
-			build.ImageDigest != manifest.ImageDigest || build.Sanitizer != job.Arguments["sanitizer"] || build.Provenance["harness"] != job.Arguments["harness"] {
+			build.TargetID != selectedTarget.ID || build.ImageDigest != manifest.ImageDigest || build.Sanitizer != job.Arguments["sanitizer"] || build.Provenance["harness"] != job.Arguments["harness"] {
 			return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "build provenance does not match the requested experiment")
 		}
 	} else if job.BuildID != "" {
@@ -623,7 +713,7 @@ func (s *Service) Enqueue(ctx context.Context, actor domain.Principal, campaignI
 	}
 	for index, path := range paths {
 		policyPath := path
-		if len(job.Mounts) > 0 && (job.Mounts[index].Name == "build" || job.Mounts[index].Name == "corpus" || job.Mounts[index].Name == "evidence" || job.Mounts[index].Name == "source" && campaign.TargetID != "") {
+		if len(job.Mounts) > 0 && (job.Mounts[index].Name == "build" || job.Mounts[index].Name == "corpus" || job.Mounts[index].Name == "evidence" || job.Mounts[index].Name == "patch" || job.Mounts[index].Name == "source" && campaign.TargetID != "") {
 			campaignInternal := filepath.Join(s.internalRoot, campaignID)
 			if s.internalRoot == "" || !insideAnyRoot(path, []string{campaignInternal}) {
 				return domain.ExperimentRun{}, s.denied(ctx, actor, "job.enqueue", "campaign", campaignID, "internal mount is outside the campaign-owned worker root")
@@ -770,23 +860,33 @@ func manifestHasHarness(manifest domain.ApparatusManifest, wanted string) bool {
 	return false
 }
 
-func validApparatusArguments(arguments map[string]string) bool {
-	for key, value := range arguments {
+func validApparatusArguments(job domain.WorkerJob) bool {
+	for key, value := range job.Arguments {
 		if value == "" {
 			return false
 		}
 		switch key {
 		case "manifest", "harness", "revision", "sanitizer", "max-total-time":
+			if key == "max-total-time" && job.Operation != domain.OperationFuzz {
+				return false
+			}
+		case "validation-kind":
+			if job.Operation != domain.OperationRegressionTest || value != "reproducer" && value != "regression" && value != "negative_control" {
+				return false
+			}
 		default:
 			return false
 		}
 	}
-	return arguments["manifest"] != "" && arguments["harness"] != "" && arguments["revision"] != "" && arguments["sanitizer"] != ""
+	if job.Operation == domain.OperationRegressionTest && job.Arguments["validation-kind"] == "" {
+		return false
+	}
+	return job.Arguments["manifest"] != "" && job.Arguments["harness"] != "" && job.Arguments["revision"] != "" && job.Arguments["sanitizer"] != ""
 }
 
-func validApparatusMounts(operation domain.Operation, mounts []domain.JobMount) bool {
+func validApparatusMounts(job domain.WorkerJob) bool {
 	seen := map[string]bool{}
-	for _, mount := range mounts {
+	for _, mount := range job.Mounts {
 		if seen[mount.Name] {
 			return false
 		}
@@ -808,11 +908,18 @@ func validApparatusMounts(operation domain.Operation, mounts []domain.JobMount) 
 			if mount.ContainerPath != "/evidence" || !mount.ReadOnly {
 				return false
 			}
+		case "patch":
+			if mount.ContainerPath != "/patch" || !mount.ReadOnly {
+				return false
+			}
 		default:
 			return false
 		}
 	}
-	if !seen["source"] || requiresBuild(operation) && !seen["build"] || requiresCorpus(operation) && !seen["corpus"] || operationNeedsEvidence(operation) && !seen["evidence"] {
+	if !seen["source"] || requiresBuild(job.Operation) && !seen["build"] || jobNeedsCorpus(job) && !seen["corpus"] || jobNeedsEvidence(job) && !seen["evidence"] || job.PatchArtifactID != "" && !seen["patch"] {
+		return false
+	}
+	if seen["patch"] && (job.Operation != domain.OperationBuild || job.PatchArtifactID == "") {
 		return false
 	}
 	return true
@@ -838,6 +945,13 @@ func requiresCorpus(operation domain.Operation) bool {
 	}
 }
 
+func jobNeedsCorpus(job domain.WorkerJob) bool {
+	if job.Operation == domain.OperationRegressionTest {
+		return job.Arguments["validation-kind"] == "regression"
+	}
+	return requiresCorpus(job.Operation)
+}
+
 func operationNeedsEvidence(operation domain.Operation) bool {
 	switch operation {
 	case domain.OperationReproduce, domain.OperationMinimize, domain.OperationSymbolize, domain.OperationCompareBranch:
@@ -847,9 +961,19 @@ func operationNeedsEvidence(operation domain.Operation) bool {
 	}
 }
 
-func evidenceRoleAllowed(operation domain.Operation, role string) bool {
-	if operation == domain.OperationSymbolize {
+func jobNeedsEvidence(job domain.WorkerJob) bool {
+	if job.Operation == domain.OperationRegressionTest {
+		return job.Arguments["validation-kind"] == "reproducer" || job.Arguments["validation-kind"] == "negative_control"
+	}
+	return operationNeedsEvidence(job.Operation)
+}
+
+func evidenceRoleAllowed(job domain.WorkerJob, role string) bool {
+	if job.Operation == domain.OperationSymbolize {
 		return role == "stderr_log" || role == "revision_comparison_log" || role == "regression_log"
+	}
+	if job.Operation == domain.OperationRegressionTest && job.Arguments["validation-kind"] == "negative_control" {
+		return role == "corpus_seed" || role == "corpus_entry"
 	}
 	return role == "crashing_input" || role == "minimized_input"
 }
@@ -876,7 +1000,7 @@ func campaignAllowsOperation(state domain.CampaignState, operation domain.Operat
 	case domain.OperationInspect, domain.OperationListHarnesses:
 		return state != domain.CampaignDraft && state != domain.CampaignScoped && state != domain.CampaignPaused && state != domain.CampaignCancelled && state != domain.CampaignFailed
 	case domain.OperationBuild:
-		return state == domain.CampaignAcquired
+		return state == domain.CampaignAcquired || state == domain.CampaignPrimitiveAssessed || state == domain.CampaignBranchChecked || state == domain.CampaignNoveltyReviewed
 	case domain.OperationSmokeTest, domain.OperationSeed:
 		return state == domain.CampaignBuildReady
 	case domain.OperationFuzz:

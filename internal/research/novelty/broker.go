@@ -24,11 +24,11 @@ const defaultResponseLimit int64 = 2 << 20
 
 // Source is an operator-defined fixed lookup protocol, never a model URL.
 type Source struct {
-	Name       string
-	Kind       string
-	BaseURL    string
-	QueryParam string
-	Headers    map[string]string
+	Name       string            `json:"name"`
+	Kind       string            `json:"kind"`
+	BaseURL    string            `json:"base_url"`
+	QueryParam string            `json:"query_param"`
+	Headers    map[string]string `json:"headers,omitempty"`
 }
 
 type HTTPDoer interface {
@@ -70,11 +70,16 @@ func NewBroker(doer HTTPDoer, evidence EvidenceStore, sources []Source, maxBytes
 	broker := &Broker{doer: doer, store: evidence, sources: map[string]Source{}, maxBytes: maxBytes, cacheTTL: cacheTTL, cache: map[string]cacheEntry{}}
 	for _, source := range sources {
 		parsed, err := url.Parse(source.BaseURL)
-		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || source.Name == "" || source.Kind == "" || source.QueryParam == "" {
+		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || source.Name == "" || !IsRequiredKind(source.Kind) || source.QueryParam == "" {
 			return nil, fmt.Errorf("novelty: invalid fixed HTTPS source %q", source.Name)
 		}
 		if _, exists := broker.sources[source.Name]; exists {
 			return nil, fmt.Errorf("novelty: duplicate source %q", source.Name)
+		}
+		for key := range source.Headers {
+			if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "Cookie") {
+				return nil, errors.New("novelty: credentials require a dedicated transport")
+			}
 		}
 		broker.sources[source.Name] = source
 	}
@@ -82,14 +87,14 @@ func NewBroker(doer HTTPDoer, evidence EvidenceStore, sources []Source, maxBytes
 }
 
 // Lookup captures a bounded response as content-addressed evidence.
-func (b *Broker) Lookup(ctx context.Context, campaignID, sourceName, query string) (domain.SourceEvidence, error) {
+func (b *Broker) Lookup(ctx context.Context, campaignID, findingID, sourceName, query string) (domain.SourceEvidence, error) {
 	source, ok := b.sources[sourceName]
 	if !ok {
 		return domain.SourceEvidence{}, errors.New("novelty: unknown lookup source")
 	}
 	query = strings.TrimSpace(query)
-	if campaignID == "" || query == "" || len(query) > 2048 {
-		return domain.SourceEvidence{}, errors.New("novelty: campaign and bounded query required")
+	if campaignID == "" || findingID == "" || query == "" || len(query) > 2048 {
+		return domain.SourceEvidence{}, errors.New("novelty: campaign, finding, and bounded query required")
 	}
 	requestURL, err := url.Parse(source.BaseURL)
 	if err != nil {
@@ -115,12 +120,18 @@ func (b *Broker) Lookup(ctx context.Context, campaignID, sourceName, query strin
 		}
 		response, err := b.doer.Do(request)
 		if err != nil {
-			record := newEvidence(campaignID, source, query, requestURL.String(), "unavailable", time.Now().UTC())
+			record := newEvidence(campaignID, findingID, source, query, requestURL.String(), "unavailable", time.Now().UTC())
 			record.Summary = err.Error()
 			if saveErr := b.store.SaveSourceEvidence(ctx, record); saveErr != nil {
 				return record, saveErr
 			}
 			return record, err
+		}
+		if response == nil || response.Body == nil || response.Request == nil || response.Request.URL == nil || !sameOrigin(requestURL, response.Request.URL) {
+			if response != nil && response.Body != nil {
+				response.Body.Close()
+			}
+			return domain.SourceEvidence{}, errors.New("novelty: lookup redirected outside its fixed origin")
 		}
 		defer response.Body.Close()
 		body, err := io.ReadAll(io.LimitReader(response.Body, b.maxBytes+1))
@@ -139,12 +150,12 @@ func (b *Broker) Lookup(ctx context.Context, campaignID, sourceName, query strin
 	if entry.statusCode < 200 || entry.statusCode >= 300 {
 		status = "error"
 	}
-	record := newEvidence(campaignID, source, query, requestURL.String(), status, entry.checkedAt)
+	record := newEvidence(campaignID, findingID, source, query, requestURL.String(), status, entry.checkedAt)
 	digest := sha256.Sum256(entry.body)
 	record.ResponseHash = "sha256:" + hex.EncodeToString(digest[:])
 	record.Metadata = map[string]string{"http_status": fmt.Sprint(entry.statusCode), "cache": fmt.Sprint(cached)}
 	artifact, err := b.store.PutArtifact(ctx, domain.Artifact{
-		SchemaVersion: 1, CampaignID: campaignID, Role: "lookup_response", MediaType: "application/octet-stream", Sensitivity: "embargoed",
+		SchemaVersion: 1, CampaignID: campaignID, ParentIDs: []string{findingID}, Role: "lookup_response", MediaType: "application/octet-stream", Sensitivity: "embargoed",
 	}, bytes.NewReader(entry.body))
 	if err != nil {
 		return record, err
@@ -160,6 +171,10 @@ func (b *Broker) Lookup(ctx context.Context, campaignID, sourceName, query strin
 	return record, nil
 }
 
+func sameOrigin(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
+}
+
 func (b *Broker) cached(key string) (cacheEntry, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -167,8 +182,8 @@ func (b *Broker) cached(key string) (cacheEntry, bool) {
 	return entry, ok && time.Since(entry.checkedAt) <= b.cacheTTL
 }
 
-func newEvidence(campaignID string, source Source, query, requestURL, status string, checked time.Time) domain.SourceEvidence {
-	return domain.SourceEvidence{SchemaVersion: 1, ID: randomID("source"), CampaignID: campaignID, Kind: source.Kind, SourceName: source.Name, Query: query, RequestURL: requestURL, Status: status, CheckedAt: checked}
+func newEvidence(campaignID, findingID string, source Source, query, requestURL, status string, checked time.Time) domain.SourceEvidence {
+	return domain.SourceEvidence{SchemaVersion: 1, ID: randomID("source"), CampaignID: campaignID, FindingID: findingID, Kind: source.Kind, SourceName: source.Name, Query: query, RequestURL: requestURL, Status: status, CheckedAt: checked}
 }
 
 func randomID(prefix string) string {

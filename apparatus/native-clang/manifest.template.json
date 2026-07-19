@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "id": "native-clang-libfuzzer-v1",
+  "id": "native-clang-libfuzzer-v2",
   "name": "Native Clang libFuzzer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "image_digest": "${IMAGE_DIGEST}",
   "engine": "libfuzzer",
   "sanitizers": ["address", "undefined"],

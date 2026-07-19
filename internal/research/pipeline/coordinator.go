@@ -146,6 +146,11 @@ func PrepareEvidence(ctx context.Context, repository *store.Store, campaignID, a
 				return "", errors.New("research pipeline: symbolization log contains no addresses")
 			}
 		}
+	} else if operation == domain.OperationBuild {
+		leaf = "patch.diff"
+		allowed = artifact.Role == "candidate_patch"
+	} else if operation == domain.OperationRegressionTest {
+		allowed = artifact.Role == "crashing_input" || artifact.Role == "minimized_input" || artifact.Role == "corpus_seed" || artifact.Role == "corpus_entry"
 	} else if operation != domain.OperationReproduce && operation != domain.OperationMinimize && operation != domain.OperationCompareBranch {
 		return "", errors.New("research pipeline: operation does not accept evidence materialization")
 	}
@@ -252,13 +257,224 @@ func (c *Coordinator) Ingest(ctx context.Context, job domain.WorkerJob, result d
 	switch job.Operation {
 	case domain.OperationBuild:
 		return c.ingestBuild(ctx, job, result)
-	case domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationRegressionTest, domain.OperationCompareBranch:
+	case domain.OperationCompareBranch:
+		return c.ingestRevisionCheck(ctx, job, result)
+	case domain.OperationFuzz, domain.OperationReproduce, domain.OperationMinimize, domain.OperationRegressionTest:
 		return c.ingestObservation(ctx, job, result)
 	case domain.OperationSymbolize:
 		return c.ingestSymbolization(ctx, job, result)
 	default:
 		return nil
 	}
+}
+
+type comparisonResult struct {
+	SchemaVersion      int    `json:"schema_version"`
+	TargetRevision     string `json:"target_revision"`
+	ReproducerExitCode int    `json:"reproducer_exit_code"`
+	SignalAbsent       bool   `json:"signal_absent"`
+}
+
+func (c *Coordinator) ingestRevisionCheck(ctx context.Context, job domain.WorkerJob, result domain.RunResult) error {
+	if job.BuildID == "" || job.InputArtifactID == "" {
+		return errors.New("research pipeline: revision comparison requires build and reproducer evidence")
+	}
+	build, err := c.store.GetBuild(ctx, job.BuildID)
+	if err != nil {
+		return err
+	}
+	if build.CampaignID != job.CampaignID || build.Status != string(domain.RunCompleted) || build.Provenance["target_revision"] != job.Arguments["revision"] || job.TargetID != "" && build.TargetID != job.TargetID {
+		return errors.New("research pipeline: comparison build provenance does not match its campaign target")
+	}
+	input, err := c.store.GetArtifact(ctx, job.InputArtifactID)
+	if err != nil {
+		return err
+	}
+	if input.CampaignID != job.CampaignID {
+		return errors.New("research pipeline: comparison input belongs to another campaign")
+	}
+	var structured, logArtifact domain.Artifact
+	for _, artifactID := range result.ArtifactIDs {
+		artifact, getErr := c.store.GetArtifact(ctx, artifactID)
+		if getErr != nil {
+			return getErr
+		}
+		if artifact.CampaignID != job.CampaignID || artifact.RunID != result.RunID {
+			return errors.New("research pipeline: comparison artifact identity mismatch")
+		}
+		switch artifact.Role {
+		case "revision_comparison":
+			structured = artifact
+		case "revision_comparison_log":
+			logArtifact = artifact
+		}
+	}
+	if structured.ID == "" || logArtifact.ID == "" {
+		return errors.New("research pipeline: revision comparison result and log required")
+	}
+	var parsed comparisonResult
+	if err := c.decodeArtifactJSON(ctx, structured, 1<<20, &parsed); err != nil {
+		return err
+	}
+	if parsed.SchemaVersion != 1 || parsed.TargetRevision == "" || parsed.TargetRevision != job.Arguments["revision"] || parsed.SignalAbsent != (parsed.ReproducerExitCode == 0) || parsed.ReproducerExitCode != result.Exit.Code {
+		return errors.New("research pipeline: invalid revision comparison contract")
+	}
+	groups, err := c.store.ListCrashGroups(ctx, job.CampaignID, 10000)
+	if err != nil {
+		return err
+	}
+	var group domain.CrashGroup
+	for _, candidate := range groups {
+		if candidate.CanonicalInputID == input.ID || candidate.MinimizedArtifactID == input.ID {
+			group = candidate
+			break
+		}
+	}
+	if group.ID == "" {
+		return errors.New("research pipeline: comparison input is not owned by a crash group")
+	}
+	findings, err := c.store.ListFindings(ctx, job.CampaignID, 10000)
+	if err != nil {
+		return err
+	}
+	var finding domain.Finding
+	for _, candidate := range findings {
+		if candidate.CrashGroupID == group.ID {
+			finding = candidate
+			break
+		}
+	}
+	if finding.ID == "" {
+		return errors.New("research pipeline: comparison crash group has no finding")
+	}
+	status, reason := "unaffected", "original reproducer completed without a machine-visible signal"
+	if !parsed.SignalAbsent {
+		_, log, openErr := c.store.OpenArtifact(ctx, logArtifact.ID)
+		if openErr != nil {
+			return openErr
+		}
+		data, readErr := io.ReadAll(io.LimitReader(log, triage.MaxLogBytes+1))
+		log.Close()
+		if readErr != nil {
+			return readErr
+		}
+		observation, parseErr := triage.Parse(data, triage.ParseOptions{
+			ID: "comparison_observation_" + result.RunID, CampaignID: job.CampaignID, RunID: result.RunID,
+			BuildID: job.BuildID, InputArtifactID: input.ID, CreatedAt: time.Now().UTC(),
+		})
+		if parseErr != nil {
+			return parseErr
+		}
+		matchesRootCause := observation.SecurityRelevant && observation.Signature == group.Signature
+		if observation.SecurityRelevant && !matchesRootCause && len(group.ObservationIDs) > 0 {
+			original, originalErr := c.store.GetCrash(ctx, group.ObservationIDs[0])
+			if originalErr != nil {
+				return originalErr
+			}
+			matchesRootCause = equivalentRootCause(original, observation)
+		}
+		if matchesRootCause {
+			status, reason = "affected", "original reproducer produced the same normalized security signature"
+		} else if observation.SecurityRelevant {
+			status, reason = "untested", "comparison produced a different security signature"
+		} else {
+			status, reason = "untested", "nonzero comparison had no matching machine-parsed security signal"
+		}
+	}
+	check := domain.RevisionCheck{
+		SchemaVersion: 1,
+		ID:            deterministicPipelineID("revision", job.CampaignID, finding.ID, parsed.TargetRevision, result.RunID),
+		CampaignID:    job.CampaignID,
+		FindingID:     finding.ID,
+		Revision:      parsed.TargetRevision,
+		Status:        status,
+		Reason:        reason,
+		BuildID:       job.BuildID,
+		RunID:         result.RunID,
+		EvidenceIDs:   []string{input.ID, structured.ID, logArtifact.ID, job.BuildID},
+		CheckedAt:     time.Now().UTC(),
+	}
+	if err := c.store.SaveRevisionCheck(ctx, check); err != nil {
+		return err
+	}
+	_, err = c.store.AppendAudit(ctx, domain.AuditEvent{ActorID: "evidence-pipeline", Action: "revision.check", ResourceType: "revision_check", ResourceID: check.ID, CorrelationID: job.AuditCorrelationID, Decision: "machine_parsed", Details: map[string]string{"campaign_id": job.CampaignID, "finding_id": finding.ID, "revision": check.Revision, "status": check.Status}})
+	return err
+}
+
+func equivalentRootCause(left, right domain.CrashObservation) bool {
+	if left.Class != right.Class || !strings.EqualFold(left.BugType, right.BugType) || !strings.EqualFold(left.Access, right.Access) || left.AccessSize != right.AccessSize {
+		return false
+	}
+	leftFrames, rightFrames := stableFrameIdentities(left.Frames), stableFrameIdentities(right.Frames)
+	if len(leftFrames) == 0 || len(rightFrames) == 0 {
+		return false
+	}
+	limit := len(leftFrames)
+	if len(rightFrames) < limit {
+		limit = len(rightFrames)
+	}
+	if limit > 3 {
+		limit = 3
+	}
+	for index := 0; index < limit; index++ {
+		if leftFrames[index] != rightFrames[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func stableFrameIdentities(frames []domain.StackFrame) []string {
+	result := make([]string, 0, 3)
+	for _, frame := range frames {
+		value := strings.ToLower(frame.Function + " " + frame.Module)
+		if strings.Contains(value, "__asan") || strings.Contains(value, "__msan") || strings.Contains(value, "libfuzzer") || strings.Contains(value, "fuzzer::") || strings.Contains(value, "libc") {
+			continue
+		}
+		function := strings.TrimSpace(frame.Function)
+		if index := strings.Index(function, "("); index > 0 {
+			function = function[:index]
+		}
+		file := strings.ToLower(filepath.Base(strings.TrimSpace(frame.File)))
+		if function == "" || file == "" || file == "." {
+			continue
+		}
+		result = append(result, strings.ToLower(strings.TrimSpace(function))+"\x00"+file)
+		if len(result) == 3 {
+			break
+		}
+	}
+	return result
+}
+
+func (c *Coordinator) decodeArtifactJSON(ctx context.Context, artifact domain.Artifact, limit int64, destination any) error {
+	if artifact.Size < 0 || artifact.Size > limit {
+		return fmt.Errorf("research pipeline: %s exceeds structured result limit", artifact.Role)
+	}
+	_, file, err := c.store.OpenArtifact(ctx, artifact.ID)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, limit+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return fmt.Errorf("research pipeline: decode %s: %w", artifact.Role, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("research pipeline: trailing structured result data")
+	}
+	return nil
+}
+
+func deterministicPipelineID(prefix string, values ...string) string {
+	digest := sha256.New()
+	for _, value := range values {
+		_, _ = digest.Write([]byte(value))
+		_, _ = digest.Write([]byte{0})
+	}
+	return prefix + "_" + hex.EncodeToString(digest.Sum(nil)[:16])
 }
 
 func (c *Coordinator) ingestBuild(ctx context.Context, job domain.WorkerJob, result domain.RunResult) error {
@@ -271,14 +487,21 @@ func (c *Coordinator) ingestBuild(ctx context.Context, job domain.WorkerJob, res
 	if created.IsZero() {
 		created = now
 	}
+	targetID := job.TargetID
+	if targetID == "" {
+		targetID = campaign.TargetID
+	}
 	build := domain.Build{
-		SchemaVersion: 1, ID: result.RunID, CampaignID: job.CampaignID, TargetID: campaign.TargetID,
+		SchemaVersion: 1, ID: result.RunID, CampaignID: job.CampaignID, TargetID: targetID,
 		ManifestID: job.Arguments["manifest"], ImageDigest: job.ImageDigest, Sanitizer: job.Arguments["sanitizer"],
 		Architecture: "unknown", Status: string(result.Status), CreatedAt: created, CompletedAt: &now,
 		Toolchain: map[string]string{}, Provenance: map[string]string{
 			"harness": job.Arguments["harness"], "target_revision": job.Arguments["revision"],
 			"isolation_assurance": result.IsolationAssurance,
 		},
+	}
+	if job.PatchArtifactID != "" {
+		build.Provenance["patch_artifact_id"] = job.PatchArtifactID
 	}
 	var binary domain.Artifact
 	for _, artifactID := range result.ArtifactIDs {
@@ -301,6 +524,20 @@ func (c *Coordinator) ingestBuild(ctx context.Context, job domain.WorkerJob, res
 		case "stdout_log", "stderr_log":
 			build.LogArtifacts = append(build.LogArtifacts, artifact.ID)
 		}
+	}
+	if job.PatchArtifactID != "" {
+		patch, patchErr := c.store.GetArtifact(ctx, job.PatchArtifactID)
+		if patchErr != nil {
+			return patchErr
+		}
+		if patch.CampaignID != job.CampaignID || patch.Role != "candidate_patch" || build.Provenance["patch_artifact_id"] != patch.ID {
+			return errors.New("research pipeline: patched build provenance does not match candidate patch evidence")
+		}
+		if result.Status == domain.RunCompleted && build.Provenance["patch_sha256"] != patch.ContentID || build.Provenance["patch_sha256"] != "" && build.Provenance["patch_sha256"] != patch.ContentID {
+			return errors.New("research pipeline: apparatus applied bytes other than the requested candidate patch")
+		}
+	} else if build.Provenance["patch_sha256"] != "" {
+		return errors.New("research pipeline: unrequested patch appeared in build provenance")
 	}
 	if result.Status == domain.RunCompleted {
 		if binary.ID == "" {
@@ -336,6 +573,9 @@ func (c *Coordinator) readBuildProvenance(ctx context.Context, artifact domain.A
 	}
 	for key, value := range values {
 		if text, ok := value.(string); ok {
+			if key == "patch_artifact_id" {
+				continue
+			}
 			build.Provenance[key] = text
 			if key == "compiler" {
 				build.Toolchain["compiler"] = text

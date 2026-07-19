@@ -24,6 +24,7 @@ const (
 	OperationCoverage       Operation = "coverage"
 	OperationSymbolize      Operation = "symbolize"
 	OperationCompareBranch  Operation = "compare_revision"
+	OperationNoveltyLookup  Operation = "novelty_lookup"
 	OperationRegressionTest Operation = "regression_test"
 	OperationStaticAnalyze  Operation = "static_analyze"
 	OperationDraftReport    Operation = "draft_report"
@@ -38,7 +39,7 @@ func IsKnownOperation(operation Operation) bool {
 	case OperationInspect, OperationAcquire, OperationBuild, OperationListHarnesses,
 		OperationSmokeTest, OperationSeed, OperationFuzz, OperationReproduce,
 		OperationMinimize, OperationMergeCorpus, OperationCoverage, OperationSymbolize,
-		OperationCompareBranch, OperationRegressionTest, OperationStaticAnalyze,
+		OperationCompareBranch, OperationNoveltyLookup, OperationRegressionTest, OperationStaticAnalyze,
 		OperationDraftReport, OperationDisclose:
 		return true
 	default:
@@ -241,8 +242,10 @@ type ExperimentRun struct {
 	ID                 string            `json:"id"`
 	CampaignID         string            `json:"campaign_id"`
 	ScopeID            string            `json:"scope_id"`
+	TargetID           string            `json:"target_id,omitempty"`
 	BuildID            string            `json:"build_id,omitempty"`
 	InputArtifactID    string            `json:"input_artifact_id,omitempty"`
+	PatchArtifactID    string            `json:"patch_artifact_id,omitempty"`
 	Operation          Operation         `json:"operation"`
 	Arguments          map[string]string `json:"arguments,omitempty"`
 	Environment        map[string]string `json:"environment,omitempty"`
@@ -282,8 +285,10 @@ type WorkerJob struct {
 	RunID              string            `json:"run_id"`
 	CampaignID         string            `json:"campaign_id"`
 	ScopeID            string            `json:"scope_id"`
+	TargetID           string            `json:"target_id,omitempty"`
 	BuildID            string            `json:"build_id,omitempty"`
 	InputArtifactID    string            `json:"input_artifact_id,omitempty"`
+	PatchArtifactID    string            `json:"patch_artifact_id,omitempty"`
 	Operation          Operation         `json:"operation"`
 	Arguments          map[string]string `json:"arguments,omitempty"`
 	Environment        map[string]string `json:"environment,omitempty"`
@@ -478,6 +483,7 @@ type SourceEvidence struct {
 	SchemaVersion int               `json:"schema_version"`
 	ID            string            `json:"id"`
 	CampaignID    string            `json:"campaign_id"`
+	FindingID     string            `json:"finding_id"`
 	Kind          string            `json:"kind"`
 	SourceName    string            `json:"source_name"`
 	Query         string            `json:"query"`
@@ -495,6 +501,7 @@ type SourceReview struct {
 	SchemaVersion    int       `json:"schema_version"`
 	ID               string    `json:"id"`
 	CampaignID       string    `json:"campaign_id"`
+	FindingID        string    `json:"finding_id"`
 	SourceEvidenceID string    `json:"source_evidence_id"`
 	Kind             string    `json:"kind"`
 	Status           string    `json:"status"`
@@ -552,10 +559,15 @@ type Finding struct {
 	EvidenceIDs         []string     `json:"evidence_ids,omitempty"`
 	BranchChecks        []GateCheck  `json:"branch_checks,omitempty"`
 	NoveltyChecks       []GateCheck  `json:"novelty_checks,omitempty"`
+	NoveltyStatus       string       `json:"novelty_status,omitempty"`
 	FixArtifactID       string       `json:"fix_artifact_id,omitempty"`
 	RegressionRunID     string       `json:"regression_run_id,omitempty"`
+	ReportArtifactID    string       `json:"report_artifact_id,omitempty"`
 	HumanReviewApproval string       `json:"human_review_approval,omitempty"`
+	DisclosureApproval  string       `json:"disclosure_approval,omitempty"`
 	DisclosureStatus    string       `json:"disclosure_status"`
+	DisclosureReference string       `json:"disclosure_reference,omitempty"`
+	DisclosedAt         *time.Time   `json:"disclosed_at,omitempty"`
 	CreatedAt           time.Time    `json:"created_at"`
 	UpdatedAt           time.Time    `json:"updated_at"`
 }

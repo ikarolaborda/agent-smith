@@ -112,7 +112,7 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 	eventRequest.Header.Set("Accept", "text/event-stream")
 	eventResponse := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(eventResponse, eventRequest)
-	if eventResponse.Code != http.StatusOK || !strings.Contains(eventResponse.Body.String(), "event: audit") || !strings.Contains(eventResponse.Body.String(), "campaign.transition") {
+	if eventResponse.Code != http.StatusOK || !strings.Contains(eventResponse.Body.String(), "event: campaign_state") || !strings.Contains(eventResponse.Body.String(), "campaign.transition") {
 		t.Fatalf("events status=%d body=%s", eventResponse.Code, eventResponse.Body.String())
 	}
 	if response = researchJSONRequest(srv, http.MethodGet, "/v1/research/audit/verify", operatorToken, nil); response.Code != http.StatusOK {

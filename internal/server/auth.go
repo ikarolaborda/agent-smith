@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
+	"github.com/ikarolaborda/agent-smith/internal/research/novelty"
 	"github.com/ikarolaborda/agent-smith/internal/research/pipeline"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
 	"github.com/ikarolaborda/agent-smith/internal/research/service"
@@ -30,6 +32,8 @@ type researchRuntime struct {
 	workspaceRoots []string
 	credentials    []credentialHash
 	broker         *runner.Broker
+	noveltyBroker  *novelty.Broker
+	noveltySources map[string]novelty.Source
 }
 
 func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*researchRuntime, error) {
@@ -78,6 +82,24 @@ func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*resea
 		return nil, err
 	}
 	runtime.store, runtime.service = repository, svc
+	if len(opts.NoveltySources) > 0 {
+		doer := opts.NoveltyHTTPClient
+		if doer == nil {
+			doer = &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			}}
+		}
+		lookupBroker, brokerErr := novelty.NewBroker(doer, repository, opts.NoveltySources, 2<<20, 15*time.Minute)
+		if brokerErr != nil {
+			repository.Close()
+			return nil, brokerErr
+		}
+		runtime.noveltyBroker = lookupBroker
+		runtime.noveltySources = make(map[string]novelty.Source, len(opts.NoveltySources))
+		for _, source := range opts.NoveltySources {
+			runtime.noveltySources[source.Name] = source
+		}
+	}
 	coordinator, err := pipeline.New(repository, opts.MinimumReproductions)
 	if err != nil {
 		repository.Close()

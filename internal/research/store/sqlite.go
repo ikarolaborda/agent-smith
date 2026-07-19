@@ -484,6 +484,14 @@ func (s *Store) ListRuns(ctx context.Context, campaignID string, limit int) ([]d
 	return decodeRecords[domain.ExperimentRun](rows)
 }
 
+func (s *Store) ListTargets(ctx context.Context, campaignID string, limit int) ([]domain.TargetRevision, error) {
+	rows, err := s.listRecordData(ctx, recordTarget, campaignID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRecords[domain.TargetRevision](rows)
+}
+
 func (s *Store) ListApprovals(ctx context.Context, campaignID string, limit int) ([]domain.Approval, error) {
 	rows, err := s.listRecordData(ctx, recordApproval, campaignID, limit)
 	if err != nil {
@@ -530,6 +538,38 @@ func (s *Store) ListFindings(ctx context.Context, campaignID string, limit int) 
 		return nil, err
 	}
 	return decodeRecords[domain.Finding](rows)
+}
+
+func (s *Store) ListSourceEvidence(ctx context.Context, campaignID string, limit int) ([]domain.SourceEvidence, error) {
+	rows, err := s.listRecordData(ctx, recordSourceEvidence, campaignID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRecords[domain.SourceEvidence](rows)
+}
+
+func (s *Store) ListSourceReviews(ctx context.Context, campaignID string, limit int) ([]domain.SourceReview, error) {
+	rows, err := s.listRecordData(ctx, recordSourceReview, campaignID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRecords[domain.SourceReview](rows)
+}
+
+func (s *Store) ListRevisionChecks(ctx context.Context, campaignID string, limit int) ([]domain.RevisionCheck, error) {
+	rows, err := s.listRecordData(ctx, recordRevisionCheck, campaignID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRecords[domain.RevisionCheck](rows)
+}
+
+func (s *Store) ListRemediations(ctx context.Context, campaignID string, limit int) ([]domain.RemediationValidation, error) {
+	rows, err := s.listRecordData(ctx, recordRemediation, campaignID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRecords[domain.RemediationValidation](rows)
 }
 
 func (s *Store) ListArtifacts(ctx context.Context, campaignID string, limit int) ([]domain.Artifact, error) {

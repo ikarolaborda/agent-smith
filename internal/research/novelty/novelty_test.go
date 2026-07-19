@@ -19,11 +19,11 @@ func TestBrokerUsesFixedBoundedEndpointAndCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := broker.Lookup(context.Background(), "campaign", "nvd", "parser overflow")
+	first, err := broker.Lookup(context.Background(), "campaign", "finding", "nvd", "parser overflow")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := broker.Lookup(context.Background(), "campaign", "nvd", "parser overflow")
+	second, err := broker.Lookup(context.Background(), "campaign", "finding", "nvd", "parser overflow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,8 +43,22 @@ func TestBrokerRejectsArbitraryOrOversizedSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := broker.Lookup(context.Background(), "campaign", "fixed", "query"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if _, err := broker.Lookup(context.Background(), "campaign", "finding", "fixed", "query"); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversize error=%v", err)
+	}
+}
+
+func TestBrokerRejectsCrossOriginRedirectResult(t *testing.T) {
+	store := &fakeEvidenceStore{}
+	broker, err := NewBroker(redirectDoer{}, store, []Source{{Name: "nvd", Kind: "nvd", BaseURL: "https://services.nvd.nist.gov/search", QueryParam: "q"}}, 1024, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := broker.Lookup(context.Background(), "campaign", "finding", "nvd", "query"); err == nil || !strings.Contains(err.Error(), "fixed origin") {
+		t.Fatalf("redirect error=%v", err)
+	}
+	if len(store.evidence) != 0 {
+		t.Fatal("cross-origin bytes were retained as valid lookup evidence")
 	}
 }
 
@@ -54,8 +68,8 @@ func TestNoveltyRemainsUnverifiedAfterEveryNoMatch(t *testing.T) {
 	now := time.Now().UTC()
 	for index, kind := range RequiredKinds {
 		id := "evidence-" + kind
-		evidence = append(evidence, domain.SourceEvidence{ID: id, CampaignID: "campaign", Kind: kind, ArtifactID: "artifact-" + kind})
-		reviews = append(reviews, domain.SourceReview{ID: "review-" + kind, CampaignID: "campaign", SourceEvidenceID: id, Kind: kind, Status: "no_match", Summary: "no matching record found", ReviewedBy: "reviewer", ReviewedAt: now.Add(time.Duration(index) * time.Second)})
+		evidence = append(evidence, domain.SourceEvidence{ID: id, CampaignID: "campaign", FindingID: "finding", Kind: kind, ArtifactID: "artifact-" + kind})
+		reviews = append(reviews, domain.SourceReview{ID: "review-" + kind, CampaignID: "campaign", FindingID: "finding", SourceEvidenceID: id, Kind: kind, Status: "no_match", Summary: "no matching record found", ReviewedBy: "reviewer", ReviewedAt: now.Add(time.Duration(index) * time.Second)})
 	}
 	decision := Evaluate(evidence, reviews)
 	if !decision.Complete || decision.Known || decision.Status != "novelty_unverified" || !NoveltyFacts(decision).NoveltyChecksRecorded {
@@ -91,10 +105,17 @@ type fakeDoer struct {
 	lastURL string
 }
 
+type redirectDoer struct{}
+
+func (redirectDoer) Do(*http.Request) (*http.Response, error) {
+	request, _ := http.NewRequest(http.MethodGet, "https://attacker.invalid/collect", nil)
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("secret")), Request: request}, nil
+}
+
 func (f *fakeDoer) Do(request *http.Request) (*http.Response, error) {
 	f.calls++
 	f.lastURL = request.URL.String()
-	return &http.Response{StatusCode: f.status, Body: io.NopCloser(strings.NewReader(f.body)), Header: http.Header{}}, nil
+	return &http.Response{StatusCode: f.status, Body: io.NopCloser(strings.NewReader(f.body)), Header: http.Header{}, Request: request}, nil
 }
 
 type fakeEvidenceStore struct {

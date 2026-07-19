@@ -3,7 +3,7 @@ FROM ${BASE_IMAGE}
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-       ca-certificates clang llvm jq libclang-rt-14-dev \
+       ca-certificates clang llvm jq libclang-rt-14-dev patch \
     && rm -rf /var/lib/apt/lists/* \
     && clang++ --version \
     && llvm-symbolizer --version

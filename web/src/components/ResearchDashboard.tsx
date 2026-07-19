@@ -15,6 +15,10 @@ import {
   type PrimitiveAssessment,
   type ResearchBuild,
   type ResearchScope,
+	type RemediationValidation,
+	type RevisionCheck,
+	type SourceEvidence,
+	type SourceReview,
   type TargetRevision,
 } from '../research';
 
@@ -35,7 +39,12 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
   const [observations, setObservations] = useState<CrashObservation[]>([]);
   const [primitives, setPrimitives] = useState<PrimitiveAssessment[]>([]);
   const [findings, setFindings] = useState<Finding[]>([]);
+	const [revisionChecks, setRevisionChecks] = useState<RevisionCheck[]>([]);
+	const [sourceEvidence, setSourceEvidence] = useState<SourceEvidence[]>([]);
+	const [sourceReviews, setSourceReviews] = useState<SourceReview[]>([]);
+	const [remediations, setRemediations] = useState<RemediationValidation[]>([]);
   const [target, setTarget] = useState<TargetRevision | null>(null);
+	const [targets, setTargets] = useState<TargetRevision[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -72,7 +81,7 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
     if (!id) return;
     try {
 	  const campaign = await researchJSON<Campaign>(`/v1/research/campaigns/${id}`);
-      const [nextRuns, nextBuilds, nextArtifacts, nextApprovals, nextGroups, nextObservations, nextPrimitives, nextFindings, nextEvents] = await Promise.all([
+	  const [nextRuns, nextBuilds, nextArtifacts, nextApprovals, nextGroups, nextObservations, nextPrimitives, nextFindings, nextRevisionChecks, nextSourceEvidence, nextSourceReviews, nextRemediations, nextTargets, nextEvents] = await Promise.all([
         listResearch<ExperimentRun>(`/v1/research/campaigns/${id}/runs`),
         listResearch<ResearchBuild>(`/v1/research/campaigns/${id}/builds`),
         listResearch<Artifact>(`/v1/research/campaigns/${id}/artifacts`),
@@ -81,6 +90,11 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
         listResearch<CrashObservation>(`/v1/research/campaigns/${id}/crash-observations`),
         listResearch<PrimitiveAssessment>(`/v1/research/campaigns/${id}/primitive-assessments`),
         listResearch<Finding>(`/v1/research/campaigns/${id}/findings`),
+		listResearch<RevisionCheck>(`/v1/research/campaigns/${id}/revision-checks`),
+		listResearch<SourceEvidence>(`/v1/research/campaigns/${id}/source-evidence`),
+		listResearch<SourceReview>(`/v1/research/campaigns/${id}/source-reviews`),
+		listResearch<RemediationValidation>(`/v1/research/campaigns/${id}/remediations`),
+		listResearch<TargetRevision>(`/v1/research/campaigns/${id}/targets`),
         listResearch<AuditEvent>(`/v1/research/events?campaign_id=${encodeURIComponent(id)}&after=0`),
       ]);
       setRuns(nextRuns);
@@ -91,6 +105,11 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
       setObservations(nextObservations);
       setPrimitives(nextPrimitives);
       setFindings(nextFindings);
+	  setRevisionChecks(nextRevisionChecks);
+	  setSourceEvidence(nextSourceEvidence);
+	  setSourceReviews(nextSourceReviews);
+	  setRemediations(nextRemediations);
+	  setTargets(nextTargets);
       setEvents(nextEvents);
 	  setCampaigns((current) => current.map((item) => item.id === campaign.id ? campaign : item));
 	  setTarget(campaign.target_id ? await researchJSON<TargetRevision>(`/v1/research/campaigns/${id}/target`) : null);
@@ -170,6 +189,90 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
     }
   }
 
+	async function workflowPost(path: string, body: Record<string, unknown>) {
+		try {
+			await researchJSON(`/v1/research/campaigns/${selectedID}/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+			await loadCampaign(selectedID);
+		} catch (error) {
+			handleError(error);
+		}
+	}
+
+	function firstFinding(): Finding | null {
+		if (!findings[0]) handleError(new Error('A promoted finding is required first.'));
+		return findings[0] ?? null;
+	}
+
+	async function recordUntestedRevision() {
+		const finding = firstFinding(); if (!finding) return;
+		const revision = window.prompt('Authorized revision'); if (!revision?.trim()) return;
+		const reason = window.prompt('Explicit reason this revision could not be tested'); if (!reason?.trim()) return;
+		await workflowPost('revision-checks', { finding_id: finding.id, revision, reason });
+	}
+
+	async function captureComparisonTarget() {
+		const finding = firstFinding(); if (!finding) return;
+		const revision = window.prompt('Authorized supported revision'); if (!revision?.trim()) return;
+		const sourceDir = window.prompt('Existing local source snapshot directory'); if (!sourceDir?.trim()) return;
+		const language = window.prompt('Language', target?.language || 'c++'); if (!language?.trim()) return;
+		const architecture = window.prompt('Architecture', target?.architecture || 'amd64'); if (!architecture?.trim()) return;
+		const approvalID = window.prompt(`Acquisition approval ID if required (correlation target:${finding.id}:${revision.trim()})`) ?? '';
+		await workflowPost('targets', { finding_id: finding.id, repository: selectedScope?.target_repository || target?.repository, revision, source_dir: sourceDir, language, architecture, approval_id: approvalID, correlation_id: `target:${finding.id}:${revision.trim()}` });
+	}
+
+	async function completeBranchReview() {
+		const finding = firstFinding(); if (finding) await workflowPost('branch-review', { finding_id: finding.id });
+	}
+
+	async function runLookup() {
+		const finding = firstFinding(); if (!finding) return;
+		const sourceName = window.prompt('Configured fixed source name (for example nvd)'); if (!sourceName?.trim()) return;
+		const query = window.prompt('Bounded lookup query'); if (!query?.trim()) return;
+		const approvalID = window.prompt(`Approval ID if required (correlation lookup:${finding.id}:${sourceName.trim()})`) ?? '';
+		await workflowPost('lookups', { finding_id: finding.id, source_name: sourceName, query, approval_id: approvalID });
+	}
+
+	async function reviewLookup(evidence: SourceEvidence) {
+		const status = window.prompt('Review status: match, no_match, unavailable, or error'); if (!status?.trim()) return;
+		const summary = window.prompt('Evidence-bounded review summary'); if (!summary?.trim()) return;
+		await workflowPost('source-reviews', { finding_id: evidence.finding_id, source_evidence_id: evidence.id, status, summary });
+	}
+
+	async function completeNoveltyReview() {
+		const finding = firstFinding(); if (finding) await workflowPost('novelty-review', { finding_id: finding.id });
+	}
+
+	async function createPatch() {
+		const finding = firstFinding(); if (!finding) return;
+		const approvalID = window.prompt(`Regression approval ID (correlation patch:${finding.id})`); if (!approvalID?.trim()) return;
+		const diff = window.prompt('Paste a bounded textual unified diff'); if (!diff?.trim()) return;
+		await workflowPost('candidate-patches', { finding_id: finding.id, approval_id: approvalID, diff });
+	}
+
+	async function validateFix() {
+		const finding = firstFinding(); if (!finding) return;
+		const patchArtifactID = window.prompt('Candidate patch artifact ID'); if (!patchArtifactID?.trim()) return;
+		const approvalID = window.prompt(`Regression approval ID (correlation patch:${finding.id})`); if (!approvalID?.trim()) return;
+		const fixBuildID = window.prompt('Patch-linked fix build ID'); if (!fixBuildID?.trim()) return;
+		const reproducerRunID = window.prompt('Original reproducer validation run ID'); if (!reproducerRunID?.trim()) return;
+		const regressionRunID = window.prompt('Regression corpus validation run ID'); if (!regressionRunID?.trim()) return;
+		const negativeControlRunID = window.prompt('Negative-control validation run ID'); if (!negativeControlRunID?.trim()) return;
+		await workflowPost('remediations', { finding_id: finding.id, patch_artifact_id: patchArtifactID, approval_id: approvalID, fix_build_id: fixBuildID, reproducer_run_id: reproducerRunID, regression_run_id: regressionRunID, negative_control_run_id: negativeControlRunID });
+	}
+
+	async function createReport() {
+		const finding = firstFinding(); if (!finding) return;
+		const approvalID = window.prompt(`Report approval ID (correlation report:${finding.id})`); if (!approvalID?.trim()) return;
+		await workflowPost('reports', { finding_id: finding.id, approval_id: approvalID });
+	}
+
+	async function recordDisclosure() {
+		const finding = firstFinding(); if (!finding) return;
+		const approvalID = window.prompt(`Disclosure approval ID (correlation disclosure:${finding.id})`); if (!approvalID?.trim()) return;
+		const reference = window.prompt('Human disclosure reference (ticket, case, or message ID)'); if (!reference?.trim()) return;
+		await workflowPost('disclosures', { finding_id: finding.id, approval_id: approvalID, reference });
+	}
+
   if (loading) return <div className="research-loading"><Spinner size="sm" /> Loading research control plane…</div>;
 
   return (
@@ -234,6 +337,18 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
                 {findings.map((finding) => <div className="research-row finding-row" key={finding.id}><div><strong>{finding.title}</strong><small>{finding.cwe || 'CWE pending'} · disclosure {finding.disclosure_status || 'not started'}</small></div><StatusBadge value={finding.label} /></div>)}
                 {groups.length === 0 && findings.length === 0 && <Empty text="No machine-parsed crash groups or promoted findings." />}
               </Panel>
+			  <Panel title="Branch & novelty gates" icon="bi-signpost-split" wide>
+				<div className="workflow-actions"><Button size="sm" variant="outline-secondary" onClick={() => void captureComparisonTarget()}>Capture revision</Button><Button size="sm" variant="outline-secondary" onClick={() => void recordUntestedRevision()}>Record untested</Button><Button size="sm" variant="outline-primary" onClick={() => void completeBranchReview()}>Complete branch review</Button><Button size="sm" variant="outline-secondary" onClick={() => void runLookup()}>Run fixed lookup</Button><Button size="sm" variant="outline-primary" onClick={() => void completeNoveltyReview()}>Complete novelty review</Button></div>
+				{targets.map((item) => <div className="research-row" key={`target-${item.id}`}><div><strong>{item.commit}</strong><small>{shortID(item.source_sha256)} · {item.language}/{item.architecture}</small></div><StatusBadge value={item.id === selected.target_id ? 'primary' : 'comparison'} /></div>)}
+				{revisionChecks.map((check) => <div className="research-row" key={check.id}><div><strong>{check.revision}</strong><small>{check.reason || `${shortID(check.build_id ?? '')} · ${shortID(check.run_id ?? '')}`}</small></div><StatusBadge value={check.status} /></div>)}
+				{sourceEvidence.map((evidence) => <div className="research-row" key={evidence.id}><div><strong>{evidence.kind} · {evidence.source_name}</strong><small>{evidence.summary || evidence.query} · {sourceReviews.filter((review) => review.source_evidence_id === evidence.id).length} review(s)</small></div><StatusBadge value={evidence.status} /><Button size="sm" variant="link" onClick={() => void reviewLookup(evidence)}>Review</Button></div>)}
+				{revisionChecks.length === 0 && sourceEvidence.length === 0 && <Empty text="No supported-revision or retained lookup evidence yet." />}
+			  </Panel>
+			  <Panel title="Remediation & disclosure" icon="bi-shield-check" wide>
+				<div className="workflow-actions"><Button size="sm" variant="outline-secondary" onClick={() => void createPatch()}>Retain candidate patch</Button><Button size="sm" variant="outline-primary" onClick={() => void validateFix()}>Validate remediation</Button><Button size="sm" variant="outline-primary" onClick={() => void createReport()}>Create private report</Button><Button size="sm" variant="outline-danger" onClick={() => void recordDisclosure()}>Record human disclosure</Button></div>
+				{findings.map((finding) => <div className="research-row" key={`workflow-${finding.id}`}><div><strong>{finding.novelty_status || 'novelty pending'}</strong><small>patch {shortID(finding.fix_artifact_id || 'none')} · report {shortID(finding.report_artifact_id || 'none')} · {finding.disclosure_reference || 'not disclosed'}</small></div><StatusBadge value={finding.disclosure_status || 'not_disclosed'} /></div>)}
+				{remediations.map((validation) => <div className="research-row" key={validation.id}><div><strong>Validated fix {shortID(validation.fix_build_id)}</strong><small>reproducer clean · regression passed · negative control clean</small></div><StatusBadge value={validation.original_signal_gone && validation.regression_passed && validation.negative_control_clean ? 'validated' : 'failed'} /></div>)}
+			  </Panel>
               <Panel title="Primitive evidence matrix" icon="bi-grid-3x3-gap" wide>
                 {primitives.length === 0 ? <Empty text="No primitive assessment yet; all exploitability dimensions remain unknown." /> : primitives.map((primitive) => (
                   <div className="primitive-matrix" key={primitive.id}>

@@ -12,12 +12,14 @@ harness=""
 max_total_time="30"
 revision=""
 sanitizer="address,undefined"
+validation_kind=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --harness) harness="${2:-}"; shift 2 ;;
         --max-total-time) max_total_time="${2:-}"; shift 2 ;;
         --revision) revision="${2:-}"; shift 2 ;;
         --sanitizer) sanitizer="${2:-}"; shift 2 ;;
+		--validation-kind) validation_kind="${2:-}"; shift 2 ;;
         --manifest) shift 2 ;;
         *) echo "unsupported apparatus argument: $1" >&2; exit 64 ;;
     esac
@@ -67,6 +69,16 @@ case "$operation" in
         ;;
     build)
         test -r "$source_file"
+		build_source="$source_file"
+		patch_sha256=""
+		if [ -f /patch/patch.diff ]; then
+			mkdir -p /tmp/source/apparatus/native-clang
+			cp -R /source/apparatus/native-clang/fixtures /tmp/source/apparatus/native-clang/fixtures
+			patch --batch --forward --directory=/tmp/source --strip=1 < /patch/patch.diff
+			build_source="/tmp/source/apparatus/native-clang/fixtures/$harness/fuzz_target.cc"
+			test -r "$build_source"
+			patch_sha256="sha256:$(sha256sum /patch/patch.diff | awk '{print $1}')"
+		fi
         # Debian's Clang 14 ASan runtime can collide with high-entropy PIE
         # layouts before main on newer kernels. Fuzz targets are disposable,
         # contained workers, so use a fixed non-PIE layout for deterministic
@@ -74,7 +86,7 @@ case "$operation" in
         clang++ -std=c++17 -O1 -g -fno-omit-frame-pointer -fno-pie -no-pie \
             -fsanitize="$sanitizer_flags" \
             -fprofile-instr-generate -fcoverage-mapping \
-            "$source_file" -o /out/fuzz_target
+            "$build_source" -o /out/fuzz_target
         chmod 0555 /out/fuzz_target
         clang_version="$(clang++ --version | sed -n '1p')"
         jq -n \
@@ -82,8 +94,9 @@ case "$operation" in
             --arg revision "$revision" \
             --arg sanitizer "$sanitizer" \
             --arg clang "$clang_version" \
+			--arg patch_sha256 "$patch_sha256" \
             --arg flags "-O1 -g -fno-omit-frame-pointer -fno-pie -no-pie -fsanitize=$sanitizer_flags -fprofile-instr-generate -fcoverage-mapping" \
-            '{schema_version:1,harness:$harness,target_revision:$revision,sanitizers:$sanitizer,compiler:$clang,compiler_flags:$flags}' \
+            '{schema_version:1,harness:$harness,target_revision:$revision,sanitizers:$sanitizer,compiler:$clang,compiler_flags:$flags,patch_sha256:$patch_sha256}' \
             > /out/build-provenance.json
         chmod 0444 /out/build-provenance.json
         ;;
@@ -202,12 +215,28 @@ case "$operation" in
         ;;
     regression_test)
         test -x "$binary"
-        test -d /corpus
-        LLVM_PROFILE_FILE=/tmp/regression.profraw "$binary" -runs=0 /corpus > /out/regression.log 2>&1
-        jq -n --arg revision "$revision" \
-            '{schema_version:1,target_revision:$revision,regression_passed:true}' \
+		case "$validation_kind" in
+			reproducer|negative_control)
+				test -f /evidence/reproducer
+				set +e
+				LLVM_PROFILE_FILE=/tmp/regression.profraw "$binary" -runs=3 /evidence/reproducer > /out/regression.log 2>&1
+				regression_exit="$?"
+				set -e
+				;;
+			regression)
+				test -d /corpus
+				set +e
+				LLVM_PROFILE_FILE=/tmp/regression.profraw "$binary" -runs=0 /corpus > /out/regression.log 2>&1
+				regression_exit="$?"
+				set -e
+				;;
+			*) echo "invalid regression validation kind" >&2; exit 64 ;;
+		esac
+        jq -n --arg revision "$revision" --arg validation_kind "$validation_kind" --argjson exit_code "$regression_exit" \
+            '{schema_version:1,target_revision:$revision,validation_kind:$validation_kind,exit_code:$exit_code,signal_absent:($exit_code == 0)}' \
             > /out/regression.json
         chmod 0444 /out/regression.log /out/regression.json
+		exit "$regression_exit"
         ;;
     *)
         echo "unsupported operation: $operation" >&2

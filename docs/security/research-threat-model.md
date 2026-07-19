@@ -56,6 +56,12 @@ cannot promote evidence, register an apparatus, approve their own action, change
 fixed roots, choose arbitrary egress, or disclose. Raw logs and binary artifacts
 stay outside model context; bounded summaries and opaque IDs are the interface.
 
+Novelty egress is disabled without an operator-owned source file. Enabled
+lookups use fixed HTTPS origins, refuse redirects and credential headers, apply
+response/query limits, retain response hashes and bytes, and still require a
+separate human/parser review. Campaign domain policy is enforced before every
+lookup; a missing advisory record remains `novelty_unverified`.
+
 ### Acquisition and supply chain
 
 Repository/ref resolution, base images, apparatus images, compilers, build
@@ -67,6 +73,12 @@ special files, applies file/byte ceilings, copies atomically into a private
 campaign tree, and rehashes that tree before every worker mount. A production
 deployment still needs a curated image registry, signature verification/SBOM
 policy, and an explicit acquisition broker before accepting third-party targets.
+
+Candidate fixes are bounded textual unified-diff artifacts tied to an approved
+finding correlation. The control-plane host never applies them. A read-only
+patch mount is applied to an ephemeral apparatus worktree, and the resulting
+build records the patch artifact ID. Remediation cannot advance without clean
+original-reproducer, regression-corpus, and distinct negative-control records.
 
 ### Worker runtime
 

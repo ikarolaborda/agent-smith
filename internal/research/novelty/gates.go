@@ -30,7 +30,7 @@ func Evaluate(evidence []domain.SourceEvidence, reviews []domain.SourceReview) D
 	byKind := map[string]domain.SourceReview{}
 	for _, review := range reviews {
 		item, exists := byID[review.SourceEvidenceID]
-		if !exists || item.CampaignID != review.CampaignID || item.Kind != review.Kind {
+		if !exists || item.CampaignID != review.CampaignID || item.FindingID != review.FindingID || item.Kind != review.Kind {
 			continue
 		}
 		if _, required := requiredKind(review.Kind); required {
@@ -69,7 +69,9 @@ func Evaluate(evidence []domain.SourceEvidence, reviews []domain.SourceReview) D
 func BranchFacts(requiredRevisions []string, checks []domain.RevisionCheck) (domain.EvidenceFacts, []domain.GateCheck) {
 	byRevision := map[string]domain.RevisionCheck{}
 	for _, check := range checks {
-		byRevision[check.Revision] = check
+		if current, exists := byRevision[check.Revision]; !exists || check.CheckedAt.After(current.CheckedAt) {
+			byRevision[check.Revision] = check
+		}
 	}
 	complete := len(requiredRevisions) > 0
 	var gates []domain.GateCheck
@@ -105,6 +107,13 @@ func requiredKind(kind string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// IsRequiredKind reports whether a lookup contributes to the conservative
+// novelty matrix.
+func IsRequiredKind(kind string) bool {
+	_, ok := requiredKind(kind)
+	return ok
 }
 
 func reviewStatus(status string) bool {

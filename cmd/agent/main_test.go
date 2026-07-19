@@ -154,3 +154,21 @@ func TestIsLocalProviderIncludesAbliterationGroundingDefault(t *testing.T) {
 		t.Fatal("CLI abliteration provider must inherit the server's default web-grounding posture")
 	}
 }
+
+func TestLoadNoveltySourcesRejectsOversizedConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sources.json")
+	valid := `[{"name":"nvd","kind":"nvd","base_url":"https://example.test/search","query_param":"q"}]`
+	if err := os.WriteFile(path, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := loadNoveltySources(path)
+	if err != nil || len(sources) != 1 || sources[0].Name != "nvd" {
+		t.Fatalf("sources=%#v err=%v", sources, err)
+	}
+	if err := os.WriteFile(path, []byte(valid+strings.Repeat(" ", 1<<20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadNoveltySources(path); err == nil {
+		t.Fatal("oversized novelty source configuration was accepted")
+	}
+}

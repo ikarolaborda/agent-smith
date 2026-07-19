@@ -1,0 +1,8 @@
+[
+  {
+    "name": "nvd",
+    "kind": "nvd",
+    "base_url": "https://services.nvd.nist.gov/rest/json/cves/2.0",
+    "query_param": "keywordSearch"
+  }
+]

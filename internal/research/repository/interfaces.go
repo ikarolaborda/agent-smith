@@ -59,6 +59,30 @@ type Jobs interface {
 	GetRun(context.Context, string) (domain.ExperimentRun, error)
 }
 
+// WorkflowEvidence is the durable boundary for the post-triage research
+// workflow. It is intentionally separate from ControlPlane so lightweight
+// policy/service adapters need not implement query methods they never use.
+type WorkflowEvidence interface {
+	SaveSourceEvidence(context.Context, domain.SourceEvidence) error
+	GetSourceEvidence(context.Context, string) (domain.SourceEvidence, error)
+	ListSourceEvidence(context.Context, string, int) ([]domain.SourceEvidence, error)
+	SaveSourceReview(context.Context, domain.SourceReview) error
+	GetSourceReview(context.Context, string) (domain.SourceReview, error)
+	ListSourceReviews(context.Context, string, int) ([]domain.SourceReview, error)
+	SaveRevisionCheck(context.Context, domain.RevisionCheck) error
+	GetRevisionCheck(context.Context, string) (domain.RevisionCheck, error)
+	ListRevisionChecks(context.Context, string, int) ([]domain.RevisionCheck, error)
+	SaveRemediation(context.Context, domain.RemediationValidation) error
+	GetRemediation(context.Context, string) (domain.RemediationValidation, error)
+	ListRemediations(context.Context, string, int) ([]domain.RemediationValidation, error)
+	GetRun(context.Context, string) (domain.ExperimentRun, error)
+	ListCrashes(context.Context, string, int) ([]domain.CrashObservation, error)
+	GetCrashGroup(context.Context, string) (domain.CrashGroup, error)
+	GetPrimitive(context.Context, string) (domain.PrimitiveAssessment, error)
+	ListArtifacts(context.Context, string, int) ([]domain.Artifact, error)
+	ListTargets(context.Context, string, int) ([]domain.TargetRevision, error)
+}
+
 // ControlPlane is the minimal deterministic service persistence boundary.
 type ControlPlane interface {
 	Scopes

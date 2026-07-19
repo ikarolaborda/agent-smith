@@ -40,7 +40,10 @@ func (c *Collector) Collect(ctx context.Context, job domain.WorkerJob, staging s
 	result.Apparatus.Runtime = assurance.Runtime
 	var parentIDs []string
 	if job.InputArtifactID != "" {
-		parentIDs = []string{job.InputArtifactID}
+		parentIDs = append(parentIDs, job.InputArtifactID)
+	}
+	if job.PatchArtifactID != "" {
+		parentIDs = append(parentIDs, job.PatchArtifactID)
 	}
 	stdout, stdoutTruncated, stdoutDropped := boundedBytes(execution.Stdout, c.maxCapturedOutputBytes)
 	stderr, stderrTruncated, stderrDropped := boundedBytes(execution.Stderr, c.maxCapturedOutputBytes)

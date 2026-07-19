@@ -229,9 +229,90 @@ SUMMARY: AddressSanitizer: heap-buffer-overflow /source/fuzz_target.cc:16:38 in 
 	if err != nil || len(findings) != 1 || findings[0].Label != domain.FindingPrimitiveConfirmed || findings[0].CWE != "CWE-787" {
 		t.Fatalf("findings=%#v err=%v", findings, err)
 	}
+	comparisonBuild := domain.Build{SchemaVersion: 1, ID: "comparison-build", CampaignID: campaign.ID, Status: string(domain.RunCompleted), Provenance: map[string]string{"target_revision": "abc"}, CreatedAt: time.Now().UTC()}
+	if err := repository.SaveBuild(ctx, comparisonBuild); err != nil {
+		t.Fatal(err)
+	}
+	comparison, err := repository.PutArtifact(ctx, domain.Artifact{CampaignID: campaign.ID, RunID: "run-compare", Role: "revision_comparison", MediaType: "application/json"}, strings.NewReader(`{"schema_version":1,"target_revision":"abc","reproducer_exit_code":0,"signal_absent":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comparisonLog, err := repository.PutArtifact(ctx, domain.Artifact{CampaignID: campaign.ID, RunID: "run-compare", Role: "revision_comparison_log", MediaType: "text/plain"}, strings.NewReader("completed without sanitizer signal\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Ingest(ctx,
+		domain.WorkerJob{RunID: "run-compare", CampaignID: campaign.ID, BuildID: comparisonBuild.ID, InputArtifactID: groups[0].MinimizedArtifactID, Operation: domain.OperationCompareBranch, Arguments: map[string]string{"revision": "abc"}, AuditCorrelationID: "compare"},
+		domain.RunResult{RunID: "run-compare", Operation: domain.OperationCompareBranch, Status: domain.RunCompleted, ArtifactIDs: []string{comparison.ID, comparisonLog.ID}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	checks, err := repository.ListRevisionChecks(ctx, campaign.ID, 10)
+	if err != nil || len(checks) != 1 || checks[0].FindingID != findings[0].ID || checks[0].Revision != "abc" || checks[0].Status != "unaffected" || checks[0].BuildID != comparisonBuild.ID {
+		t.Fatalf("revision checks=%#v err=%v", checks, err)
+	}
 }
 
 const testDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestCoordinatorBindsPatchedBuildToExactArtifactBytes(t *testing.T) {
+	ctx := context.Background()
+	repository, campaign := pipelineStore(t)
+	defer repository.Close()
+	coordinator, err := New(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := repository.PutArtifact(ctx, domain.Artifact{CampaignID: campaign.ID, Role: "candidate_patch", MediaType: "text/x-diff"}, strings.NewReader("--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeBuildArtifacts := func(runID, patchSHA string) (domain.Artifact, domain.Artifact) {
+		t.Helper()
+		binary, putErr := repository.PutArtifact(ctx, domain.Artifact{CampaignID: campaign.ID, RunID: runID, Role: "harness_binary", MediaType: "application/x-executable"}, strings.NewReader("fixed"))
+		if putErr != nil {
+			t.Fatal(putErr)
+		}
+		provenance, putErr := repository.PutArtifact(ctx, domain.Artifact{CampaignID: campaign.ID, RunID: runID, Role: "build_provenance", MediaType: "application/json"}, strings.NewReader(fmt.Sprintf(`{"patch_sha256":%q}`, patchSHA)))
+		if putErr != nil {
+			t.Fatal(putErr)
+		}
+		return binary, provenance
+	}
+	binary, provenance := makeBuildArtifacts("patched-build", patch.ContentID)
+	job := domain.WorkerJob{RunID: "patched-build", CampaignID: campaign.ID, PatchArtifactID: patch.ID, Operation: domain.OperationBuild, Arguments: map[string]string{"manifest": "apparatus", "harness": "parser", "revision": "abc", "sanitizer": "address"}}
+	result := domain.RunResult{RunID: job.RunID, Operation: job.Operation, Status: domain.RunCompleted, ArtifactIDs: []string{binary.ID, provenance.ID}}
+	if err := coordinator.Ingest(ctx, job, result); err != nil {
+		t.Fatal(err)
+	}
+	build, err := repository.GetBuild(ctx, job.RunID)
+	if err != nil || build.Provenance["patch_artifact_id"] != patch.ID || build.Provenance["patch_sha256"] != patch.ContentID {
+		t.Fatalf("build=%#v err=%v", build, err)
+	}
+	badBinary, badProvenance := makeBuildArtifacts("mismatched-patched-build", "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+	job.RunID = "mismatched-patched-build"
+	result.RunID, result.ArtifactIDs = job.RunID, []string{badBinary.ID, badProvenance.ID}
+	if err := coordinator.Ingest(ctx, job, result); err == nil {
+		t.Fatal("build provenance for different patch bytes was accepted")
+	}
+}
+
+func TestEquivalentRootCauseIgnoresBranchLineDriftButNotOperationDrift(t *testing.T) {
+	left := domain.CrashObservation{Class: domain.ObservationASanMemory, BugType: "heap-buffer-overflow", Access: "write", AccessSize: 1, Frames: []domain.StackFrame{{Function: "parse(unsigned char*)", File: "/source/parser.cc", Line: 16}}}
+	right := left
+	right.Frames = []domain.StackFrame{{Function: "parse(unsigned char*)", File: "/alternate/parser.cc", Line: 42}}
+	if !equivalentRootCause(left, right) {
+		t.Fatal("line-only branch drift split the same root cause")
+	}
+	right.Frames[0].Function = "decode(unsigned char*)"
+	if equivalentRootCause(left, right) {
+		t.Fatal("different top-level operation was treated as the same root cause")
+	}
+	right.Frames[0].Function = ""
+	if equivalentRootCause(left, right) {
+		t.Fatal("a frame without a function identity was treated as the same root cause")
+	}
+}
 
 func pipelineStore(t *testing.T) (*store.Store, domain.Campaign) {
 	t.Helper()

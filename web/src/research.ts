@@ -128,7 +128,73 @@ export interface Finding {
   title: string;
   label: string;
   cwe?: string;
+	branch_checks?: GateCheck[];
+	novelty_checks?: GateCheck[];
+	novelty_status?: string;
+	fix_artifact_id?: string;
+	regression_run_id?: string;
+	report_artifact_id?: string;
+	human_review_approval?: string;
+	disclosure_approval?: string;
   disclosure_status: string;
+	disclosure_reference?: string;
+}
+
+export interface GateCheck {
+	name: string;
+	status: string;
+	summary: string;
+	evidence_ids?: string[];
+	checked_at?: string;
+}
+
+export interface RevisionCheck {
+	id: string;
+	finding_id: string;
+	revision: string;
+	status: string;
+	reason?: string;
+	build_id?: string;
+	run_id?: string;
+	evidence_ids?: string[];
+	checked_at: string;
+}
+
+export interface SourceEvidence {
+	id: string;
+	finding_id: string;
+	kind: string;
+	source_name: string;
+	query: string;
+	status: string;
+	summary: string;
+	artifact_id?: string;
+	checked_at: string;
+}
+
+export interface SourceReview {
+	id: string;
+	finding_id: string;
+	source_evidence_id: string;
+	kind: string;
+	status: string;
+	summary: string;
+	reviewed_by: string;
+	reviewed_at: string;
+}
+
+export interface RemediationValidation {
+	id: string;
+	finding_id: string;
+	patch_artifact_id: string;
+	fix_build_id: string;
+	reproducer_run_id: string;
+	regression_run_id: string;
+	negative_control_run_id: string;
+	original_signal_gone: boolean;
+	regression_passed: boolean;
+	negative_control_clean: boolean;
+	validated_at: string;
 }
 
 export interface AuditEvent {

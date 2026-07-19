@@ -227,7 +227,7 @@ func (b *Broker) Submit(ctx context.Context, job domain.WorkerJob) (domain.Exper
 	}
 	job.SchemaVersion, job.Status, job.CreatedAt, job.UpdatedAt = 1, domain.RunQueued, now, now
 	run := domain.ExperimentRun{
-		SchemaVersion: 1, ID: job.RunID, CampaignID: job.CampaignID, ScopeID: job.ScopeID, BuildID: job.BuildID, InputArtifactID: job.InputArtifactID, Operation: job.Operation,
+		SchemaVersion: 1, ID: job.RunID, CampaignID: job.CampaignID, ScopeID: job.ScopeID, TargetID: job.TargetID, BuildID: job.BuildID, InputArtifactID: job.InputArtifactID, PatchArtifactID: job.PatchArtifactID, Operation: job.Operation,
 		Arguments: job.Arguments, Status: domain.RunQueued, AuditCorrelationID: job.AuditCorrelationID, CreatedAt: now,
 	}
 	if err := b.journal.CreateJobAndRun(ctx, job, run); err != nil {

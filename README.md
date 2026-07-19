@@ -56,6 +56,8 @@ export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"
 
 The browser asks for the token and keeps it in tab-scoped `sessionStorage`. Add `--allow-exec` to enable runner v2 only when the local Docker daemon reports rootless mode; add `--research-container-runtime runsc` to require gVisor. Apparatus images and base images must be exact SHA-256 identities. Build the first libFuzzer apparatus with `BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 apparatus/native-clang/build-image.sh`, register the generated manifest through `POST /v1/research/apparatuses`, then include its ID in an `AuthorizationScope`.
 
+External novelty lookups are disabled unless the operator supplies `--research-novelty-sources configs/research-novelty-sources.example.json` (or a private equivalent). The file is a bounded array of fixed HTTPS endpoints and required evidence kinds; campaign scopes must separately allow `novelty_lookup` and each destination domain. Redirects and arbitrary client URLs are refused. A complete novelty review still requires all seven evidence kinds and never promotes no-match results to “novel.”
+
 See the [research architecture plan](docs/plans/cybersecurity-research-platform.md) and [threat model](docs/security/research-threat-model.md). The deliberately vulnerable micro-fixture is evaluation-only and must never be reported as novel.
 
 ## Clustered inference (70B-class on two Macs)
@@ -177,6 +179,7 @@ export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmen
 | `--research-workspace-roots` | Comma-separated fixed roots; runtime workspace choices cannot escape them. |
 | `--research-token`   | Bootstrap bearer token (prefer `AGENT_SMITH_RESEARCH_TOKEN`; minimum 32 characters). |
 | `--research-container-runtime` | Optional required Docker runtime such as `runsc`; rootless Docker is mandatory for runner v2. |
+| `--research-novelty-sources` | Bounded JSON file of operator-fixed HTTPS novelty sources; empty disables lookup egress. |
 | `--ingest`           | Ingest markdown into a RAG collection and exit (with `--collection` + `--source`). |
 | `--collection`       | Collection name when `--ingest` is set.                                            |
 | `--source`           | Directory of `.md` files to ingest.                                               |

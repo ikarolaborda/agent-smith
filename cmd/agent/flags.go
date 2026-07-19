@@ -9,48 +9,49 @@ import (
 
 /* flags groups the CLI flag values so we can pass them around as one value. */
 type flags struct {
-	configPath      string
-	provider        string
-	model           string
-	prompt          string
-	stream          bool
-	serve           bool
-	addr            string
-	ingest          bool
-	collection      string
-	source          string
-	embedder        string
-	embedModel      string
-	ragDir          string
-	disableRAG      bool
-	disableWeb      bool
-	disableC7       bool
-	agentic         bool
-	graphExpand     bool
-	evalRAG         string
-	clusterCfg      string
-	workspace       string
-	ragMaxChunks    int
-	buildDataset    bool
-	datasetSrc      string
-	datasetOut      string
-	verifyCVE       bool
-	validateVuln    bool
-	allowExec       bool
-	execImageDigest string
-	researchMode    bool
-	researchDir     string
-	researchToken   string
-	researchActor   string
-	researchRoots   string
-	researchRuntime string
-	researchWorkers int
-	refineLoop      bool
-	refineIters     int
-	refineTO        time.Duration
-	pull            string
-	inspectModel    string
-	installRuntime  bool
+	configPath             string
+	provider               string
+	model                  string
+	prompt                 string
+	stream                 bool
+	serve                  bool
+	addr                   string
+	ingest                 bool
+	collection             string
+	source                 string
+	embedder               string
+	embedModel             string
+	ragDir                 string
+	disableRAG             bool
+	disableWeb             bool
+	disableC7              bool
+	agentic                bool
+	graphExpand            bool
+	evalRAG                string
+	clusterCfg             string
+	workspace              string
+	ragMaxChunks           int
+	buildDataset           bool
+	datasetSrc             string
+	datasetOut             string
+	verifyCVE              bool
+	validateVuln           bool
+	allowExec              bool
+	execImageDigest        string
+	researchMode           bool
+	researchDir            string
+	researchToken          string
+	researchActor          string
+	researchRoots          string
+	researchRuntime        string
+	researchWorkers        int
+	researchNoveltySources string
+	refineLoop             bool
+	refineIters            int
+	refineTO               time.Duration
+	pull                   string
+	inspectModel           string
+	installRuntime         bool
 }
 
 /* parseFlags reads CLI flags. */
@@ -92,6 +93,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.researchRoots, "research-workspace-roots", "", "comma-separated existing directories permitted as research workspaces; defaults to --workspace when set")
 	flag.StringVar(&f.researchRuntime, "research-container-runtime", "", "optional verified Docker runtime for research workers (for example runsc for gVisor)")
 	flag.IntVar(&f.researchWorkers, "research-workers", 1, "global research worker concurrency (per-campaign concurrency remains one)")
+	flag.StringVar(&f.researchNoveltySources, "research-novelty-sources", "", "path to a bounded JSON array of fixed HTTPS novelty lookup sources; empty disables lookup egress")
 	flag.BoolVar(&f.refineLoop, "refine-loop", false, "OPT-IN single-shot refinement loop (requires --prompt + OpenAI judge): regenerate the answer with the gpt-5.x judge's critique until it is judged USABLE (grounded, feasible, honestly scoped) or the iteration budget is exhausted. Anti-fabrication: an honest negative passes; the loop never fakes a pass. CLI-only.")
 	flag.IntVar(&f.refineIters, "refine-max-iters", refine.DefaultMaxIters, "maximum refinement iterations when --refine-loop is set")
 	flag.DurationVar(&f.refineTO, "refine-timeout", refine.DefaultRoundTimeout, "per-round timeout (generate+judge) when --refine-loop is set")

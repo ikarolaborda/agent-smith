@@ -115,7 +115,7 @@ func principalMay(p Principal, op Operation) bool {
 		case RoleAdmin:
 			return true
 		case RoleReviewer:
-			if op == OperationDraftReport || op == OperationDisclose {
+			if op == OperationNoveltyLookup || op == OperationDraftReport || op == OperationDisclose {
 				return true
 			}
 		case RoleOperator:

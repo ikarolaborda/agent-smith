@@ -201,6 +201,8 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 		s.handleResearchTransition(w, r, principal, campaignID)
 	case "target":
 		s.handleResearchTarget(w, r, principal, campaignID)
+	case "targets":
+		s.handleResearchTargets(w, r, principal, campaignID)
 	case "approvals":
 		s.handleCampaignApprovals(w, r, principal, campaignID)
 	case "runs":
@@ -255,6 +257,26 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 		}
 		values, err := s.research.store.ListFindings(r.Context(), campaignID, queryLimit(r, 1000))
 		s.writeResearchList(w, values, err)
+	case "revision-checks":
+		s.handleResearchRevisionChecks(w, r, principal, campaignID)
+	case "branch-review":
+		s.handleResearchBranchReview(w, r, principal, campaignID)
+	case "source-evidence":
+		s.handleResearchSourceEvidence(w, r, campaignID)
+	case "lookups":
+		s.handleResearchLookups(w, r, principal, campaignID)
+	case "source-reviews":
+		s.handleResearchSourceReviews(w, r, principal, campaignID)
+	case "novelty-review":
+		s.handleResearchNoveltyReview(w, r, principal, campaignID)
+	case "candidate-patches":
+		s.handleResearchCandidatePatches(w, r, principal, campaignID)
+	case "remediations":
+		s.handleResearchRemediations(w, r, principal, campaignID)
+	case "reports":
+		s.handleResearchReports(w, r, principal, campaignID)
+	case "disclosures":
+		s.handleResearchDisclosures(w, r, principal, campaignID)
 	case "jobs":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
@@ -282,21 +304,45 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 		if preflightBudget == (domain.ResourceBudget{}) {
 			preflightBudget = manifest.Limits
 		}
+		selectedTargetID := request.Job.TargetID
+		if request.Job.BuildID != "" {
+			selectedBuild, buildErr := s.research.store.GetBuild(r.Context(), request.Job.BuildID)
+			if buildErr != nil {
+				s.writeResearchError(w, buildErr)
+				return
+			}
+			if selectedBuild.CampaignID != campaign.ID || selectedTargetID != "" && selectedTargetID != selectedBuild.TargetID {
+				writeError(w, http.StatusBadRequest, "invalid_target", "build and requested target do not match this campaign")
+				return
+			}
+			selectedTargetID = selectedBuild.TargetID
+		}
+		if selectedTargetID == "" {
+			selectedTargetID = campaign.TargetID
+		}
+		var selectedTarget domain.TargetRevision
+		if selectedTargetID != "" {
+			selectedTarget, err = s.research.store.GetTarget(r.Context(), selectedTargetID)
+			if err != nil {
+				s.writeResearchError(w, err)
+				return
+			}
+			if selectedTarget.CampaignID != campaign.ID || request.Job.Revision != selectedTarget.Commit {
+				writeError(w, http.StatusBadRequest, "invalid_target", "job revision does not match its campaign-owned captured target")
+				return
+			}
+		}
 		if err := s.research.service.PreauthorizeEnqueue(r.Context(), principal, campaignID, request.Job.Operation, request.Job.Revision, preflightBudget, request.ApprovalID, request.Job.CorrelationID); err != nil {
 			s.writeResearchError(w, err)
 			return
 		}
 		request.Job.CampaignID = campaign.ID
 		request.Job.ScopeID = campaign.ScopeID
+		request.Job.TargetID = selectedTargetID
 		request.Job.SourceDir = ""
-		if campaign.TargetID != "" {
-			target, targetErr := s.research.store.GetTarget(r.Context(), campaign.TargetID)
-			if targetErr != nil {
-				s.writeResearchError(w, targetErr)
-				return
-			}
+		if selectedTarget.ID != "" {
 			request.Job.SourceDir, err = acquisition.VerifiedCapture(
-				pipeline.WorkRoot(s.research.store.Root()), campaign.ID, target.ID, target.SourceSHA256,
+				pipeline.WorkRoot(s.research.store.Root()), campaign.ID, selectedTarget.ID, selectedTarget.SourceSHA256,
 				acquisition.Limits{MaxBytes: campaign.Budget.MaxDiskBytes},
 			)
 			if err != nil {
@@ -313,7 +359,7 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 			}
 		}
 		request.Job.CorpusDir = ""
-		if researchOperationNeedsCorpus(request.Job.Operation) {
+		if researchJobNeedsCorpus(request.Job) {
 			request.Job.CorpusDir, err = pipeline.PrepareCorpus(s.research.store.Root(), campaign.ID, request.Job.Harness)
 			if err != nil {
 				s.writeResearchError(w, err)
@@ -323,6 +369,14 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 		request.Job.EvidenceDir = ""
 		if request.Job.InputArtifactID != "" {
 			request.Job.EvidenceDir, err = pipeline.PrepareEvidence(r.Context(), s.research.store, campaign.ID, request.Job.InputArtifactID, request.Job.Operation)
+			if err != nil {
+				s.writeResearchError(w, err)
+				return
+			}
+		}
+		request.Job.PatchDir = ""
+		if request.Job.PatchArtifactID != "" {
+			request.Job.PatchDir, err = pipeline.PrepareEvidence(r.Context(), s.research.store, campaign.ID, request.Job.PatchArtifactID, domain.OperationBuild)
 			if err != nil {
 				s.writeResearchError(w, err)
 				return
@@ -341,6 +395,30 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusAccepted, run)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "campaign subresource not found")
+	}
+}
+
+func (s *Server) handleResearchTargets(w http.ResponseWriter, r *http.Request, principal domain.Principal, campaignID string) {
+	switch r.Method {
+	case http.MethodGet:
+		values, err := s.research.store.ListTargets(r.Context(), campaignID, queryLimit(r, 1000))
+		s.writeResearchList(w, values, err)
+	case http.MethodPost:
+		var request struct {
+			service.TargetRequest
+			FindingID string `json:"finding_id"`
+		}
+		if !decodeJSONRequest(w, r, &request, maxResearchBodyBytes) {
+			return
+		}
+		target, err := s.research.service.AcquireComparisonTarget(r.Context(), principal, campaignID, request.FindingID, request.TargetRequest)
+		if err != nil {
+			s.writeResearchError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, target)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET or POST required")
 	}
 }
 
@@ -512,6 +590,10 @@ func (s *Server) handleResearchArtifact(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusForbidden, "forbidden", "principal is not a campaign member")
 		return
 	}
+	if artifact.Sensitivity == "private_disclosure" && !principalHasAnyRole(principal, domain.RoleOperator, domain.RoleReviewer) {
+		writeError(w, http.StatusForbidden, "forbidden", "private disclosure artifact requires operator, reviewer, or admin role")
+		return
+	}
 	if r.URL.Query().Get("download") != "1" {
 		artifact.StoragePath = ""
 		writeJSON(w, http.StatusOK, artifact)
@@ -572,7 +654,36 @@ func (s *Server) handleResearchEvents(w http.ResponseWriter, r *http.Request, pr
 	w.Header().Set("Cache-Control", "no-cache")
 	for _, event := range filtered {
 		data, _ := json.Marshal(event)
-		fmt.Fprintf(w, "id: %d\nevent: audit\ndata: %s\n\n", event.Sequence, data)
+		fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, researchEventType(event.Action), data)
+	}
+}
+
+func researchEventType(action string) string {
+	switch {
+	case action == "campaign.transition":
+		return "campaign_state"
+	case strings.HasPrefix(action, "run.") || action == "job.enqueue":
+		return "run_updated"
+	case action == "build.ingest":
+		return "build_updated"
+	case action == "observation.ingest":
+		return "crash_observed"
+	case strings.HasPrefix(action, "approval."):
+		return "approval_updated"
+	case strings.HasPrefix(action, "finding.") || action == "branch.complete" || action == "novelty.complete":
+		return "finding_updated"
+	case strings.HasPrefix(action, "revision."):
+		return "revision_checked"
+	case strings.HasPrefix(action, "source.") || action == "novelty.lookup":
+		return "novelty_evidence"
+	case strings.HasPrefix(action, "remediation."):
+		return "remediation_validated"
+	case strings.HasPrefix(action, "report."):
+		return "report_ready"
+	case strings.HasPrefix(action, "disclosure."):
+		return "disclosure_recorded"
+	default:
+		return "audit"
 	}
 }
 
@@ -632,8 +743,11 @@ func containsID(values []string, wanted string) bool {
 	return false
 }
 
-func researchOperationNeedsCorpus(operation domain.Operation) bool {
-	switch operation {
+func researchJobNeedsCorpus(job apparatus.JobRequest) bool {
+	if job.Operation == domain.OperationRegressionTest {
+		return job.Arguments["validation-kind"] == "regression"
+	}
+	switch job.Operation {
 	case domain.OperationSeed, domain.OperationFuzz, domain.OperationMergeCorpus, domain.OperationCoverage, domain.OperationRegressionTest:
 		return true
 	default:

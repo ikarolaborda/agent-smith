@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 	"github.com/ikarolaborda/agent-smith/internal/config"
 	"github.com/ikarolaborda/agent-smith/internal/llm"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
+	"github.com/ikarolaborda/agent-smith/internal/research/novelty"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
 	"github.com/ikarolaborda/agent-smith/internal/server"
 )
@@ -106,6 +110,12 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 				Principal: domain.Principal{ID: f.researchActor, Name: f.researchActor, Roles: []domain.Role{domain.RoleAdmin}},
 			}},
 		}
+		if strings.TrimSpace(f.researchNoveltySources) != "" {
+			researchMode.NoveltySources, err = loadNoveltySources(f.researchNoveltySources)
+			if err != nil {
+				return err
+			}
+		}
 		if f.allowExec {
 			researchMode.RunnerBackend = runner.NewDockerBackend(runner.DockerOptions{Runtime: f.researchRuntime, RequireRootless: true})
 		}
@@ -135,6 +145,36 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 	}
 	defer srv.Close()
 	return srv.ListenAndServe(ctx)
+}
+
+func loadNoveltySources(path string) ([]novelty.Source, error) {
+	file, err := os.Open(strings.TrimSpace(path))
+	if err != nil {
+		return nil, fmt.Errorf("serve: open research novelty sources: %w", err)
+	}
+	defer file.Close()
+	const maxSourceConfigBytes = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(file, maxSourceConfigBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("serve: read research novelty sources: %w", err)
+	}
+	if len(body) > maxSourceConfigBytes {
+		return nil, errors.New("serve: research novelty source data exceeds 1 MiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var sources []novelty.Source
+	if err := decoder.Decode(&sources); err != nil {
+		return nil, fmt.Errorf("serve: decode research novelty sources: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("serve: trailing research novelty source data")
+	}
+	if len(sources) == 0 || len(sources) > 64 {
+		return nil, errors.New("serve: research novelty sources must contain 1..64 entries")
+	}
+	return sources, nil
 }
 
 func splitNonEmpty(value string) []string {
