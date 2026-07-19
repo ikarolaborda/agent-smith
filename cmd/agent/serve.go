@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,9 +106,17 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 		if len(roots) == 0 {
 			return errors.New("serve: --research-mode requires --research-workspace-roots or --workspace")
 		}
+		if strings.TrimSpace(f.researchArtifactKeys) == "" {
+			return errors.New("serve: --research-mode requires --research-artifact-keys for encrypted evidence custody")
+		}
+		artifactKeys, keyErr := loadArtifactEncryptionKeys(f.researchArtifactKeys)
+		if keyErr != nil {
+			return keyErr
+		}
 		researchMode = &server.ResearchModeOptions{
 			Enabled: true, DataDir: f.researchDir, WorkspaceRoots: roots,
 			GlobalConcurrency: f.researchWorkers, CampaignConcurrency: 1,
+			ArtifactEncryptionKeys: artifactKeys,
 			Credentials: []server.ResearchCredential{{
 				Token:     token,
 				Principal: domain.Principal{ID: f.researchActor, Name: f.researchActor, Roles: []domain.Role{domain.RoleAdmin}},
@@ -302,6 +311,37 @@ func readBoundedSourceFile(path string, maximum int64, label string) ([]byte, er
 		return nil, fmt.Errorf("serve: %s data exceeds limit", label)
 	}
 	return body, nil
+}
+
+func loadArtifactEncryptionKeys(value string) ([][]byte, error) {
+	paths := splitNonEmpty(value)
+	if len(paths) == 0 || len(paths) > 16 {
+		return nil, errors.New("serve: research artifact keyring requires 1..16 key files")
+	}
+	keys := make([][]byte, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("serve: inspect research artifact key %s: %w", path, err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("serve: research artifact key %s must not be accessible by group or others", path)
+		}
+		body, err := readBoundedSourceFile(path, 1024, "research artifact key")
+		if err != nil {
+			return nil, err
+		}
+		encoded := strings.TrimSpace(string(body))
+		if len(encoded) != 64 {
+			return nil, fmt.Errorf("serve: research artifact key %s must be exactly 32 hex-encoded bytes", path)
+		}
+		key, err := hex.DecodeString(encoded)
+		if err != nil || len(key) != 32 {
+			return nil, fmt.Errorf("serve: research artifact key %s is not valid hexadecimal", path)
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
 }
 
 func splitNonEmpty(value string) []string {

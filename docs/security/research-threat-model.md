@@ -123,12 +123,18 @@ Deployments that cannot enforce them must not claim hostile-target isolation.
 ### Persistence and artifacts
 
 Threats include database rollback/tampering, CAS replacement, malicious media
-types, decompression bombs, symlink races, retention mistakes, and unencrypted
-embargoed data. Directories use `0700`, files use `0600`, artifact size is capped,
-content is rehashed, and storage paths are not exposed by the API. Hash chaining
-detects alteration but does not prevent deletion/rollback by a host administrator.
-Use an encrypted volume, protected backups, external audit anchors, retention
-policy, and OS-level access controls for sensitive campaigns.
+types, decompression bombs, symlink races, retention mistakes, key loss, and
+embargoed-data disclosure. Directories use `0700`, files use `0600`, artifact
+size is capped, and storage paths are not exposed by the API. Artifact bytes use
+chunked AES-256-GCM with a random per-object nonce and authenticated record
+ordering. Plaintext content identity and size are verified before reads are
+released; startup migrates plaintext blobs and rotates old-key ciphertext
+without a plaintext temporary file. The SQLite database still contains
+sensitive metadata, and ciphertext size, access timing, deletion, and rollback
+remain visible to a host administrator. Hash chaining detects alteration but
+does not prevent rollback. Protect the ordered keyring separately from the
+ciphertext, test restore and rotation procedures, encrypt database volumes and
+backups, use external audit anchors, and enforce an approved retention policy.
 
 ### Egress and novelty research
 
@@ -161,10 +167,10 @@ privilege change, or cross-boundary impact.
 
 Before a beta claim, run live isolation tests on every supported backend;
 enforce kernel/filesystem disk and inode quotas; operationally govern and rotate
-source-bundle/egress signing keys; complete repeated clean-corpus discovery and
-minimization on the real known-bug benchmark (the libpng replay calibration
-alone is not discovery); validate fix and branch workflows end to end; add
-encrypted
-retention/backup guidance; commission an independent review of authentication,
-container escape surface, artifact ingestion, supply chain, prompt injection,
-and multi-campaign isolation.
+artifact-custody and source-bundle/egress signing keys; complete repeated
+clean-corpus discovery and minimization on the real known-bug benchmark (the
+libpng replay calibration alone is not discovery); validate fix and branch
+workflows end to end; add approved retention and purge operations plus backup
+restore tests; commission an independent review of authentication, container
+escape surface, artifact ingestion, supply chain, prompt injection, and
+multi-campaign isolation.

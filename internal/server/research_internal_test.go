@@ -98,6 +98,7 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 		Providers: map[string]llm.Provider{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ResearchMode: &ResearchModeOptions{
 			Enabled: true, DataDir: filepath.Join(root, "state"), WorkspaceRoots: []string{workspace},
+			ArtifactEncryptionKeys: [][]byte{bytes.Repeat([]byte{0x5a}, 32)},
 			Credentials: []ResearchCredential{
 				{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleAdmin}}},
 				{Token: reviewerToken, Principal: domain.Principal{ID: "reviewer", Roles: []domain.Role{domain.RoleReviewer}}},
@@ -161,6 +162,10 @@ func TestResearchCampaignAPIAndResumableEvents(t *testing.T) {
 	artifact, err := srv.research.store.PutArtifact(t.Context(), domain.Artifact{CampaignID: campaign.ID, Role: "crashing_input", MediaType: "application/octet-stream", Sensitivity: "embargoed"}, strings.NewReader("boom"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	rawArtifact, err := os.ReadFile(filepath.Join(srv.research.store.Root(), "artifacts", filepath.FromSlash(artifact.StoragePath)))
+	if err != nil || bytes.Contains(rawArtifact, []byte("boom")) || artifact.Encryption == "" || artifact.EncryptionKeyID == "" {
+		t.Fatalf("artifact was not encrypted at rest: metadata=%#v raw=%q err=%v", artifact, rawArtifact, err)
 	}
 	response = researchJSONRequest(srv, http.MethodGet, "/v1/research/artifacts/"+artifact.ID, reviewerToken, nil)
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"storage_path":"blobs`) {

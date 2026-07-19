@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -250,5 +251,38 @@ func TestSignAndLoadVerifiedSourceManifest(t *testing.T) {
 	}
 	if _, err := loadVerifiedSourceManifest(signedPath, publicPath, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "signature mismatch") {
 		t.Fatalf("tampered manifest accepted: %v", err)
+	}
+}
+
+func TestLoadArtifactEncryptionKeysIsOrderedStrictAndPrivate(t *testing.T) {
+	directory := t.TempDir()
+	activePath := filepath.Join(directory, "active.key")
+	previousPath := filepath.Join(directory, "previous.key")
+	if err := os.WriteFile(activePath, []byte(strings.Repeat("11", 32)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previousPath, []byte(strings.Repeat("22", 32)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := loadArtifactEncryptionKeys(activePath + "," + previousPath)
+	if err != nil || len(keys) != 2 || !bytes.Equal(keys[0], bytes.Repeat([]byte{0x11}, 32)) || !bytes.Equal(keys[1], bytes.Repeat([]byte{0x22}, 32)) {
+		t.Fatalf("keys=%x err=%v", keys, err)
+	}
+	if err := os.WriteFile(activePath, []byte("not-a-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadArtifactEncryptionKeys(activePath); err == nil || !strings.Contains(err.Error(), "exactly 32") {
+		t.Fatalf("invalid key accepted: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.WriteFile(activePath, []byte(strings.Repeat("33", 32)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(activePath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadArtifactEncryptionKeys(activePath); err == nil || !strings.Contains(err.Error(), "group or others") {
+			t.Fatalf("broad key permissions accepted: %v", err)
+		}
 	}
 }

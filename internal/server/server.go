@@ -144,19 +144,20 @@ type ResearchCredential struct {
 
 // ResearchModeOptions are fail-closed controls for the research control plane.
 type ResearchModeOptions struct {
-	Enabled              bool
-	DataDir              string
-	WorkspaceRoots       []string
-	Credentials          []ResearchCredential
-	MinimumReproductions int
-	MaxArtifactBytes     int64
-	RunnerBackend        runner.Backend
-	GlobalConcurrency    int
-	CampaignConcurrency  int
-	NoveltySources       []novelty.Source
-	NoveltyHTTPClient    novelty.HTTPDoer
-	SourceManifest       *sourcefetch.VerifiedManifest
-	SourceHTTPClient     sourcefetch.HTTPDoer
+	Enabled                bool
+	DataDir                string
+	WorkspaceRoots         []string
+	Credentials            []ResearchCredential
+	MinimumReproductions   int
+	MaxArtifactBytes       int64
+	ArtifactEncryptionKeys [][]byte
+	RunnerBackend          runner.Backend
+	GlobalConcurrency      int
+	CampaignConcurrency    int
+	NoveltySources         []novelty.Source
+	NoveltyHTTPClient      novelty.HTTPDoer
+	SourceManifest         *sourcefetch.VerifiedManifest
+	SourceHTTPClient       sourcefetch.HTTPDoer
 }
 
 /*

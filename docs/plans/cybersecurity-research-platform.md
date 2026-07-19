@@ -62,9 +62,9 @@ disclosure records. No-match novelty results remain `novelty_unverified`.
 The implementation is not beta-ready. A clean stochastic real-program
 discovery/minimization campaign, end-to-end real-program branch/novelty/fix
 validation, dependency/SBOM admission, kernel/filesystem disk and inode
-enforcement, encrypted retention operations, and an independent security review
-remain release blockers. The current host reports neither rootless Docker nor
-gVisor, so the production CLI correctly refuses to start its research runner
+enforcement, approved retention/purge operations, and an independent security
+review remain release blockers. The current host reports neither rootless Docker
+nor gVisor, so the production CLI correctly refuses to start its research runner
 here; rootful Docker results are functional lab evidence only.
 
 The runner now treats CPU seconds and inode count as required finite scope,
@@ -74,6 +74,15 @@ output and corpus trees, records peak byte/inode growth, rejects hostile entry
 types, and cancels overruns. This does not replace the kernel/filesystem quota
 release gate, and capability reporting keeps kernel storage quotas and complete
 CPU/RSS accounting false.
+
+Artifact custody now uses chunked AES-256-GCM authenticated encryption. The
+plaintext SHA-256 identity and size remain stable metadata, while ciphertext is
+stored under the content-addressed path. Startup verifies every existing blob,
+encrypts legacy plaintext, and rotates blobs to the first configured key without
+writing a plaintext temporary file. Downloads are preverified before a decrypted
+stream is returned. The key identifier is a SHA-256 fingerprint, not key
+material; SQLite metadata, access-pattern leakage, encrypted backups, and key
+escrow remain deployment responsibilities.
 
 An opt-in hostile containment apparatus now exercises network denial, read-only
 mounts, control-plane secret isolation, cross-campaign visibility, device

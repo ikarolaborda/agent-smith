@@ -89,6 +89,7 @@ func (s *Server) capabilityStatus() map[string]any {
 		"apparatus":                       apparatus,
 		"coverage_guided_fuzzing":         coverageGuided,
 		"artifact_persistence":            researchEnabled,
+		"research_artifact_encryption":    researchEnabled && s.research.store.ArtifactEncryptionEnabled(),
 		"research_persistence":            researchEnabled,
 		"authentication":                  researchEnabled,
 		"research_mode":                   researchEnabled,

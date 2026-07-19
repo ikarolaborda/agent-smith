@@ -51,6 +51,7 @@ type flags struct {
 	researchSourcePrivateKey       string
 	signResearchSourceBundles      string
 	researchSourceManifestLifetime time.Duration
+	researchArtifactKeys           string
 	refineLoop                     bool
 	refineIters                    int
 	refineTO                       time.Duration
@@ -104,6 +105,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.researchSourcePrivateKey, "research-source-bundle-private-key", "", "PEM Ed25519 private key used only with --sign-research-source-bundles")
 	flag.StringVar(&f.signResearchSourceBundles, "sign-research-source-bundles", "", "sign an unsigned source array and write a canonical manifest envelope to stdout")
 	flag.DurationVar(&f.researchSourceManifestLifetime, "research-source-manifest-lifetime", 30*24*time.Hour, "validity of a newly signed source-bundle manifest (maximum 90 days)")
+	flag.StringVar(&f.researchArtifactKeys, "research-artifact-keys", "", "comma-separated 0600 files containing hex AES-256 artifact keys; first key is active and remaining keys enable rotation")
 	flag.BoolVar(&f.refineLoop, "refine-loop", false, "OPT-IN single-shot refinement loop (requires --prompt + OpenAI judge): regenerate the answer with the gpt-5.x judge's critique until it is judged USABLE (grounded, feasible, honestly scoped) or the iteration budget is exhausted. Anti-fabrication: an honest negative passes; the loop never fakes a pass. CLI-only.")
 	flag.IntVar(&f.refineIters, "refine-max-iters", refine.DefaultMaxIters, "maximum refinement iterations when --refine-loop is set")
 	flag.DurationVar(&f.refineTO, "refine-timeout", refine.DefaultRoundTimeout, "per-round timeout (generate+judge) when --refine-loop is set")

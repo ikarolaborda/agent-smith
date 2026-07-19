@@ -37,6 +37,7 @@ func TestResearchModeAuthenticationAndFixedWorkspaceRoots(t *testing.T) {
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ResearchMode: &ResearchModeOptions{
 			Enabled: true, DataDir: filepath.Join(root, "state"), WorkspaceRoots: []string{allowed},
+			ArtifactEncryptionKeys: [][]byte{bytes.Repeat([]byte{0x41}, 32)},
 			Credentials: []ResearchCredential{
 				{Token: operatorToken, Principal: domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleOperator}}},
 				{Token: viewerToken, Principal: domain.Principal{ID: "viewer", Roles: []domain.Role{domain.RoleViewer}}},
@@ -73,7 +74,7 @@ func TestResearchModeAuthenticationAndFixedWorkspaceRoots(t *testing.T) {
 		t.Fatalf("workspace=%q want %q", got, child)
 	}
 	capabilities := srv.capabilityStatus()
-	for _, key := range []string{"authentication", "research_mode", "artifact_persistence", "research_persistence"} {
+	for _, key := range []string{"authentication", "research_mode", "artifact_persistence", "research_persistence", "research_artifact_encryption"} {
 		if capabilities[key] != true {
 			t.Fatalf("capability %s=%v", key, capabilities[key])
 		}

@@ -34,16 +34,19 @@ var (
 
 // Config controls the private on-disk research store.
 type Config struct {
-	Root             string
-	MaxArtifactBytes int64
+	Root                   string
+	MaxArtifactBytes       int64
+	ArtifactEncryptionKeys [][]byte
 }
 
 // Store owns the metadata database and artifact directory.
 type Store struct {
-	db               *sql.DB
-	root             string
-	artifactRoot     string
-	maxArtifactBytes int64
+	db                  *sql.DB
+	root                string
+	artifactRoot        string
+	maxArtifactBytes    int64
+	artifactKeys        map[string][]byte
+	activeArtifactKeyID string
 }
 
 // Open initializes or migrates a private research store.
@@ -87,11 +90,20 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("research store: protect database: %w", err)
 	}
 
-	s := &Store{db: db, root: root, artifactRoot: artifactRoot, maxArtifactBytes: cfg.MaxArtifactBytes}
+	artifactKeys, activeKeyID, err := prepareArtifactKeys(cfg.ArtifactEncryptionKeys)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	s := &Store{db: db, root: root, artifactRoot: artifactRoot, maxArtifactBytes: cfg.MaxArtifactBytes, artifactKeys: artifactKeys, activeArtifactKeyID: activeKeyID}
 	if s.maxArtifactBytes <= 0 {
 		s.maxArtifactBytes = defaultArtifactLimit
 	}
 	if err := s.migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.migrateArtifactEncryption(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -113,6 +125,10 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Root returns the absolute private store root.
 func (s *Store) Root() string { return s.root }
+
+// ArtifactEncryptionEnabled reports whether new and migrated blobs use the
+// configured authenticated-encryption keyring.
+func (s *Store) ArtifactEncryptionEnabled() bool { return s.activeArtifactKeyID != "" }
 
 // Database exposes the handle for health checks and administrative verification.
 func (s *Store) Database() *sql.DB { return s.db }
@@ -1059,8 +1075,18 @@ func (s *Store) PutArtifact(ctx context.Context, metadata domain.Artifact, sourc
 		tmp.Close()
 		return metadata, err
 	}
-	h := sha256.New()
-	written, copyErr := copyBounded(tmp, h, source, s.maxArtifactBytes)
+	var written int64
+	var contentID string
+	var copyErr error
+	if s.activeArtifactKeyID != "" {
+		written, contentID, copyErr = encryptArtifact(tmp, source, s.maxArtifactBytes, s.artifactKeys[s.activeArtifactKeyID], s.activeArtifactKeyID)
+		metadata.Encryption = artifactEncryptionScheme
+		metadata.EncryptionKeyID = s.activeArtifactKeyID
+	} else {
+		h := sha256.New()
+		written, copyErr = copyBounded(tmp, h, source, s.maxArtifactBytes)
+		contentID = "sha256:" + hex.EncodeToString(h.Sum(nil))
+	}
 	if copyErr != nil {
 		tmp.Close()
 		return metadata, copyErr
@@ -1072,16 +1098,16 @@ func (s *Store) PutArtifact(ctx context.Context, metadata domain.Artifact, sourc
 	if err := tmp.Close(); err != nil {
 		return metadata, err
 	}
-	hexDigest := hex.EncodeToString(h.Sum(nil))
-	metadata.ContentID = "sha256:" + hexDigest
+	metadata.ContentID = contentID
 	metadata.Size = written
+	hexDigest := strings.TrimPrefix(contentID, "sha256:")
 	relative := filepath.Join("blobs", hexDigest[:2], hexDigest)
 	destinationDir := filepath.Join(s.artifactRoot, "blobs", hexDigest[:2])
 	if err := privateDir(destinationDir); err != nil {
 		return metadata, err
 	}
 	destination := filepath.Join(s.artifactRoot, relative)
-	if _, err := os.Stat(destination); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(destination); errors.Is(err, os.ErrNotExist) {
 		if err := os.Rename(tmpName, destination); err != nil {
 			return metadata, fmt.Errorf("research store: commit artifact: %w", err)
 		}
@@ -1090,6 +1116,16 @@ func (s *Store) PutArtifact(ctx context.Context, metadata domain.Artifact, sourc
 		}
 	} else if err != nil {
 		return metadata, err
+	} else {
+		scheme, keyID, verifyErr := s.verifyArtifactPath(destination, metadata.Size, metadata.ContentID)
+		if verifyErr != nil {
+			return metadata, verifyErr
+		}
+		if s.activeArtifactKeyID != "" && scheme == "" {
+			return metadata, errors.New("research store: existing artifact is not encrypted")
+		}
+		metadata.Encryption = scheme
+		metadata.EncryptionKeyID = keyID
 	}
 	metadata.StoragePath = filepath.ToSlash(relative)
 	data, err := json.Marshal(metadata)
@@ -1127,8 +1163,10 @@ func (s *Store) GetArtifact(ctx context.Context, id string) (domain.Artifact, er
 	return artifact, nil
 }
 
-// OpenArtifact returns a verified regular evidence object. The caller closes it.
-func (s *Store) OpenArtifact(ctx context.Context, id string) (domain.Artifact, *os.File, error) {
+// OpenArtifact returns a fully preverified evidence stream. Encrypted blobs are
+// authenticated once before return and decrypted again as the caller reads;
+// plaintext is never written to a temporary file.
+func (s *Store) OpenArtifact(ctx context.Context, id string) (domain.Artifact, io.ReadCloser, error) {
 	metadata, err := s.GetArtifact(ctx, id)
 	if err != nil {
 		return metadata, nil, err
@@ -1151,30 +1189,30 @@ func (s *Store) OpenArtifact(ctx context.Context, id string) (domain.Artifact, *
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return metadata, nil, errors.New("research store: artifact escaped storage root")
 	}
-	file, err := os.Open(real)
+	file, err := openArtifactFile(real)
 	if err != nil {
 		return metadata, nil, err
 	}
-	stat, err := file.Stat()
-	if err != nil || !stat.Mode().IsRegular() || stat.Size() != metadata.Size {
+	scheme, keyID, err := s.verifyArtifactFile(file, metadata.Size, metadata.ContentID)
+	if err != nil {
 		file.Close()
-		return metadata, nil, errors.New("research store: artifact metadata mismatch")
+		return metadata, nil, err
 	}
-	digest := sha256.New()
-	if _, err := io.Copy(digest, file); err != nil {
-		file.Close()
-		return metadata, nil, fmt.Errorf("research store: verify artifact: %w", err)
-	}
-	actual := "sha256:" + hex.EncodeToString(digest.Sum(nil))
-	if actual != metadata.ContentID {
-		file.Close()
-		return metadata, nil, errors.New("research store: artifact content hash mismatch")
-	}
+	metadata.Encryption = scheme
+	metadata.EncryptionKeyID = keyID
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		file.Close()
 		return metadata, nil, err
 	}
-	return metadata, file, nil
+	if scheme == "" {
+		return metadata, file, nil
+	}
+	reader, _, err := newEncryptedArtifactReader(file, metadata.Size, metadata.ContentID, s.artifactKeys)
+	if err != nil {
+		file.Close()
+		return metadata, nil, err
+	}
+	return metadata, reader, nil
 }
 
 // AppendAudit adds one tamper-evident event to the global event chain.

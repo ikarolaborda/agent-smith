@@ -80,12 +80,27 @@ private key outside the application host used for research.
 
 ```sh
 export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"
+openssl rand -hex 32 > .agent-smith-artifact.key
+chmod 600 .agent-smith-artifact.key
 ./bin/agent --serve --research-mode \
   --workspace /absolute/path/to/authorized/project \
-  --research-workspace-roots /absolute/path/to/authorized/project
+  --research-workspace-roots /absolute/path/to/authorized/project \
+  --research-artifact-keys .agent-smith-artifact.key
 ```
 
-The browser asks for the token and keeps it in tab-scoped `sessionStorage`. Add `--allow-exec` to enable runner v2 only when the local Docker daemon reports rootless mode; add `--research-container-runtime runsc` to require gVisor. Apparatus images and base images must be exact SHA-256 identities. Build the first libFuzzer apparatus with `BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 apparatus/native-clang/build-image.sh`, register the generated manifest through `POST /v1/research/apparatuses`, then include its ID in an `AuthorizationScope`.
+The first file in `--research-artifact-keys` is the active AES-256 key; later
+comma-separated files are prior keys accepted during an automatic startup
+rotation. Keep key files outside the repository, restrict them to `0600`, back
+them up separately from ciphertext, and remove an old key only after a
+successful restart has migrated and verified the complete store. Key loss makes
+encrypted evidence unrecoverable. The browser asks for the token and keeps it
+in tab-scoped `sessionStorage`. Add `--allow-exec` to enable runner v2 only when
+the local Docker daemon reports rootless mode; add
+`--research-container-runtime runsc` to require gVisor. Apparatus images and
+base images must be exact SHA-256 identities. Build the first libFuzzer
+apparatus with `BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 apparatus/native-clang/build-image.sh`,
+register the generated manifest through `POST /v1/research/apparatuses`, then
+include its ID in an `AuthorizationScope`.
 
 The opt-in real-program calibration adapter is under `apparatus/libpng-known-bug`.
 After capturing clean source trees at the exact revisions documented there,
@@ -225,6 +240,7 @@ export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmen
 | `--research-dir`     | Private SQLite/artifact root (default `.agent-smith/research`). |
 | `--research-workspace-roots` | Comma-separated fixed roots; runtime workspace choices cannot escape them. |
 | `--research-token`   | Bootstrap bearer token (prefer `AGENT_SMITH_RESEARCH_TOKEN`; minimum 32 characters). |
+| `--research-artifact-keys` | Ordered comma-separated `0600` files containing hex AES-256 custody keys; the first key is active. |
 | `--research-container-runtime` | Optional required Docker runtime such as `runsc`; rootless Docker is mandatory for runner v2. |
 | `--research-novelty-sources` | Bounded JSON file of operator-fixed HTTPS novelty sources; empty disables lookup egress. |
 | `--ingest`           | Ingest markdown into a RAG collection and exit (with `--collection` + `--source`). |

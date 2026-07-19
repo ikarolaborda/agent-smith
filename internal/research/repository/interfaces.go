@@ -5,7 +5,6 @@ package repository
 import (
 	"context"
 	"io"
-	"os"
 	"time"
 
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
@@ -45,7 +44,7 @@ type Audit interface {
 type Artifacts interface {
 	PutArtifact(context.Context, domain.Artifact, io.Reader) (domain.Artifact, error)
 	GetArtifact(context.Context, string) (domain.Artifact, error)
-	OpenArtifact(context.Context, string) (domain.Artifact, *os.File, error)
+	OpenArtifact(context.Context, string) (domain.Artifact, io.ReadCloser, error)
 }
 
 type Jobs interface {
