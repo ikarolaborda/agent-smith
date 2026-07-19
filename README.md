@@ -76,7 +76,10 @@ Pass the signed envelope with `--research-source-bundles` and the separately
 trusted public key with `--research-source-bundle-public-key`. Campaign scopes
 must also allow the repository, commit, `acquire` operation, and bundle
 hostname. Manifests expire after at most 90 days; rotate them and protect the
-private key outside the application host used for research.
+private key outside the application host used for research. The public-key flag
+accepts at most 16 comma-separated files for a staged rotation: add the new
+public key, sign the next envelope with its offline private key, restart and
+verify the reported key ID, then remove the old public key to revoke it.
 
 Apparatus registration also requires a separately signed supply-chain catalog.
 Start with `configs/research-apparatus-admission.example.json`, replace every
@@ -98,7 +101,9 @@ openssl pkey -in apparatus-admission-private.pem -pubout -out apparatus-admissio
 The catalog is valid for 30 days by default and at most 90 days. Registration
 and every job launch recheck the exact manifest and catalog expiry. Protect and
 rotate this signing key through the same offline review process as the source
-manifest key.
+manifest key. `--research-apparatus-public-key` uses the same bounded
+comma-separated trust set, so overlap and removal provide staged rotation and
+revocation without accepting an untrusted signer.
 
 ```sh
 export AGENT_SMITH_RESEARCH_TOKEN="$(openssl rand -hex 32)"
@@ -181,7 +186,13 @@ eligible for a discovery or novelty claim.
 
 External novelty lookups are disabled unless the operator supplies `--research-novelty-sources configs/research-novelty-sources.example.json` (or a private equivalent). The file is a bounded array of fixed HTTPS endpoints and required evidence kinds; campaign scopes must separately allow `novelty_lookup` and each destination domain. Redirects and arbitrary client URLs are refused. A complete novelty review still requires all seven evidence kinds and never promotes no-match results to “novel.”
 
-See the [research architecture plan](docs/plans/cybersecurity-research-platform.md) and [threat model](docs/security/research-threat-model.md). The deliberately vulnerable micro-fixture is evaluation-only and must never be reported as novel.
+See the [research architecture plan](docs/plans/cybersecurity-research-platform.md),
+[threat model](docs/security/research-threat-model.md), and
+[release-evidence gates](docs/security/research-release-gates.md). The
+capability API deliberately reports `research_beta_ready: false` plus the open
+blocker IDs until those deployment and independent-review gates are completed.
+The deliberately vulnerable micro-fixture is evaluation-only and must never be
+reported as novel.
 
 ## Clustered inference (70B-class on two Macs)
 
@@ -305,7 +316,7 @@ export CONTEXT7_API_KEY=ctx7-...     # optional; enables live library-doc augmen
 | `--research-artifact-retention` | Minimum evidence custody period before approved purge (default 90 days; range 24 hours–10 years). |
 | `--verify-research-store` | Verify an isolated current-schema restore and emit machine-readable integrity evidence; requires the complete custody keyring. |
 | `--research-apparatus-catalog` | Short-lived signed catalog of exact manifests, SPDX SBOMs, and SLSA provenance. |
-| `--research-apparatus-public-key` | Separately trusted Ed25519 public key for apparatus admission. |
+| `--research-apparatus-public-key` | Bounded comma-separated Ed25519 trust set for apparatus admission and staged key rotation. |
 | `--research-container-runtime` | Optional required Docker runtime such as `runsc`; rootless Docker is mandatory for runner v2. |
 | `--research-novelty-sources` | Bounded JSON file of operator-fixed HTTPS novelty sources; empty disables lookup egress. |
 | `--ingest`           | Ingest markdown into a RAG collection and exit (with `--collection` + `--source`). |

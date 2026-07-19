@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -242,7 +243,7 @@ func loadSourceBundleSources(path string) ([]sourcefetch.Source, error) {
 	return sources, nil
 }
 
-func loadVerifiedSourceManifest(manifestPath, publicKeyPath string, now time.Time) (*sourcefetch.VerifiedManifest, error) {
+func loadVerifiedSourceManifest(manifestPath, publicKeyPaths string, now time.Time) (*sourcefetch.VerifiedManifest, error) {
 	body, err := readBoundedSourceFile(manifestPath, 1<<20, "signed source manifest")
 	if err != nil {
 		return nil, err
@@ -257,13 +258,9 @@ func loadVerifiedSourceManifest(manifestPath, publicKeyPath string, now time.Tim
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, errors.New("serve: trailing signed source manifest data")
 	}
-	keyData, err := readBoundedSourceFile(publicKeyPath, 16<<10, "source manifest public key")
+	publicKey, err := loadTrustedPublicKey(publicKeyPaths, envelope.KeyID, "source manifest")
 	if err != nil {
 		return nil, err
-	}
-	publicKey, err := sourcefetch.ParsePublicKeyPEM(keyData)
-	if err != nil {
-		return nil, fmt.Errorf("serve: parse source manifest public key: %w", err)
 	}
 	verified, err := sourcefetch.VerifyManifest(envelope, publicKey, now)
 	if err != nil {
@@ -311,7 +308,7 @@ func runSignSourceBundles(f flags, output io.Writer) error {
 	return nil
 }
 
-func loadVerifiedApparatusCatalog(catalogPath, publicKeyPath string, now time.Time) (*apparatus.VerifiedAdmissionCatalog, error) {
+func loadVerifiedApparatusCatalog(catalogPath, publicKeyPaths string, now time.Time) (*apparatus.VerifiedAdmissionCatalog, error) {
 	body, err := readBoundedSourceFile(catalogPath, 8<<20, "signed apparatus admission catalog")
 	if err != nil {
 		return nil, err
@@ -326,19 +323,49 @@ func loadVerifiedApparatusCatalog(catalogPath, publicKeyPath string, now time.Ti
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, errors.New("serve: trailing signed apparatus catalog data")
 	}
-	keyData, err := readBoundedSourceFile(publicKeyPath, 16<<10, "apparatus admission public key")
+	publicKey, err := loadTrustedPublicKey(publicKeyPaths, envelope.KeyID, "apparatus admission")
 	if err != nil {
 		return nil, err
-	}
-	publicKey, err := sourcefetch.ParsePublicKeyPEM(keyData)
-	if err != nil {
-		return nil, fmt.Errorf("serve: parse apparatus admission public key: %w", err)
 	}
 	verified, err := apparatus.VerifyAdmissionCatalog(envelope, publicKey, now)
 	if err != nil {
 		return nil, fmt.Errorf("serve: verify apparatus admission catalog: %w", err)
 	}
 	return verified, nil
+}
+
+func loadTrustedPublicKey(paths, wantedKeyID, label string) (ed25519.PublicKey, error) {
+	values := splitNonEmpty(paths)
+	if len(values) == 0 || len(values) > 16 {
+		return nil, fmt.Errorf("serve: %s trust set requires 1..16 public-key files", label)
+	}
+	seen := make(map[string]bool, len(values))
+	var matching ed25519.PublicKey
+	for _, path := range values {
+		keyData, err := readBoundedSourceFile(path, 16<<10, label+" public key")
+		if err != nil {
+			return nil, err
+		}
+		publicKey, err := sourcefetch.ParsePublicKeyPEM(keyData)
+		if err != nil {
+			return nil, fmt.Errorf("serve: parse %s public key: %w", label, err)
+		}
+		keyID, err := sourcefetch.KeyID(publicKey)
+		if err != nil {
+			return nil, err
+		}
+		if seen[keyID] {
+			return nil, fmt.Errorf("serve: duplicate %s trusted key %s", label, keyID)
+		}
+		seen[keyID] = true
+		if keyID == wantedKeyID {
+			matching = publicKey
+		}
+	}
+	if matching != nil {
+		return matching, nil
+	}
+	return nil, fmt.Errorf("serve: no trusted %s key matches signed key id %s", label, wantedKeyID)
 }
 
 func runSignApparatusCatalog(f flags, output io.Writer) error {

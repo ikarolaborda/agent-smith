@@ -83,9 +83,11 @@ job launch require an exact manifest match in a short-lived Ed25519-signed
 catalog. Each entry embeds an SPDX 2.x JSON SBOM and SLSA provenance v1;
 packages require pinned versions and SHA-256 checksums, and provenance must bind
 the exact image plus resolved dependency URI/digests. Derived admission metadata
-is persisted and audited. A production deployment still needs trusted scanners
-and builders, a curated transparent registry, offline signing-key custody,
-revocation, and mirrored dependency availability.
+is persisted and audited. Bounded public-key trust sets permit staged signer
+overlap and revoke a signer when its key is removed. A production deployment
+still needs trusted scanners and builders, a curated transparent registry,
+offline signing-key custody and exercised rotation ceremonies, and mirrored
+dependency availability.
 
 Optional network acquisition does not run `git fetch`, credential helpers, or
 target-controlled checkout filters. An operator-owned manifest pre-resolves a

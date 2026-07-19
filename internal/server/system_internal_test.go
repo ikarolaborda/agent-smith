@@ -13,6 +13,13 @@ func TestCapabilityStatusIsTruthfulByDefault(t *testing.T) {
 	if got["file_read"] != true {
 		t.Fatalf("file_read must be reported: %#v", got)
 	}
+	if got["research_beta_ready"] != false {
+		t.Fatalf("research beta readiness must fail closed: %#v", got)
+	}
+	blockers, ok := got["research_release_blockers"].([]string)
+	if !ok || len(blockers) == 0 {
+		t.Fatalf("research release blockers must be machine-readable: %#v", got)
+	}
 }
 
 func TestCapabilityStatusReportsContainedCompatibilityRunner(t *testing.T) {

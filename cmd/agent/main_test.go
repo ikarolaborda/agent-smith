@@ -243,6 +243,21 @@ func TestSignAndLoadVerifiedSourceManifest(t *testing.T) {
 	if err != nil || verified.KeyID() == "" || len(verified.Sources()) != 1 {
 		t.Fatalf("verified=%#v err=%v", verified, err)
 	}
+	otherPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	otherDER, _ := x509.MarshalPKIXPublicKey(otherPublic)
+	otherPublicPath := filepath.Join(directory, "other-public.pem")
+	if err := os.WriteFile(otherPublicPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: otherDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadVerifiedSourceManifest(signedPath, otherPublicPath+","+publicPath, time.Now().UTC()); err != nil {
+		t.Fatalf("rotating source-manifest trust set rejected active key: %v", err)
+	}
+	if _, err := loadVerifiedSourceManifest(signedPath, publicPath+","+publicPath, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate source-manifest trust key accepted: %v", err)
+	}
+	if _, err := loadVerifiedSourceManifest(signedPath, otherPublicPath, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "no trusted") {
+		t.Fatalf("revoked source-manifest key remained trusted: %v", err)
+	}
 	var envelope map[string]any
 	if err := json.Unmarshal(output.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
@@ -330,6 +345,18 @@ func TestSignAndLoadVerifiedApparatusAdmissionCatalog(t *testing.T) {
 	verified, err := loadVerifiedApparatusCatalog(signedPath, publicPath, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
+	}
+	otherPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	otherDER, _ := x509.MarshalPKIXPublicKey(otherPublic)
+	otherPublicPath := filepath.Join(directory, "apparatus-other-public.pem")
+	if err := os.WriteFile(otherPublicPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: otherDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadVerifiedApparatusCatalog(signedPath, otherPublicPath+","+publicPath, time.Now().UTC()); err != nil {
+		t.Fatalf("rotating apparatus trust set rejected active key: %v", err)
+	}
+	if _, err := loadVerifiedApparatusCatalog(signedPath, otherPublicPath, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "no trusted") {
+		t.Fatalf("revoked apparatus key remained trusted: %v", err)
 	}
 	admitted, err := verified.Admit(manifest, time.Now().UTC())
 	if err != nil || admitted.SupplyChain == nil || admitted.SupplyChain.DependencyCount != 1 {

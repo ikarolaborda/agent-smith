@@ -453,8 +453,10 @@ the manifest, an SPDX 2.x JSON SBOM, and SLSA provenance v1. Admission requires
 a pinned version and SHA-256 for every SBOM package, exact image-subject
 binding, and URI/SHA-256 identities for all provenance dependencies; derived
 SBOM, provenance, key, builder, expiry, and dependency-count metadata are
-persisted and audited. Operational key rotation/revocation, scanner and builder
-trust, registry transparency, and pinned dependency mirrors remain beta
+persisted and audited. Both admission boundaries accept bounded public-key
+trust sets for staged overlap and revoke an old signer when its key is removed.
+Offline key custody and exercised rotation/revocation ceremonies, scanner and
+builder trust, registry transparency, and pinned dependency mirrors remain beta
 blockers.
 
 ## APIs and user experience

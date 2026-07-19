@@ -113,8 +113,20 @@ func (s *Server) capabilityStatus() map[string]any {
 		"research_private_reporting":      researchEnabled,
 		"research_remote_transport":       false,
 		"automatic_disclosure":            false,
-		"rag":                             s.rag != nil && !s.disableRAG,
-		"cve_verifier":                    s.answerVerifier != nil,
+		"research_beta_ready":             false,
+		"research_release_blockers": []string{
+			"production_backend_live_qualification",
+			"kernel_storage_quota",
+			"complete_cpu_rss_accounting",
+			"repeated_clean_corpus_real_program_discovery",
+			"real_program_branch_novelty_remediation_validation",
+			"deployment_backup_restore_and_destruction_exercise",
+			"signing_and_custody_key_governance_exercise",
+			"trusted_scanner_builder_registry_and_dependency_mirrors",
+			"independent_security_review",
+		},
+		"rag":          s.rag != nil && !s.disableRAG,
+		"cve_verifier": s.answerVerifier != nil,
 	}
 }
 
