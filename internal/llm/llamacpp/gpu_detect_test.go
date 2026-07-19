@@ -23,6 +23,14 @@ func fakeGPUTools(outputs map[string]string) gpuToolRunner {
 	}
 }
 
+/* noVRAMProbe simulates a host whose driver exposes no VRAM via sysfs. */
+func noVRAMProbe() (uint64, bool) { return 0, false }
+
+/* fixedVRAMProbe simulates the amdgpu sysfs node reporting a known VRAM size. */
+func fixedVRAMProbe(bytes uint64) vramProbe {
+	return func() (uint64, bool) { return bytes, true }
+}
+
 func TestDetectLinuxGPU_RX7800XT_viaRocmSmi(t *testing.T) {
 	run := fakeGPUTools(map[string]string{
 		"rocm-smi": "" + // both rocm-smi invocations hit this; product-name + vram both parse from a superset
@@ -30,7 +38,7 @@ func TestDetectLinuxGPU_RX7800XT_viaRocmSmi(t *testing.T) {
 			"device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n" +
 			"card0,17163091968,1048576\n",
 	})
-	g := detectLinuxGPU(context.Background(), run)
+	g := detectLinuxGPU(context.Background(), run, noVRAMProbe)
 	if g.Backend != GPUBackendROCm || g.Vendor != "amd" {
 		t.Fatalf("expected AMD/rocm, got %+v", g)
 	}
@@ -46,7 +54,7 @@ func TestDetectLinuxGPU_NvidiaWins(t *testing.T) {
 	run := fakeGPUTools(map[string]string{
 		"nvidia-smi": "NVIDIA GeForce RTX 4090, 24564\n",
 	})
-	g := detectLinuxGPU(context.Background(), run)
+	g := detectLinuxGPU(context.Background(), run, noVRAMProbe)
 	if g.Backend != GPUBackendCUDA || g.VRAMBytes == 0 {
 		t.Fatalf("expected CUDA with VRAM, got %+v", g)
 	}
@@ -58,17 +66,120 @@ func TestDetectLinuxGPU_LspciVulkanFallback(t *testing.T) {
 		"lspci":      "03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 32 [Radeon RX 7800 XT]\n",
 		"vulkaninfo": "GPU0: apiVersion = 1.3\n",
 	})
-	g := detectLinuxGPU(context.Background(), run)
+	g := detectLinuxGPU(context.Background(), run, noVRAMProbe)
 	if g.Vendor != "amd" || g.Backend != GPUBackendVulkan {
 		t.Fatalf("expected AMD/vulkan fallback, got %+v", g)
 	}
 	if g.HasUsableGPU() {
-		t.Errorf("lspci-only detection has no VRAM, so it must not report a usable (offload-admissible) GPU")
+		t.Errorf("lspci-only detection with no sysfs VRAM must not report a usable (offload-admissible) GPU")
+	}
+}
+
+func TestDetectLinuxGPU_LspciVulkanWithSysfsVRAM(t *testing.T) {
+	/*
+		The real Linux/AMD box: no nvidia-smi/rocm-smi, lspci names the card,
+		vulkaninfo confirms the backend, and the amdgpu sysfs node supplies the
+		16 GiB VRAM budget the tuner needs to actually offload.
+	*/
+	run := fakeGPUTools(map[string]string{
+		"lspci":      "03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 32 [Radeon RX 7800 XT]\n",
+		"vulkaninfo": "GPU0: apiVersion = 1.3\n",
+	})
+	const vram = 16 * 1024 * 1024 * 1024
+	g := detectLinuxGPU(context.Background(), run, fixedVRAMProbe(vram))
+	if g.Vendor != "amd" || g.Backend != GPUBackendVulkan {
+		t.Fatalf("expected AMD/vulkan, got %+v", g)
+	}
+	if g.VRAMBytes != vram {
+		t.Errorf("VRAM = %d, want %d (from sysfs)", g.VRAMBytes, uint64(vram))
+	}
+	if g.Detection != "lspci+amdgpu-sysfs" {
+		t.Errorf("detection = %q, want lspci+amdgpu-sysfs", g.Detection)
+	}
+	if !g.HasUsableGPU() {
+		t.Errorf("Vulkan backend + sysfs VRAM must be an offload-admissible GPU")
+	}
+}
+
+/*
+sampleVulkaninfo mimics the multi-device layout of the real Linux/AMD box: a
+discrete GPU that advertises a large host-visible (GTT) heap WITHOUT the
+device-local flag plus the real 15.98 GiB VRAM heap WITH it, an integrated GPU
+whose device-local heap is system RAM, and the llvmpipe CPU device. Only the
+discrete device-local heap is the true VRAM.
+*/
+const sampleVulkaninfo = "" +
+	"GPU id : 0 (AMD Radeon RX 7800 XT (RADV NAVI32)):\n" +
+	"\tdeviceType        = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\n" +
+	"\tmemoryHeaps[0]:\n" +
+	"\t\tsize   = 66237911040 (0xf6c165000) (61.69 GiB)\n" +
+	"\t\tflags: count = 0\n" +
+	"\tmemoryHeaps[1]:\n" +
+	"\t\tsize   = 17163091968 (0x3ff000000) (15.98 GiB)\n" +
+	"\t\tflags: count = 1\n" +
+	"\t\t\tMEMORY_HEAP_DEVICE_LOCAL_BIT\n" +
+	"GPU id : 1 (AMD Ryzen 9 9950X 16-Core Processor (RADV RAPHAEL_MENDOCINO)):\n" +
+	"\tdeviceType        = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU\n" +
+	"\tmemoryHeaps[0]:\n" +
+	"\t\tsize   = 45590265856 (0xa9d644000) (42.46 GiB)\n" +
+	"\t\tflags: count = 1\n" +
+	"\t\t\tMEMORY_HEAP_DEVICE_LOCAL_BIT\n" +
+	"GPU id : 2 (llvmpipe (LLVM 20.1.2, 256 bits)):\n" +
+	"\tdeviceType        = PHYSICAL_DEVICE_TYPE_CPU\n" +
+	"\tmemoryHeaps[0]:\n" +
+	"\t\tsize   = 132475826176 (0x1ed82cb000) (123.38 GiB)\n" +
+	"\t\tflags: count = 1\n" +
+	"\t\t\tMEMORY_HEAP_DEVICE_LOCAL_BIT\n"
+
+func TestParseVulkaninfoDiscreteVRAM_PicksDiscreteDeviceLocalHeap(t *testing.T) {
+	vram, ok := parseVulkaninfoDiscreteVRAM(sampleVulkaninfo)
+	if !ok {
+		t.Fatal("expected a discrete VRAM reading")
+	}
+	if vram != 17163091968 {
+		t.Errorf("VRAM = %d, want 17163091968 (discrete device-local heap, not the 61 GiB GTT heap nor the iGPU/CPU heaps)", vram)
+	}
+}
+
+func TestParseVulkaninfoDiscreteVRAM_NoDiscreteYieldsNothing(t *testing.T) {
+	integratedOnly := "" +
+		"GPU id : 0 (Intel iGPU):\n" +
+		"\tdeviceType        = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU\n" +
+		"\tmemoryHeaps[0]:\n" +
+		"\t\tsize   = 45590265856 (0xa9d644000) (42.46 GiB)\n" +
+		"\t\tflags: count = 1\n" +
+		"\t\t\tMEMORY_HEAP_DEVICE_LOCAL_BIT\n"
+	if vram, ok := parseVulkaninfoDiscreteVRAM(integratedOnly); ok {
+		t.Errorf("integrated-only host must not yield a VRAM budget, got %d", vram)
+	}
+}
+
+func TestDetectLinuxGPU_VulkaninfoVRAMFallback(t *testing.T) {
+	/*
+		Vendor-agnostic path: no vendor tool, no amdgpu sysfs (noVRAMProbe), but
+		lspci names the card and vulkaninfo supplies the discrete VRAM budget.
+	*/
+	run := fakeGPUTools(map[string]string{
+		"lspci":      "03:00.0 VGA compatible controller: NVIDIA Corporation Device 2684 (rev a1)\n",
+		"vulkaninfo": sampleVulkaninfo,
+	})
+	g := detectLinuxGPU(context.Background(), run, noVRAMProbe)
+	if g.Backend != GPUBackendVulkan {
+		t.Fatalf("expected vulkan backend, got %+v", g)
+	}
+	if g.VRAMBytes != 17163091968 {
+		t.Errorf("VRAM = %d, want 17163091968 (from vulkaninfo)", g.VRAMBytes)
+	}
+	if g.Detection != "lspci+vulkaninfo" {
+		t.Errorf("detection = %q, want lspci+vulkaninfo", g.Detection)
+	}
+	if !g.HasUsableGPU() {
+		t.Errorf("vulkan backend + vulkaninfo VRAM must be offload-admissible")
 	}
 }
 
 func TestDetectLinuxGPU_NoneWhenNoTools(t *testing.T) {
-	g := detectLinuxGPU(context.Background(), fakeGPUTools(nil))
+	g := detectLinuxGPU(context.Background(), fakeGPUTools(nil), noVRAMProbe)
 	if g.Backend != GPUBackendNone {
 		t.Fatalf("no tools present must yield none, got %+v", g)
 	}
