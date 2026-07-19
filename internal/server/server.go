@@ -854,6 +854,7 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 	if name == "llamacpp" && s.compactor != nil {
 		c := *s.compactor
 		c.TriggerTokens = compactTriggerTokens(s.cfg)
+		c.MaxTotalTokens = compactTotalBudget(s.cfg)
 		a.Compactor = &c
 		/*
 			Size read_dir's output budget to the context-limited local model so a
@@ -919,6 +920,27 @@ func compactTriggerTokens(cfg *config.Config) int {
 		trigger = 2048
 	}
 	return trigger
+}
+
+/*
+compactTotalBudget is the combined token budget for all conversation messages
+(system prompt excluded): the context size minus headroom for the system prompt,
+RAG grounding, and the model's response. When the messages sum past it, compaction
+shrinks the largest until the whole prompt fits — catching a pile-up of messages
+that are each individually under the per-message trigger.
+*/
+func compactTotalBudget(cfg *config.Config) int {
+	ctxSize := 8192
+	if cfg != nil {
+		if p, ok := cfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && p.LlamaCpp.CtxSize > 0 {
+			ctxSize = p.LlamaCpp.CtxSize
+		}
+	}
+	budget := ctxSize - 7168
+	if budget < 2048 {
+		budget = 2048
+	}
+	return budget
 }
 
 /*

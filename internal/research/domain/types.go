@@ -242,6 +242,7 @@ type ExperimentRun struct {
 	CampaignID         string            `json:"campaign_id"`
 	ScopeID            string            `json:"scope_id"`
 	BuildID            string            `json:"build_id,omitempty"`
+	InputArtifactID    string            `json:"input_artifact_id,omitempty"`
 	Operation          Operation         `json:"operation"`
 	Arguments          map[string]string `json:"arguments,omitempty"`
 	Environment        map[string]string `json:"environment,omitempty"`
@@ -281,6 +282,8 @@ type WorkerJob struct {
 	RunID              string            `json:"run_id"`
 	CampaignID         string            `json:"campaign_id"`
 	ScopeID            string            `json:"scope_id"`
+	BuildID            string            `json:"build_id,omitempty"`
+	InputArtifactID    string            `json:"input_artifact_id,omitempty"`
 	Operation          Operation         `json:"operation"`
 	Arguments          map[string]string `json:"arguments,omitempty"`
 	Environment        map[string]string `json:"environment,omitempty"`

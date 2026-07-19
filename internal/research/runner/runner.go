@@ -61,6 +61,7 @@ type Journal interface {
 	SaveJobAndRun(context.Context, domain.WorkerJob, domain.ExperimentRun) error
 	SaveWorkerJob(context.Context, domain.WorkerJob) error
 	GetWorkerJob(context.Context, string) (domain.WorkerJob, error)
+	GetWorkerJobByRunID(context.Context, string) (domain.WorkerJob, error)
 	ListWorkerJobsByStatus(context.Context, ...domain.RunStatus) ([]domain.WorkerJob, error)
 	SaveRun(context.Context, domain.ExperimentRun) error
 	GetRun(context.Context, string) (domain.ExperimentRun, error)
@@ -80,6 +81,7 @@ type Options struct {
 	GlobalConcurrency      int
 	CampaignConcurrency    int
 	MaxCapturedOutputBytes int64
+	OnResult               func(context.Context, domain.WorkerJob, domain.RunResult) error
 }
 
 // Broker schedules jobs, persists lifecycle changes, and ingests results.
@@ -98,6 +100,7 @@ type Broker struct {
 	campaignActive map[string]int
 	cancels        map[string]context.CancelFunc
 	waiters        map[string][]chan domain.RunResult
+	onResult       func(context.Context, domain.WorkerJob, domain.RunResult) error
 	ctx            context.Context
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
@@ -131,7 +134,7 @@ func NewBroker(opts Options) (*Broker, error) {
 	return &Broker{
 		backend: opts.Backend, journal: opts.Journal, collector: collector, stagingRoot: root,
 		globalConcurrency: opts.GlobalConcurrency, campaignConcurrency: opts.CampaignConcurrency,
-		queue: make(chan string, 1024), campaignActive: map[string]int{}, cancels: map[string]context.CancelFunc{}, waiters: map[string][]chan domain.RunResult{},
+		queue: make(chan string, 1024), campaignActive: map[string]int{}, cancels: map[string]context.CancelFunc{}, waiters: map[string][]chan domain.RunResult{}, onResult: opts.OnResult,
 	}, nil
 }
 
@@ -224,7 +227,7 @@ func (b *Broker) Submit(ctx context.Context, job domain.WorkerJob) (domain.Exper
 	}
 	job.SchemaVersion, job.Status, job.CreatedAt, job.UpdatedAt = 1, domain.RunQueued, now, now
 	run := domain.ExperimentRun{
-		SchemaVersion: 1, ID: job.RunID, CampaignID: job.CampaignID, ScopeID: job.ScopeID, Operation: job.Operation,
+		SchemaVersion: 1, ID: job.RunID, CampaignID: job.CampaignID, ScopeID: job.ScopeID, BuildID: job.BuildID, InputArtifactID: job.InputArtifactID, Operation: job.Operation,
 		Arguments: job.Arguments, Status: domain.RunQueued, AuditCorrelationID: job.AuditCorrelationID, CreatedAt: now,
 	}
 	if err := b.journal.CreateJobAndRun(ctx, job, run); err != nil {
@@ -296,6 +299,16 @@ func (b *Broker) Cancel(ctx context.Context, jobID string) error {
 	}
 	b.publish(resultFromRun(run))
 	return nil
+}
+
+// CancelRun resolves the private job identity from a public run ID and applies
+// the same durable cancellation path.
+func (b *Broker) CancelRun(ctx context.Context, runID string) error {
+	job, err := b.journal.GetWorkerJobByRunID(ctx, runID)
+	if err != nil {
+		return err
+	}
+	return b.Cancel(ctx, job.ID)
 }
 
 // Close cancels workers and waits for broker goroutines.
@@ -418,6 +431,18 @@ func (b *Broker) execute(job domain.WorkerJob) {
 	run.Status, run.Exit, run.Usage, run.ArtifactIDs, run.CompletedAt = result.Status, result.Exit, result.ResourceUsage, result.ArtifactIDs, &completed
 	job.Status, job.UpdatedAt = result.Status, completed
 	_ = b.journal.SaveJobAndRun(context.Background(), job, run)
+	if b.onResult != nil {
+		callbackCtx, callbackCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		callbackErr := b.onResult(callbackCtx, job, result)
+		callbackCancel()
+		if callbackErr != nil {
+			completed = time.Now().UTC()
+			result.Status, result.Exit.Reason = domain.RunFailed, "post-run evidence ingestion: "+callbackErr.Error()
+			run.Status, run.Exit, run.CompletedAt = result.Status, result.Exit, &completed
+			job.Status, job.UpdatedAt = result.Status, completed
+			_ = b.journal.SaveJobAndRun(context.Background(), job, run)
+		}
+	}
 	b.publish(result)
 }
 

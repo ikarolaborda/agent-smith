@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
+	"github.com/ikarolaborda/agent-smith/internal/research/pipeline"
 	"github.com/ikarolaborda/agent-smith/internal/research/runner"
 	"github.com/ikarolaborda/agent-smith/internal/research/service"
 	"github.com/ikarolaborda/agent-smith/internal/research/store"
@@ -77,11 +78,21 @@ func buildResearchRuntime(ctx context.Context, opts ResearchModeOptions) (*resea
 		return nil, err
 	}
 	runtime.store, runtime.service = repository, svc
+	coordinator, err := pipeline.New(repository, opts.MinimumReproductions)
+	if err != nil {
+		repository.Close()
+		return nil, err
+	}
+	if err := svc.ConfigureInternalRoot(pipeline.WorkRoot(repository.Root())); err != nil {
+		repository.Close()
+		return nil, err
+	}
 	if opts.RunnerBackend != nil {
 		broker, err := runner.NewBroker(runner.Options{
 			Backend: opts.RunnerBackend, Journal: repository, Artifacts: repository,
 			StagingRoot: filepath.Join(repository.Root(), "staging"), GlobalConcurrency: opts.GlobalConcurrency,
 			CampaignConcurrency: opts.CampaignConcurrency,
+			OnResult:            coordinator.Ingest,
 		})
 		if err != nil {
 			repository.Close()

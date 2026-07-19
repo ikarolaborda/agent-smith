@@ -33,7 +33,12 @@ func TestBrokerPersistsTypedResultAndArtifacts(t *testing.T) {
 			Apparatus: domain.ApparatusIdentity{ManifestID: "apparatus-1", Harness: "parser", Sanitizer: "address"},
 		}, nil
 	}}
-	broker, err := NewBroker(Options{Backend: backend, Journal: repository, Artifacts: repository, StagingRoot: filepath.Join(repository.Root(), "staging"), MaxCapturedOutputBytes: 4})
+	results := make(chan domain.RunResult, 1)
+	broker, err := NewBroker(Options{Backend: backend, Journal: repository, Artifacts: repository, StagingRoot: filepath.Join(repository.Root(), "staging"), MaxCapturedOutputBytes: 4,
+		OnResult: func(_ context.Context, _ domain.WorkerJob, result domain.RunResult) error {
+			results <- result
+			return nil
+		}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +47,7 @@ func TestBrokerPersistsTypedResultAndArtifacts(t *testing.T) {
 	}
 	defer broker.Close()
 	job := validJob(t, campaign)
+	job.BuildID = "build-1"
 	run, err := broker.Submit(ctx, job)
 	if err != nil {
 		t.Fatal(err)
@@ -55,11 +61,14 @@ func TestBrokerPersistsTypedResultAndArtifacts(t *testing.T) {
 	if result.Status != domain.RunCompleted || result.IsolationAssurance != "deterministic_test_double" {
 		t.Fatalf("result=%#v", result)
 	}
+	if handled := <-results; handled.RunID != result.RunID {
+		t.Fatalf("handled result=%#v", handled)
+	}
 	if len(result.ArtifactIDs) != 3 || !result.Output.StdoutTruncated || result.Output.BytesDropped != 2 {
 		t.Fatalf("artifacts/output=%#v", result)
 	}
 	persisted, err := repository.GetRun(ctx, run.ID)
-	if err != nil || persisted.Status != domain.RunCompleted || len(persisted.ArtifactIDs) != 3 {
+	if err != nil || persisted.Status != domain.RunCompleted || persisted.BuildID != "build-1" || len(persisted.ArtifactIDs) != 3 {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	roles := map[string]bool{}
@@ -103,6 +112,44 @@ func TestBrokerRecoversInterruptedRun(t *testing.T) {
 	result, err := broker.Wait(waitCtx, run.ID)
 	if err != nil || result.Status != domain.RunCompleted || backend.CallCount() != 1 {
 		t.Fatalf("result=%#v calls=%d err=%v", result, backend.CallCount(), err)
+	}
+}
+
+func TestBrokerCancelsByPublicRunID(t *testing.T) {
+	ctx := context.Background()
+	repository, campaign := runnerStore(t)
+	defer repository.Close()
+	started := make(chan struct{})
+	backend := &FakeBackend{ExecuteFunc: func(ctx context.Context, _ domain.WorkerJob, _ string) (Execution, error) {
+		close(started)
+		<-ctx.Done()
+		return Execution{Status: domain.RunCancelled}, ctx.Err()
+	}}
+	broker, err := NewBroker(Options{Backend: backend, Journal: repository, Artifacts: repository, StagingRoot: filepath.Join(repository.Root(), "staging")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Close()
+	run, err := broker.Submit(ctx, validJob(t, campaign))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	if err := broker.CancelRun(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := broker.Wait(waitCtx, run.ID)
+	if err != nil || result.Status != domain.RunCancelled {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 

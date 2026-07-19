@@ -41,6 +41,17 @@ export interface ExperimentRun {
   resource_usage?: { wall_ms: number; max_rss_bytes: number };
 }
 
+export interface ResearchBuild {
+  id: string;
+  status: string;
+  image_digest: string;
+  sanitizer: string;
+  architecture: string;
+  toolchain?: Record<string, string>;
+  provenance?: Record<string, string>;
+  output_artifacts?: string[];
+}
+
 export interface Artifact {
   id: string;
   content_id: string;
@@ -67,6 +78,36 @@ export interface CrashGroup {
   observation_ids: string[];
   minimized_artifact_id?: string;
   root_cause?: string;
+}
+
+export interface CrashObservation {
+  id: string;
+  class: string;
+  summary: string;
+  signature: string;
+  input_artifact_id?: string;
+  access?: string;
+  access_size?: number;
+  security_relevant: boolean;
+}
+
+export interface EvidenceValue {
+  known: boolean;
+  value?: string;
+  evidence_ids?: string[];
+}
+
+export interface PrimitiveAssessment {
+  id: string;
+  operation: string;
+  attacker_control: EvidenceValue;
+  access_width: EvidenceValue;
+  value_control: EvidenceValue;
+  target_relation: EvidenceValue;
+  repeatability: EvidenceValue;
+  reachability: EvidenceValue;
+  mitigations: EvidenceValue;
+  exploitability_gap: EvidenceValue;
 }
 
 export interface Finding {

@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ikarolaborda/agent-smith/internal/research/acquisition"
 	"github.com/ikarolaborda/agent-smith/internal/research/apparatus"
 	"github.com/ikarolaborda/agent-smith/internal/research/domain"
+	"github.com/ikarolaborda/agent-smith/internal/research/pipeline"
 	"github.com/ikarolaborda/agent-smith/internal/research/service"
 	"github.com/ikarolaborda/agent-smith/internal/research/store"
 )
@@ -197,6 +199,8 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 	switch rest[1] {
 	case "transition":
 		s.handleResearchTransition(w, r, principal, campaignID)
+	case "target":
+		s.handleResearchTarget(w, r, principal, campaignID)
 	case "approvals":
 		s.handleCampaignApprovals(w, r, principal, campaignID)
 	case "runs":
@@ -205,6 +209,13 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		values, err := s.research.store.ListRuns(r.Context(), campaignID, queryLimit(r, 1000))
+		s.writeResearchList(w, values, err)
+	case "builds":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET required")
+			return
+		}
+		values, err := s.research.store.ListBuilds(r.Context(), campaignID, queryLimit(r, 1000))
 		s.writeResearchList(w, values, err)
 	case "artifacts":
 		if r.Method != http.MethodGet {
@@ -222,6 +233,20 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		values, err := s.research.store.ListCrashGroups(r.Context(), campaignID, queryLimit(r, 1000))
+		s.writeResearchList(w, values, err)
+	case "crash-observations":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET required")
+			return
+		}
+		values, err := s.research.store.ListCrashes(r.Context(), campaignID, queryLimit(r, 1000))
+		s.writeResearchList(w, values, err)
+	case "primitive-assessments":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET required")
+			return
+		}
+		values, err := s.research.store.ListPrimitives(r.Context(), campaignID, queryLimit(r, 1000))
 		s.writeResearchList(w, values, err)
 	case "findings":
 		if r.Method != http.MethodGet {
@@ -255,6 +280,46 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 		}
 		request.Job.CampaignID = campaign.ID
 		request.Job.ScopeID = campaign.ScopeID
+		request.Job.SourceDir = ""
+		if campaign.TargetID != "" {
+			target, targetErr := s.research.store.GetTarget(r.Context(), campaign.TargetID)
+			if targetErr != nil {
+				s.writeResearchError(w, targetErr)
+				return
+			}
+			request.Job.SourceDir, err = acquisition.VerifiedCapture(
+				pipeline.WorkRoot(s.research.store.Root()), campaign.ID, target.ID, target.SourceSHA256,
+				acquisition.Limits{MaxBytes: campaign.Budget.MaxDiskBytes},
+			)
+			if err != nil {
+				s.writeResearchError(w, err)
+				return
+			}
+		}
+		request.Job.BuildDir = ""
+		if request.Job.BuildID != "" {
+			request.Job.BuildDir, err = pipeline.VerifiedBuildDirectory(r.Context(), s.research.store, campaign.ID, request.Job.BuildID)
+			if err != nil {
+				s.writeResearchError(w, err)
+				return
+			}
+		}
+		request.Job.CorpusDir = ""
+		if researchOperationNeedsCorpus(request.Job.Operation) {
+			request.Job.CorpusDir, err = pipeline.PrepareCorpus(s.research.store.Root(), campaign.ID, request.Job.Harness)
+			if err != nil {
+				s.writeResearchError(w, err)
+				return
+			}
+		}
+		request.Job.EvidenceDir = ""
+		if request.Job.InputArtifactID != "" {
+			request.Job.EvidenceDir, err = pipeline.PrepareEvidence(r.Context(), s.research.store, campaign.ID, request.Job.InputArtifactID, request.Job.Operation)
+			if err != nil {
+				s.writeResearchError(w, err)
+				return
+			}
+		}
 		job, err := apparatus.NewJob(manifest, request.Job)
 		if err != nil {
 			s.writeResearchError(w, err)
@@ -268,6 +333,40 @@ func (s *Server) handleResearchCampaigns(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusAccepted, run)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "campaign subresource not found")
+	}
+}
+
+func (s *Server) handleResearchTarget(w http.ResponseWriter, r *http.Request, principal domain.Principal, campaignID string) {
+	switch r.Method {
+	case http.MethodGet:
+		campaign, err := s.research.store.GetCampaign(r.Context(), campaignID)
+		if err != nil {
+			s.writeResearchError(w, err)
+			return
+		}
+		if campaign.TargetID == "" {
+			writeError(w, http.StatusNotFound, "not_found", "campaign target not acquired")
+			return
+		}
+		target, err := s.research.store.GetTarget(r.Context(), campaign.TargetID)
+		if err != nil {
+			s.writeResearchError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, target)
+	case http.MethodPost:
+		var request service.TargetRequest
+		if !decodeJSONRequest(w, r, &request, maxResearchBodyBytes) {
+			return
+		}
+		target, err := s.research.service.AcquireTarget(r.Context(), principal, campaignID, request)
+		if err != nil {
+			s.writeResearchError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, target)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET or POST required")
 	}
 }
 
@@ -352,7 +451,7 @@ func (s *Server) handleResearchApproval(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleResearchRun(w http.ResponseWriter, r *http.Request, principal domain.Principal, rest []string) {
-	if len(rest) != 1 || r.Method != http.MethodGet {
+	if len(rest) < 1 || len(rest) > 2 {
 		writeError(w, http.StatusNotFound, "not_found", "run route not found")
 		return
 	}
@@ -366,7 +465,28 @@ func (s *Server) handleResearchRun(w http.ResponseWriter, r *http.Request, princ
 		writeError(w, http.StatusForbidden, "forbidden", "principal is not a campaign member")
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	if len(rest) == 1 && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, run)
+		return
+	}
+	if len(rest) != 2 || rest[1] != "cancel" || r.Method != http.MethodPost {
+		writeError(w, http.StatusNotFound, "not_found", "run route not found")
+		return
+	}
+	if !principalHasAnyRole(principal, domain.RoleOperator) {
+		writeError(w, http.StatusForbidden, "forbidden", "operator or admin role required")
+		return
+	}
+	if s.research.broker == nil {
+		writeError(w, http.StatusServiceUnavailable, "runner_unavailable", "research runner unavailable")
+		return
+	}
+	if err := s.research.broker.CancelRun(r.Context(), run.ID); err != nil {
+		s.writeResearchError(w, err)
+		return
+	}
+	_, _ = s.research.store.AppendAudit(r.Context(), domain.AuditEvent{ActorID: principal.ID, Action: "run.cancel", ResourceType: "experiment_run", ResourceID: run.ID, Decision: "allowed", Details: map[string]string{"campaign_id": run.CampaignID}})
+	writeJSON(w, http.StatusAccepted, map[string]any{"run_id": run.ID, "cancellation_requested": true})
 }
 
 func (s *Server) handleResearchArtifact(w http.ResponseWriter, r *http.Request, principal domain.Principal, rest []string) {
@@ -502,4 +622,13 @@ func containsID(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func researchOperationNeedsCorpus(operation domain.Operation) bool {
+	switch operation {
+	case domain.OperationSeed, domain.OperationFuzz, domain.OperationMergeCorpus, domain.OperationCoverage, domain.OperationRegressionTest:
+		return true
+	default:
+		return false
+	}
 }

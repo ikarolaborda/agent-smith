@@ -492,6 +492,30 @@ func (s *Store) ListApprovals(ctx context.Context, campaignID string, limit int)
 	return decodeRecords[domain.Approval](rows)
 }
 
+func (s *Store) ListBuilds(ctx context.Context, campaignID string, limit int) ([]domain.Build, error) {
+	rows, err := s.listRecordData(ctx, recordBuild, campaignID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRecords[domain.Build](rows)
+}
+
+func (s *Store) ListCrashes(ctx context.Context, campaignID string, limit int) ([]domain.CrashObservation, error) {
+	rows, err := s.listRecordData(ctx, recordCrash, campaignID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRecords[domain.CrashObservation](rows)
+}
+
+func (s *Store) ListPrimitives(ctx context.Context, campaignID string, limit int) ([]domain.PrimitiveAssessment, error) {
+	rows, err := s.listRecordData(ctx, recordPrimitive, campaignID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRecords[domain.PrimitiveAssessment](rows)
+}
+
 func (s *Store) ListCrashGroups(ctx context.Context, campaignID string, limit int) ([]domain.CrashGroup, error) {
 	rows, err := s.listRecordData(ctx, recordCrashGroup, campaignID, limit)
 	if err != nil {
@@ -667,6 +691,15 @@ func (s *Store) SaveWorkerJob(ctx context.Context, v domain.WorkerJob) error {
 func (s *Store) GetWorkerJob(ctx context.Context, id string) (v domain.WorkerJob, err error) {
 	err = s.getRecord(ctx, recordWorkerJob, id, &v)
 	return
+}
+
+func (s *Store) GetWorkerJobByRunID(ctx context.Context, runID string) (v domain.WorkerJob, err error) {
+	var data []byte
+	err = s.db.QueryRowContext(ctx, `SELECT data FROM research_records WHERE kind = ? AND json_extract(data, '$.run_id') = ? LIMIT 1`, recordWorkerJob, runID).Scan(&data)
+	if decodeErr := decodeOne(err, data, &v); decodeErr != nil {
+		return v, decodeErr
+	}
+	return v, nil
 }
 
 func (s *Store) SaveSourceEvidence(ctx context.Context, v domain.SourceEvidence) error {

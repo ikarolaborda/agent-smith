@@ -26,6 +26,8 @@ type Campaigns interface {
 type Evidence interface {
 	SaveTarget(context.Context, domain.TargetRevision) error
 	GetTarget(context.Context, string) (domain.TargetRevision, error)
+	SaveBuild(context.Context, domain.Build) error
+	GetBuild(context.Context, string) (domain.Build, error)
 	SaveApparatus(context.Context, domain.ApparatusManifest) error
 	GetApparatus(context.Context, string) (domain.ApparatusManifest, error)
 	SaveFinding(context.Context, domain.Finding) error
@@ -51,6 +53,7 @@ type Jobs interface {
 	SaveJobAndRun(context.Context, domain.WorkerJob, domain.ExperimentRun) error
 	SaveWorkerJob(context.Context, domain.WorkerJob) error
 	GetWorkerJob(context.Context, string) (domain.WorkerJob, error)
+	GetWorkerJobByRunID(context.Context, string) (domain.WorkerJob, error)
 	ListWorkerJobsByStatus(context.Context, ...domain.RunStatus) ([]domain.WorkerJob, error)
 	SaveRun(context.Context, domain.ExperimentRun) error
 	GetRun(context.Context, string) (domain.ExperimentRun, error)
@@ -61,5 +64,6 @@ type ControlPlane interface {
 	Scopes
 	Campaigns
 	Evidence
+	Artifacts
 	Audit
 }

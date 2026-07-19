@@ -167,6 +167,13 @@ func TestUnapprovedOrOutOfScopeJobNeverReachesBroker(t *testing.T) {
 	operator := domain.Principal{ID: "operator", Roles: []domain.Role{domain.RoleOperator}}
 	reviewer := domain.Principal{ID: "reviewer", Roles: []domain.Role{domain.RoleReviewer}}
 	root := filepath.Join(repository.Root(), "work")
+	internalRoot := filepath.Join(repository.Root(), "internal")
+	if err := os.MkdirAll(internalRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ConfigureInternalRoot(internalRoot); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -191,10 +198,34 @@ func TestUnapprovedOrOutOfScopeJobNeverReachesBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	previousVersion := campaign.Version
+	campaign.State = domain.CampaignFuzzing
+	campaign.Version++
+	campaign.UpdatedAt = now
+	if err := repository.UpdateCampaign(ctx, campaign, previousVersion); err != nil {
+		t.Fatal(err)
+	}
+	buildDir := filepath.Join(internalRoot, campaign.ID, "builds", "build")
+	corpusDir := filepath.Join(internalRoot, campaign.ID, "corpora", "parser")
+	if err := os.MkdirAll(buildDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(corpusDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveBuild(ctx, domain.Build{ID: "build", CampaignID: campaign.ID, ManifestID: manifest.ID, ImageDigest: manifest.ImageDigest,
+		Sanitizer: "address", Status: string(domain.RunCompleted), Provenance: map[string]string{"harness": "parser"}, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	job := domain.WorkerJob{CampaignID: campaign.ID, ScopeID: scope.ID, Operation: domain.OperationFuzz, AuditCorrelationID: "correlation", Budget: scope.Budget,
+		BuildID:     "build",
 		ImageDigest: manifest.ImageDigest, Arguments: map[string]string{"manifest": manifest.ID, "harness": "parser", "revision": "abc", "sanitizer": "address"},
 		ArtifactRules: apparatus.ArtifactRules(domain.OperationFuzz),
-		Mounts:        []domain.JobMount{{Name: "source", HostPath: root, ContainerPath: "/source", ReadOnly: true}}}
+		Mounts: []domain.JobMount{
+			{Name: "source", HostPath: root, ContainerPath: "/source", ReadOnly: true},
+			{Name: "build", HostPath: buildDir, ContainerPath: "/build", ReadOnly: true},
+			{Name: "corpus", HostPath: corpusDir, ContainerPath: "/corpus", ReadOnly: false},
+		}}
 	if _, err := svc.Enqueue(ctx, operator, campaign.ID, job, ""); !errors.Is(err, ErrForbidden) || broker.calls != 0 {
 		t.Fatalf("unapproved err=%v calls=%d", err, broker.calls)
 	}

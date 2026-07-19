@@ -8,9 +8,12 @@ import {
   type Artifact,
   type AuditEvent,
   type Campaign,
+  type CrashObservation,
   type CrashGroup,
   type ExperimentRun,
   type Finding,
+  type PrimitiveAssessment,
+  type ResearchBuild,
   type ResearchScope,
 } from '../research';
 
@@ -24,9 +27,12 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
   const [scopes, setScopes] = useState<ResearchScope[]>([]);
   const [selectedID, setSelectedID] = useState<string>('');
   const [runs, setRuns] = useState<ExperimentRun[]>([]);
+  const [builds, setBuilds] = useState<ResearchBuild[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [groups, setGroups] = useState<CrashGroup[]>([]);
+  const [observations, setObservations] = useState<CrashObservation[]>([]);
+  const [primitives, setPrimitives] = useState<PrimitiveAssessment[]>([]);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63,18 +69,24 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
   const loadCampaign = useCallback(async (id: string) => {
     if (!id) return;
     try {
-      const [nextRuns, nextArtifacts, nextApprovals, nextGroups, nextFindings, nextEvents] = await Promise.all([
+      const [nextRuns, nextBuilds, nextArtifacts, nextApprovals, nextGroups, nextObservations, nextPrimitives, nextFindings, nextEvents] = await Promise.all([
         listResearch<ExperimentRun>(`/v1/research/campaigns/${id}/runs`),
+        listResearch<ResearchBuild>(`/v1/research/campaigns/${id}/builds`),
         listResearch<Artifact>(`/v1/research/campaigns/${id}/artifacts`),
         listResearch<Approval>(`/v1/research/campaigns/${id}/approvals`),
         listResearch<CrashGroup>(`/v1/research/campaigns/${id}/crash-groups`),
+        listResearch<CrashObservation>(`/v1/research/campaigns/${id}/crash-observations`),
+        listResearch<PrimitiveAssessment>(`/v1/research/campaigns/${id}/primitive-assessments`),
         listResearch<Finding>(`/v1/research/campaigns/${id}/findings`),
         listResearch<AuditEvent>(`/v1/research/events?campaign_id=${encodeURIComponent(id)}&after=0`),
       ]);
       setRuns(nextRuns);
+      setBuilds(nextBuilds);
       setArtifacts(nextArtifacts);
       setApprovals(nextApprovals);
       setGroups(nextGroups);
+      setObservations(nextObservations);
+      setPrimitives(nextPrimitives);
       setFindings(nextFindings);
       setEvents(nextEvents);
     } catch (error) {
@@ -143,6 +155,15 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
     }
   }
 
+  async function cancelRun(run: ExperimentRun) {
+    try {
+      await researchJSON(`/v1/research/runs/${run.id}/cancel`, { method: 'POST' });
+      await loadCampaign(selectedID);
+    } catch (error) {
+      handleError(error);
+    }
+  }
+
   if (loading) return <div className="research-loading"><Spinner size="sm" /> Loading research control plane…</div>;
 
   return (
@@ -170,6 +191,7 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
             </div>
             <div className="metric-grid">
               <Metric label="Runs" value={runs.length} detail={`${runs.filter((run) => run.status === 'running').length} active`} />
+              <Metric label="Builds" value={builds.length} detail={builds[0]?.sanitizer ?? 'none retained'} />
               <Metric label="Crash groups" value={groups.length} detail={`${groups.reduce((sum, group) => sum + (group.observation_ids?.length ?? 0), 0)} observations`} />
               <Metric label="Findings" value={findings.length} detail={findings[0]?.label ?? 'none promoted'} />
               <Metric label="Artifacts" value={artifacts.length} detail={formatBytes(artifacts.reduce((sum, artifact) => sum + artifact.size, 0))} />
@@ -177,7 +199,12 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
             <div className="research-grid">
               <Panel title="Experiment runs" icon="bi-activity">
                 {runs.length === 0 ? <Empty text="No worker runs queued." /> : runs.map((run) => (
-                  <div className="research-row" key={run.id}><div><strong>{run.operation}</strong><small>{shortID(run.id)} · {run.isolation_assurance || 'isolation pending'}</small></div><StatusBadge value={run.status} /></div>
+                  <div className="research-row" key={run.id}><div><strong>{run.operation}</strong><small>{shortID(run.id)} · {run.isolation_assurance || 'isolation pending'}</small></div><StatusBadge value={run.status} />{(run.status === 'queued' || run.status === 'running') && <Button variant="link" size="sm" onClick={() => void cancelRun(run)}>Cancel</Button>}</div>
+                ))}
+              </Panel>
+              <Panel title="Build provenance" icon="bi-box-seam">
+                {builds.length === 0 ? <Empty text="No evidence-backed builds." /> : builds.map((build) => (
+                  <div className="research-row" key={build.id}><div><strong>{build.provenance?.harness || shortID(build.id)}</strong><small>{build.toolchain?.compiler || 'compiler pending'} · {build.sanitizer} · {shortID(build.image_digest)}</small></div><StatusBadge value={build.status} /></div>
                 ))}
               </Panel>
               <Panel title="Approvals" icon="bi-person-check">
@@ -190,8 +217,20 @@ export function ResearchDashboard({ onUnauthorized, onError }: Props) {
               </Panel>
               <Panel title="Crash groups & findings" icon="bi-bug">
                 {groups.map((group) => <div className="research-row" key={group.id}><div><strong>{group.root_cause || 'Root cause pending'}</strong><small>{group.observation_ids?.length ?? 0} observations · {shortID(group.signature)}</small></div></div>)}
+                {observations.map((observation) => <div className="research-row" key={observation.id}><div><strong>{observation.summary}</strong><small>{observation.class} · {observation.access || 'effect unknown'}{observation.access_size ? ` ${observation.access_size} byte` : ''}</small></div><StatusBadge value={observation.security_relevant ? 'evidence' : 'non-security'} /></div>)}
                 {findings.map((finding) => <div className="research-row finding-row" key={finding.id}><div><strong>{finding.title}</strong><small>{finding.cwe || 'CWE pending'} · disclosure {finding.disclosure_status || 'not started'}</small></div><StatusBadge value={finding.label} /></div>)}
                 {groups.length === 0 && findings.length === 0 && <Empty text="No machine-parsed crash groups or promoted findings." />}
+              </Panel>
+              <Panel title="Primitive evidence matrix" icon="bi-grid-3x3-gap" wide>
+                {primitives.length === 0 ? <Empty text="No primitive assessment yet; all exploitability dimensions remain unknown." /> : primitives.map((primitive) => (
+                  <div className="primitive-matrix" key={primitive.id}>
+                    <strong>{primitive.operation}</strong>
+                    {Object.entries(primitive).filter(([key]) => !['id', 'operation'].includes(key)).map(([key, value]) => {
+                      const evidence = value as { known?: boolean; value?: string; evidence_ids?: string[] };
+                      return <div key={key}><small>{key.replaceAll('_', ' ')}</small><span>{evidence.known ? evidence.value : 'unknown'}</span><code>{evidence.evidence_ids?.length ?? 0} evidence</code></div>;
+                    })}
+                  </div>
+                ))}
               </Panel>
               <Panel title="Evidence artifacts" icon="bi-shield-lock">
                 {artifacts.length === 0 ? <Empty text="No retained artifacts." /> : artifacts.slice(0, 20).map((artifact) => (

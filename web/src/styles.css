@@ -91,6 +91,12 @@ body {
 .approval-row { flex-wrap: wrap; }
 .approval-actions { flex: 0 0 100%; display: flex; justify-content: flex-end; gap: 0.4rem; }
 .timeline-row code { color: #8a94a5; font-size: 0.68rem; }
+.primitive-matrix { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.65rem; padding: 0.4rem 0; }
+.primitive-matrix > strong { grid-column: 1 / -1; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.76rem; }
+.primitive-matrix > div { border: 1px solid #edf0f3; border-radius: 0.5rem; padding: 0.65rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.primitive-matrix small { color: #8a94a5; text-transform: capitalize; }
+.primitive-matrix span { font-weight: 600; color: #344054; }
+.primitive-matrix code { color: #8a94a5; font-size: 0.68rem; }
 .timeline-dot { width: 8px; height: 8px; border-radius: 50%; background: #98a2b3; flex: 0 0 auto; }
 .timeline-dot.allowed { background: #24a27d; }
 .timeline-dot.denied { background: #d9534f; }

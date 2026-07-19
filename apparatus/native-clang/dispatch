@@ -112,14 +112,14 @@ case "$operation" in
         ;;
     reproduce)
         test -x "$binary"
-        test -f /source/reproducer
-        LLVM_PROFILE_FILE=/tmp/reproduce.profraw "$binary" -runs=3 /source/reproducer
+        test -f /evidence/reproducer
+        LLVM_PROFILE_FILE=/tmp/reproduce.profraw "$binary" -runs=3 /evidence/reproducer
         ;;
     minimize)
         test -x "$binary"
-        test -f /source/reproducer
+        test -f /evidence/reproducer
         LLVM_PROFILE_FILE=/tmp/minimize.profraw "$binary" \
-            -minimize_crash=1 -exact_artifact_path=/out/minimized /source/reproducer
+            -minimize_crash=1 -exact_artifact_path=/out/minimized /evidence/reproducer
         chmod 0644 /out/minimized
         ;;
     merge_corpus)
@@ -137,15 +137,15 @@ case "$operation" in
         ;;
     symbolize)
         test -x "$binary"
-        test -f /source/addresses.txt
-        llvm-symbolizer --obj="$binary" < /source/addresses.txt > /out/symbolized.txt
+        test -f /evidence/addresses.txt
+        llvm-symbolizer --obj="$binary" < /evidence/addresses.txt > /out/symbolized.txt
         chmod 0444 /out/symbolized.txt
         ;;
     compare_revision)
         test -x "$binary"
-        test -f /source/reproducer
+        test -f /evidence/reproducer
         set +e
-        LLVM_PROFILE_FILE=/tmp/compare.profraw "$binary" -runs=3 /source/reproducer > /out/comparison.log 2>&1
+        LLVM_PROFILE_FILE=/tmp/compare.profraw "$binary" -runs=3 /evidence/reproducer > /out/comparison.log 2>&1
         comparison_exit="$?"
         set -e
         jq -n --arg revision "$revision" --argjson exit_code "$comparison_exit" \

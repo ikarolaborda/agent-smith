@@ -33,6 +33,7 @@ export function App() {
   const [transientError, setTransientError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 	const [view, setView] = useState<'chat' | 'research'>('chat');
+	const [researchEnabled, setResearchEnabled] = useState(false);
 	const [authRequired, setAuthRequired] = useState(false);
 	const [authDraft, setAuthDraft] = useState('');
 	const [authEpoch, setAuthEpoch] = useState(0);
@@ -111,6 +112,21 @@ export function App() {
         setModels(chatOnly);
 		setDefaultProvider(pBody.default ?? '');
 		setAuthRequired(false);
+		/*
+			Research availability is a server capability. Gate the Research tab (and
+			its polling) on it so a build running without --research-mode never hits
+			the /v1/research endpoints that would 404. Best-effort: any failure leaves
+			research disabled rather than surfacing an error.
+		*/
+		try {
+			const sRes = await authenticatedFetch('/v1/system');
+			if (!cancelled && sRes.ok) {
+				const sBody = await sRes.json();
+				setResearchEnabled(!!sBody?.capabilities?.research_persistence);
+			}
+		} catch {
+			/* research stays disabled */
+		}
       } catch {
         if (!cancelled) setTransientError('Failed to load models from /v1/models');
       }
@@ -394,7 +410,9 @@ export function App() {
 		  <div className="title">{view === 'research' ? 'Research control plane' : (active?.title ?? 'agent-smith')}</div>
 		  <div className="view-switch" role="group" aria-label="Application view">
 			<button type="button" className={view === 'chat' ? 'active' : ''} onClick={() => setView('chat')}><i className="bi bi-chat-dots" /> Chat</button>
-			<button type="button" className={view === 'research' ? 'active' : ''} onClick={() => setView('research')}><i className="bi bi-shield-check" /> Research</button>
+			{researchEnabled && (
+				<button type="button" className={view === 'research' ? 'active' : ''} onClick={() => setView('research')}><i className="bi bi-shield-check" /> Research</button>
+			)}
 		  </div>
 		  {view === 'chat' && <>
           <ProviderSelector
@@ -443,7 +461,7 @@ export function App() {
             {transientError}
           </div>
         )}
-		{view === 'research' ? (
+		{view === 'research' && researchEnabled ? (
 		  <ResearchDashboard onUnauthorized={() => setAuthRequired(true)} onError={setTransientError} />
 		) : <>
 		<div
