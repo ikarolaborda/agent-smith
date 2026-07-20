@@ -172,23 +172,37 @@ func insideAnyRoot(path string, roots []string) bool {
 	if err != nil {
 		return false
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = real
-	}
+	abs = resolveSymlinks(abs)
 	for _, root := range roots {
 		r, err := filepath.Abs(root)
 		if err != nil {
 			continue
 		}
-		if real, err := filepath.EvalSymlinks(r); err == nil {
-			r = real
-		}
+		r = resolveSymlinks(r)
 		rel, err := filepath.Rel(r, abs)
 		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
 			return true
 		}
 	}
 	return false
+}
+
+// resolveSymlinks normalizes symlinks in path even when the leaf does not yet
+// exist. filepath.EvalSymlinks fails outright on a missing path, which would
+// leave a not-yet-created workspace directory unnormalized while its existing
+// root resolves fully — on platforms that symlink temp roots (e.g. macOS
+// /var -> /private/var) the two sides then diverge and a legitimately contained
+// path is wrongly judged an escape. Resolving the deepest existing ancestor and
+// re-appending the remainder keeps both sides comparable.
+func resolveSymlinks(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return path
+	}
+	return filepath.Join(resolveSymlinks(parent), filepath.Base(path))
 }
 
 func hostAllowed(host string, allowed []string) bool {
