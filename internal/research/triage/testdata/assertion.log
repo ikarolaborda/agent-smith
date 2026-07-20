@@ -1,0 +1,4 @@
+apparatus: /apparatus/src/target.cc:50: void parse(const unsigned char*, unsigned long): Assertion `len > 0' failed.
+    #0 0x7f0000000000 in __GI_abort /build/glibc/stdlib/abort.c:79:7
+    #1 0x7f0000000001 in __assert_fail /build/glibc/assert/assert.c:101:3
+    #2 0x4f1233 in LLVMFuzzerTestOneInput /apparatus/src/target.cc:50:5

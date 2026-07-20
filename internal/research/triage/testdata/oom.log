@@ -1,0 +1,5 @@
+==12345== ERROR: libFuzzer: out-of-memory (used: 2048Mb; limit: 2048Mb)
+   To change the out-of-memory limit use -rss_limit_mb=<N>
+    #0 0x4f1233 in LLVMFuzzerTestOneInput /apparatus/src/target.cc:25:11
+SUMMARY: libFuzzer: out-of-memory
+==12345==ABORTING

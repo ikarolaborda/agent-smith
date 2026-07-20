@@ -1,0 +1,4 @@
+/apparatus/src/target.cc:42:9: runtime error: shift exponent 64 is too large for 32-bit type 'unsigned int'
+    #0 0x4f1233 in LLVMFuzzerTestOneInput /apparatus/src/target.cc:42:9
+    #1 0x4f0abc in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) /src/libfuzzer/FuzzerLoop.cpp:611:15
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /apparatus/src/target.cc:42:9 in LLVMFuzzerTestOneInput

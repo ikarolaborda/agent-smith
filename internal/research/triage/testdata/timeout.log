@@ -1,0 +1,5 @@
+==12345== ERROR: libFuzzer: timeout after 60 seconds
+    #0 0x4f1233 in LLVMFuzzerTestOneInput /apparatus/src/target.cc:30:3
+    #1 0x4f0abc in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) /src/libfuzzer/FuzzerLoop.cpp:611:15
+SUMMARY: libFuzzer: timeout
+==12345==ABORTING

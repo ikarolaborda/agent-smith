@@ -1,0 +1,10 @@
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000051 at pc 0x0000004f1233 bp 0x7ffd12345678 sp 0x7ffd12345670
+WRITE of size 1 at 0x602000000051 thread T0
+    #0 0x4f1232 in LLVMFuzzerTestOneInput /apparatus/src/target.cc:20:5
+    #1 0x4f0abc in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) /src/libfuzzer/FuzzerLoop.cpp:611:15
+    #2 0x7f0000000000 in __libc_start_main /build/glibc/csu/libc-start.c:308:16
+0x602000000051 is located 1 bytes to the right of 16-byte region [0x602000000040,0x602000000050)
+allocated by thread T0 here:
+    #0 0x4c9abc in operator new(unsigned long) /src/asan/asan_new_delete.cpp:95:3
+SUMMARY: AddressSanitizer: heap-buffer-overflow /apparatus/src/target.cc:20:5 in LLVMFuzzerTestOneInput
+==12345==ABORTING

@@ -1,0 +1,8 @@
+==12345==WARNING: MemorySanitizer: use-of-uninitialized-value
+    #0 0x4f1233 in LLVMFuzzerTestOneInput /apparatus/src/target.cc:15:7
+    #1 0x4f0abc in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) /src/libfuzzer/FuzzerLoop.cpp:611:15
+    #2 0x7f0000000000 in __libc_start_main /build/glibc/csu/libc-start.c:308:16
+  uninitialized value was created by an allocation of 'buf' in the stack frame
+    #0 0x4f10aa in LLVMFuzzerTestOneInput /apparatus/src/target.cc:12:9
+SUMMARY: MemorySanitizer: use-of-uninitialized-value /apparatus/src/target.cc:15:7 in LLVMFuzzerTestOneInput
+==12345==ABORTING
