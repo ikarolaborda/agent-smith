@@ -97,6 +97,14 @@ func openStore(ctx context.Context, cfg Config, verifyOnly bool) (*Store, error)
 			}
 		}
 	}
+	// Normalize the artifact root through any symlinks now that it exists, so
+	// the storage-root escape check compares like against like. Without this,
+	// platforms that symlink temp roots (e.g. macOS /var -> /private/var) make
+	// EvalSymlinks-resolved artifact paths diverge from the stored root and the
+	// store rejects its own artifacts as escaped.
+	if resolvedArtifactRoot, err := filepath.EvalSymlinks(artifactRoot); err == nil {
+		artifactRoot = resolvedArtifactRoot
+	}
 	instanceLock, err := acquireStoreFileLock(filepath.Join(root, ".custody.lock"))
 	if err != nil {
 		return nil, err
