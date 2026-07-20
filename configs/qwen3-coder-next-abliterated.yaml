@@ -1,0 +1,55 @@
+# Research-focused local configuration for Agent Smith's self-managed llama.cpp
+# provider. The model is Huihui's abliterated Qwen3-Coder-Next (80B total,
+# approximately 3B active per token), using an imatrix Q5_K_M GGUF. Q5_K_M is
+# the balanced profile for the 128 GB RAM / 16 GB RX 7800 XT target: it preserves
+# more quality than Q4 while retaining headroom for a 32K context, RAG, runner
+# coordination, and the operating system.
+#
+# Agent Smith resolves `main` to an immutable Hugging Face commit, validates the
+# complete split-GGUF set, performs live RAM/VRAM/disk admission before download,
+# verifies every artifact by size and SHA-256, and repeats the fit check before
+# starting llama-server.
+#
+# Inspect without downloading:
+#   ./bin/agent --config configs/qwen3-coder-next-abliterated.yaml \
+#     --inspect-model hf.co/mradermacher/Huihui-Qwen3-Coder-Next-abliterated-i1-GGUF:Q5_K_M
+#
+# Download after a passing inspection:
+#   ./bin/agent --config configs/qwen3-coder-next-abliterated.yaml \
+#     --pull hf.co/mradermacher/Huihui-Qwen3-Coder-Next-abliterated-i1-GGUF:Q5_K_M
+#
+# Serve after the verified download:
+#   ./bin/agent --serve --config configs/qwen3-coder-next-abliterated.yaml
+
+default_provider: llamacpp
+
+agent:
+  system_prompt: "You are a senior software engineer and authorized cybersecurity researcher. Produce concise, evidence-grounded analysis and correct, idiomatic code."
+  max_iterations: 10
+  temperature: 0.1
+  agentic: true
+
+providers:
+  llamacpp:
+    model: qwen3-coder-next-abliterated-q5-k-m
+    llama_cpp:
+      repo: mradermacher/Huihui-Qwen3-Coder-Next-abliterated-i1-GGUF
+      # Selecting by quant lets the downloader resolve and verify every shard in
+      # the Q5_K_M artifact set. A mutable revision is resolved and pinned to its
+      # immutable commit before any artifact body is downloaded.
+      quant: Q5_K_M
+      revision: main
+      hf_token: ${HF_TOKEN}
+      binary: llama-server
+      # Leave gpu_layers unset: live GPU/VRAM detection chooses the safe partial
+      # ROCm/Vulkan offload. Pin context because the conservative automatic
+      # partial-offload profile otherwise starts at 4096 tokens; the additional
+      # KV cache is admitted against the host's live 128 GB RAM budget.
+      ctx_size: 32768
+      parallel: 1
+      jinja: true
+      startup_timeout_seconds: 900
+
+logging:
+  level: info
+  format: text
