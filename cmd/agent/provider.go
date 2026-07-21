@@ -203,6 +203,10 @@ func applyLlamaAutoTune(ctx context.Context, lc *config.LlamaCppConfig, rc *llam
 			rc.Downloader.ContextTokens = rc.CtxSize
 		}
 	}
+	if lc.CtxSize > 0 && rec.NativeCtx > 0 && lc.CtxSize > rec.NativeCtx {
+		logger.Warn("llamacpp: pinned ctx_size exceeds the model's native context; explicit config wins, but attention beyond the trained window needs rope scaling or degrades quality",
+			"ctx_size", lc.CtxSize, "native_ctx", rec.NativeCtx)
+	}
 	logger.Info("llamacpp: auto-tuned for detected hardware",
 		"gpu_layers", rec.GPULayers, "ctx_size", rc.CtxSize, "backend", rec.Backend,
 		"kv_cache_type", rc.KVCacheType, "operator_ctx", lc.CtxSize != 0,
@@ -303,7 +307,8 @@ func autoTuneLlama(ctx context.Context, lc *config.LlamaCppConfig, rc llamacpp.R
 		if err != nil {
 			return llamacpp.Recommendation{}, false
 		}
-		return llamacpp.RecommendRuntime(plan.Host, plan.Manifest.ModelBytes(), plan.Manifest.MMProjBytes(), lc.CtxSize), true
+		native := llamacpp.NativeContextFromPlan(plan)
+		return llamacpp.RecommendRuntime(plan.Host, plan.Manifest.ModelBytes(), plan.Manifest.MMProjBytes(), lc.CtxSize, native), true
 	}
 	if lc.ModelPath != "" {
 		host, err := llamacpp.SystemProfiler{}.Profile(ctx, filepath.Dir(lc.ModelPath))
@@ -314,7 +319,8 @@ func autoTuneLlama(ctx context.Context, lc *config.LlamaCppConfig, rc llamacpp.R
 		if modelBytes == 0 {
 			return llamacpp.Recommendation{}, false
 		}
-		return llamacpp.RecommendRuntime(host, modelBytes, statSize(lc.MMProjPath), lc.CtxSize), true
+		native, _ := llamacpp.ReadGGUFContextLength(lc.ModelPath)
+		return llamacpp.RecommendRuntime(host, modelBytes, statSize(lc.MMProjPath), lc.CtxSize, native), true
 	}
 	return llamacpp.Recommendation{}, false
 }

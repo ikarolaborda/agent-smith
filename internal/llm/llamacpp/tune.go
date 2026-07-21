@@ -16,7 +16,13 @@ type Recommendation struct {
 	Backend     GPUBackend  `json:"backend"`
 	FullGPU     bool        `json:"full_gpu_offload"`
 	KVCacheType KVCacheType `json:"kv_cache_type,omitempty"`
-	Rationale   []string    `json:"rationale"`
+	/*
+		NativeCtx echoes the model's trained context length when it was known to
+		the tuner (0 = unknown), so callers can warn when an operator pin exceeds
+		what the model was trained for.
+	*/
+	NativeCtx int      `json:"native_ctx,omitempty"`
+	Rationale []string `json:"rationale"`
 }
 
 /*
@@ -26,7 +32,39 @@ fullOffloadLayers is the sentinel "offload every layer" value. llama.cpp clamps
 const fullOffloadLayers = 99
 
 /* ctxLadder is the set of context sizes the tuner will pick from, largest-first. */
-var ctxLadder = []int{32768, 16384, 8192, 4096, 2048}
+var ctxLadder = []int{131072, 65536, 32768, 16384, 8192, 4096, 2048}
+
+/*
+fallbackCtxCeiling caps auto-tuning when the model's native context length is
+unknown. It preserves the pre-dynamic-ctx behavior exactly: without evidence
+that the model was trained beyond 32k, recommending more would risk serving a
+window the model cannot actually attend over.
+*/
+const fallbackCtxCeiling = 32768
+
+/*
+effectiveCtxCeiling resolves the context ceiling the ladder search may reach
+and names the binding constraint for the rationale. Precedence: an explicit
+operator cap always wins when it is the smallest; a known native context caps
+the taller ladder; an unknown native context falls back to the conservative
+pre-dynamic ceiling instead of the full ladder.
+*/
+func effectiveCtxCeiling(operatorMax, nativeCtx int) (int, string) {
+	ceiling := ctxLadder[0]
+	constraint := "resource budget"
+	if nativeCtx <= 0 {
+		ceiling = fallbackCtxCeiling
+		constraint = "unknown native context, conservative cap"
+	} else if nativeCtx < ceiling {
+		ceiling = nativeCtx
+		constraint = "model native context"
+	}
+	if operatorMax > 0 && operatorMax < ceiling {
+		ceiling = operatorMax
+		constraint = "operator context cap"
+	}
+	return ceiling, constraint
+}
 
 /*
 kvTypeLadder is tried least-aggressive first so full-precision KV is preferred;
@@ -36,9 +74,12 @@ all existing hosts on their current behavior.
 */
 var kvTypeLadder = []KVCacheType{KVCacheF16, KVCacheQ8_0, KVCacheQ4_0}
 
-/* minRecommendedCtx is the floor the tuner will not drop below; a config that
+/*
+	minRecommendedCtx is the floor the tuner will not drop below; a config that
+
 cannot reach it is left for the fit gate to refuse with a clear reason rather
-than silently served at an unusably small context. */
+than silently served at an unusably small context.
+*/
 const minRecommendedCtx = 2048
 
 /*
@@ -68,11 +109,12 @@ func fitCtxAndKV(budget, base uint64, ceiling int, policy FitPolicy) (int, KVCac
 /*
 RecommendRuntime picks GPU layers and context size for a model on this host.
 modelBytes+mmprojBytes are the on-disk artifact sizes; maxCtx caps the context
-(0 = use the tuner's own ceiling). It never returns a config it believes cannot
-launch — the fit gate is the final authority, but the recommendation aims to
-already satisfy it.
+(0 = no operator cap); nativeCtx is the model's trained context length when
+known (0 = unknown, which keeps the conservative pre-dynamic ceiling). It never
+returns a config it believes cannot launch — the fit gate is the final
+authority, but the recommendation aims to already satisfy it.
 */
-func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx int) Recommendation {
+func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx, nativeCtx int) Recommendation {
 	/*
 		Never speculate on missing evidence: with an unknown model size or host
 		memory, fall back to a conservative CPU profile rather than an aggressive
@@ -93,12 +135,10 @@ func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx i
 	weights := artifacts + artifacts/100*15 // +15% mapping/runtime overhead
 	scratch := max(policy.MinimumScratchBytes, artifacts/10)
 
-	ceiling := 32768
-	if maxCtx > 0 && maxCtx < ceiling {
-		ceiling = maxCtx
-	}
+	ceiling, ctxConstraint := effectiveCtxCeiling(maxCtx, nativeCtx)
 
-	rec := Recommendation{Backend: host.GPU.Backend, Rationale: []string{}}
+	rec := Recommendation{Backend: host.GPU.Backend, NativeCtx: nativeCtx, Rationale: []string{}}
+	rec.Rationale = append(rec.Rationale, fmt.Sprintf("context ceiling %d (%s)", ceiling, ctxConstraint))
 
 	kvAt := func(ctx int) uint64 { return uint64(ctx) * policy.KVBytesPerToken }
 

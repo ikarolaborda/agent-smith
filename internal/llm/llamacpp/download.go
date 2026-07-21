@@ -90,6 +90,12 @@ type Manifest struct {
 	Quant             string     `json:"quant,omitempty"`
 	ModelArtifacts    []Artifact `json:"model_artifacts"`
 	MMProjArtifact    *Artifact  `json:"mmproj_artifact,omitempty"`
+	/*
+		ContextLength is the model's native context length as reported by the
+		Hugging Face gguf metadata (0 = unknown). Advisory pre-download hint for
+		the context ceiling only — never part of admission or verification.
+	*/
+	ContextLength int `json:"context_length,omitempty"`
 }
 
 // Artifacts returns a defensive copy in download order (model shards first).
@@ -245,6 +251,17 @@ type hfSibling struct {
 type hfModelInfo struct {
 	SHA      string      `json:"sha"`
 	Siblings []hfSibling `json:"siblings"`
+	/*
+		GGUF is Hugging Face's server-side parse of the repo's GGUF metadata.
+		ContextLength is an advisory pre-download hint for the tuner's context
+		ceiling; the committed local file remains authoritative once present.
+	*/
+	GGUF *hfGGUFInfo `json:"gguf"`
+}
+
+type hfGGUFInfo struct {
+	Architecture  string `json:"architecture"`
+	ContextLength uint64 `json:"context_length"`
 }
 
 // Resolve preserves the original API and returns the primary model filename.
@@ -305,6 +322,9 @@ func (d *Downloader) ResolveManifest(ctx context.Context, ref Ref) (Manifest, er
 		RequestedRevision: revision,
 		CommitSHA:         strings.ToLower(info.SHA),
 		Quant:             manifestQuant(ref),
+	}
+	if info.GGUF != nil && info.GGUF.ContextLength > 0 {
+		manifest.ContextLength = clampCtx(info.GGUF.ContextLength)
 	}
 	for _, s := range models {
 		a, err := d.manifestArtifact(ref.Repo, manifest.CommitSHA, s, ArtifactModel)

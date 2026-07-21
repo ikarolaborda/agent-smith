@@ -68,7 +68,7 @@ args, AND be the same type the fit gate reserves against — locking the whole
 tune -> config -> validate -> args / estimate chain against divergence. */
 func TestKVTypeSurvivesRecommendationToLaunch(t *testing.T) {
 	host := HostProfile{OS: "t", Arch: "t", TotalMemoryBytes: gb(16), AvailableMemoryBytes: gb(7) + byteGiB/10*3, FreeDiskBytes: gb(100)}
-	rec := RecommendRuntime(host, gb(4), 0, 0)
+	rec := RecommendRuntime(host, gb(4), 0, 0, 0)
 	if rec.KVCacheType == "" || rec.KVCacheType == KVCacheF16 {
 		t.Fatalf("expected a quantized recommendation for this tight host, got %q", rec.KVCacheType)
 	}
@@ -122,7 +122,7 @@ func TestEmptyKVTypeEqualsF16(t *testing.T) {
 /* Stage 3: the tuner keeps full-precision KV when RAM is ample (quality-first). */
 func TestRecommendKeepsF16WhenAmple(t *testing.T) {
 	host := HostProfile{OS: "t", Arch: "t", TotalMemoryBytes: gb(64), AvailableMemoryBytes: gb(48), FreeDiskBytes: gb(100)}
-	rec := RecommendRuntime(host, gb(4), 0, 0)
+	rec := RecommendRuntime(host, gb(4), 0, 0, 0)
 	if rec.KVCacheType != KVCacheF16 {
 		t.Fatalf("ample RAM should keep f16 KV, got %q", rec.KVCacheType)
 	}
@@ -137,7 +137,7 @@ func TestRecommendQuantizesKVToFit(t *testing.T) {
 	/* base = weights(4 GiB +15%) + scratch(1 GiB) = 5.6 GiB; budget 6.3 GiB sits
 	   between base+q8_0@2048 (6.16) and base+f16@2048 (6.6). */
 	host := HostProfile{OS: "t", Arch: "t", TotalMemoryBytes: gb(16), AvailableMemoryBytes: gb(7) + byteGiB/10*3, FreeDiskBytes: gb(100)}
-	rec := RecommendRuntime(host, gb(4), 0, 0)
+	rec := RecommendRuntime(host, gb(4), 0, 0, 0)
 	if rec.KVCacheType != KVCacheQ8_0 {
 		t.Fatalf("tight RAM should quantize KV to q8_0 to fit, got %q (ctx=%d)", rec.KVCacheType, rec.CtxSize)
 	}

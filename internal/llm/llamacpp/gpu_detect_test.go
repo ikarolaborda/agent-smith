@@ -200,7 +200,7 @@ func TestAutoTuneToArgs_DiscreteGPUFullOffload(t *testing.T) {
 		FreeDiskBytes:        8000 * gib,
 		GPU:                  GPUInfo{Vendor: "amd", Name: "Radeon RX 7800 XT", VRAMBytes: 16 * gib, Backend: GPUBackendROCm},
 	}
-	rec := RecommendRuntime(host, 5_800_000_000, 900_000_000, 0)
+	rec := RecommendRuntime(host, 5_800_000_000, 900_000_000, 0, 0)
 
 	rt := NewRuntime(RuntimeConfig{
 		Binary:    "llama-server",

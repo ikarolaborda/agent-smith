@@ -48,7 +48,7 @@ func TestRecommendRuntime_RX7800XT(t *testing.T) {
 		FreeDiskBytes:        8000 * gib,
 		GPU:                  GPUInfo{Vendor: "amd", Name: "Radeon RX 7800 XT", VRAMBytes: 16 * gib, Backend: GPUBackendROCm},
 	}
-	rec := RecommendRuntime(host, 5_800_000_000, 900_000_000, 0)
+	rec := RecommendRuntime(host, 5_800_000_000, 900_000_000, 0, 0)
 	if !rec.FullGPU || rec.GPULayers != fullOffloadLayers {
 		t.Fatalf("expected full GPU offload, got layers=%d full=%v: %v", rec.GPULayers, rec.FullGPU, rec.Rationale)
 	}
@@ -65,7 +65,7 @@ func TestRecommendRuntime_SmallVRAMPartialOffload(t *testing.T) {
 		OS: "linux", TotalMemoryBytes: 32 * gib, AvailableMemoryBytes: 28 * gib, FreeDiskBytes: 500 * gib,
 		GPU: GPUInfo{Vendor: "nvidia", VRAMBytes: 4 * gib, Backend: GPUBackendCUDA},
 	}
-	rec := RecommendRuntime(host, 12_000_000_000, 0, 0) // 12 GB model, 4 GB VRAM
+	rec := RecommendRuntime(host, 12_000_000_000, 0, 0, 0) // 12 GB model, 4 GB VRAM
 	if rec.FullGPU {
 		t.Fatalf("12GB model must not fully offload to 4GB VRAM: %v", rec.Rationale)
 	}
@@ -79,7 +79,7 @@ func TestRecommendRuntime_CPUOnly(t *testing.T) {
 		OS: "linux", TotalMemoryBytes: 32 * gib, AvailableMemoryBytes: 24 * gib, FreeDiskBytes: 500 * gib,
 		GPU: GPUInfo{Backend: GPUBackendNone},
 	}
-	rec := RecommendRuntime(host, 5_000_000_000, 0, 0)
+	rec := RecommendRuntime(host, 5_000_000_000, 0, 0, 0)
 	if rec.GPULayers != 0 || rec.Backend != GPUBackendNone {
 		t.Fatalf("no GPU must recommend CPU (ngl 0), got layers=%d backend=%s", rec.GPULayers, rec.Backend)
 	}
@@ -90,7 +90,7 @@ func TestRecommendRuntime_CPUOnly(t *testing.T) {
 
 func TestRecommendRuntime_NoInfoIsConservative(t *testing.T) {
 	host := HostProfile{OS: "linux", TotalMemoryBytes: 0, AvailableMemoryBytes: 0}
-	rec := RecommendRuntime(host, 0, 0, 0)
+	rec := RecommendRuntime(host, 0, 0, 0, 0)
 	if rec.GPULayers != 0 || rec.Backend != GPUBackendNone {
 		t.Fatalf("unknown host/model must not auto-offload, got layers=%d backend=%s", rec.GPULayers, rec.Backend)
 	}
