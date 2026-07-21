@@ -404,6 +404,14 @@ func New(opts Options) (*Server, error) {
 		if cfg, ok := opts.Config.Providers[name]; ok {
 			model = cfg.Model
 		}
+		/*
+			A self-managing provider knows which model it actually launched; the
+			config label goes stale when the fit gate auto-picked a substitute, so
+			the provider's own report wins.
+		*/
+		if mp, ok := prov.(interface{ Model() string }); ok && mp.Model() != "" {
+			model = mp.Model()
+		}
 		s.models = append(s.models, modelEntry{
 			ID:             name + "/" + model,
 			Object:         "model",

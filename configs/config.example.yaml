@@ -44,6 +44,11 @@ providers:
       quant: Q4_K_M  # consistency assertion: must match the pinned file
       # Mutable names are resolved to an immutable commit before artifact GETs.
       revision: main
+      # When this repo model fails the memory fit gate, substitute the largest
+      # abliterated catalog model (code-optimized preferred) that fits this
+      # host instead of refusing to start. `make serve` also enables this via
+      # the --auto-pick-model flag (disable per run with AUTO_MODEL=0).
+      # auto_pick_model: true
       # Or skip the download and serve an existing local file instead:
       # model_path: /path/to/model.gguf
       # Where downloaded weights are stored (default: ~/.agent-smith/models).

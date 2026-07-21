@@ -125,6 +125,14 @@ func New(cfg Config) (*Provider, error) {
 /* Name reports the provider identifier used by the registry. */
 func (p *Provider) Name() string { return providerName }
 
+/*
+Model reports the model name actually being served. Callers that label models
+from static config should prefer this: after an auto-pick substitution the
+configured name and the served model differ, and advertising the configured
+one would misreport what is answering.
+*/
+func (p *Provider) Model() string { return p.model }
+
 // SupportsVision reports whether the supervised runtime was launched with a
 // validated multimodal projector.
 func (p *Provider) SupportsVision() bool { return p.rt.SupportsVision() }

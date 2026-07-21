@@ -65,6 +65,15 @@ type LlamaCppConfig struct {
 	Jinja                 bool     `yaml:"jinja"`
 	ExtraArgs             []string `yaml:"extra_args"`
 	StartupTimeoutSeconds int      `yaml:"startup_timeout_seconds"`
+	/*
+		AutoPickModel substitutes the largest abliterated catalog model
+		(code-optimized preferred) that fits this host when the configured Repo
+		fails the memory fit gate, instead of refusing to start. Only applies to
+		Repo-sourced models: an explicit ModelPath always fails strictly, because
+		silently serving different weights than the file the operator pinned
+		would violate least surprise.
+	*/
+	AutoPickModel bool `yaml:"auto_pick_model"`
 }
 
 /* AgentConfig controls the agent loop's high-level behavior. */

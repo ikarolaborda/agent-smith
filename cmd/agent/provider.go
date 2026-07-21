@@ -85,7 +85,7 @@ func buildProvider(ctx context.Context, cfg *config.Config, f flags, logger *slo
 	case "ollama":
 		return llm.New(name, ollama.Config{BaseURL: pcfg.BaseURL, Model: pcfg.Model})
 	case "llamacpp":
-		return buildLlamaCppProvider(ctx, pcfg, logger)
+		return buildLlamaCppProvider(ctx, pcfg, f.autoPickModel, logger)
 	default:
 		return nil, fmt.Errorf("unknown provider %q (registered: %v)", name, llm.Names())
 	}
@@ -96,7 +96,7 @@ buildLlamaCppProvider downloads the model if needed, starts a local llama-server
 and returns a Provider that owns the subprocess. The returned provider exposes
 Close; callers must defer it so the server is stopped on exit.
 */
-func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logger *slog.Logger) (llm.Provider, error) {
+func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, autoPick bool, logger *slog.Logger) (llm.Provider, error) {
 	lc := pcfg.LlamaCpp
 	if lc == nil {
 		return nil, errors.New("llamacpp: provider selected but no llama_cpp config block")
@@ -154,35 +154,19 @@ func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logg
 		rc.Downloader.Parallel = rc.Parallel
 	}
 
-	/*
-		Auto-tune GPU layers whenever the operator has not pinned them: detect the
-		host (GPU/VRAM/RAM) and pick an offload profile that makes the most of it.
-		An explicit ctx_size is honored rather than overwritten — the tuner still
-		chooses the layer count for the detected VRAM, but the operator's larger
-		context wins so a system-prompt + RAG workload is not capped at the tuner's
-		conservative partial-offload default (the extra KV cache then spills to host
-		memory). Pinning gpu_layers disables auto-tuning entirely.
-	*/
-	if lc.GPULayers == 0 {
-		if rec, ok := autoTuneLlama(ctx, lc, rc); ok {
-			rc.GPULayers = rec.GPULayers
-			if lc.CtxSize == 0 {
-				rc.CtxSize = rec.CtxSize
-				rc.KVCacheType = rec.KVCacheType
-				if rc.Downloader != nil {
-					rc.Downloader.ContextTokens = rc.CtxSize
-				}
-			}
-			logger.Info("llamacpp: auto-tuned for detected hardware",
-				"gpu_layers", rec.GPULayers, "ctx_size", rc.CtxSize, "backend", rec.Backend,
-				"kv_cache_type", rc.KVCacheType, "operator_ctx", lc.CtxSize != 0,
-				"rationale", strings.Join(rec.Rationale, "; "))
-		}
-	}
+	applyLlamaAutoTune(ctx, lc, &rc, logger)
 
-	rt := llamacpp.NewRuntime(rc)
-	if err := rt.Start(ctx); err != nil {
+	rt, picked, err := startLlamaRuntime(ctx, lc, rc, autoPick || lc.AutoPickModel, logger)
+	if err != nil {
 		return nil, err
+	}
+	/*
+		Advertise the model actually being served: after a substitution, keeping
+		the configured display name would tell callers (and the web model picker)
+		they are talking to the big model while the auto-picked one answers.
+	*/
+	if picked != "" {
+		pcfg.Model = displayModelName(picked)
 	}
 	prov, err := llamacpp.New(llamacpp.Config{Runtime: rt, Model: pcfg.Model, APIKey: pcfg.APIKey})
 	if err != nil {
@@ -190,6 +174,120 @@ func buildLlamaCppProvider(ctx context.Context, pcfg config.ProviderConfig, logg
 		return nil, err
 	}
 	return prov, nil
+}
+
+/*
+applyLlamaAutoTune tunes GPU layers whenever the operator has not pinned them:
+detect the host (GPU/VRAM/RAM) and pick an offload profile that makes the most
+of it. An explicit ctx_size is honored rather than overwritten — the tuner
+still chooses the layer count for the detected VRAM, but the operator's larger
+context wins so a system-prompt + RAG workload is not capped at the tuner's
+conservative partial-offload default (the extra KV cache then spills to host
+memory). Pinning gpu_layers disables auto-tuning entirely. Re-run after an
+auto-pick substitution so ctx/KV are recomputed for the replacement model's
+sizes instead of inherited from the rejected one.
+*/
+func applyLlamaAutoTune(ctx context.Context, lc *config.LlamaCppConfig, rc *llamacpp.RuntimeConfig, logger *slog.Logger) {
+	if lc.GPULayers != 0 {
+		return
+	}
+	rec, ok := autoTuneLlama(ctx, lc, *rc)
+	if !ok {
+		return
+	}
+	rc.GPULayers = rec.GPULayers
+	if lc.CtxSize == 0 {
+		rc.CtxSize = rec.CtxSize
+		rc.KVCacheType = rec.KVCacheType
+		if rc.Downloader != nil {
+			rc.Downloader.ContextTokens = rc.CtxSize
+		}
+	}
+	logger.Info("llamacpp: auto-tuned for detected hardware",
+		"gpu_layers", rec.GPULayers, "ctx_size", rc.CtxSize, "backend", rec.Backend,
+		"kv_cache_type", rc.KVCacheType, "operator_ctx", lc.CtxSize != 0,
+		"rationale", strings.Join(rec.Rationale, "; "))
+}
+
+/*
+startLlamaRuntime starts the configured runtime and, when auto-pick is enabled,
+substitutes progressively smaller abliterated catalog models on fit refusal
+until one launches. Substitution is deliberately narrow: only repo-sourced
+models qualify (an operator-pinned model_path fails strictly), only a genuine
+*llamacpp.FitError triggers it (download, auth, or generic runtime failures
+surface unchanged), and the visited set bounds the loop — every retry must pick
+a new ref, and AutoPick only proposes strictly smaller candidates than the ref
+that just failed, so the walk is monotone and finite.
+*/
+func startLlamaRuntime(ctx context.Context, lc *config.LlamaCppConfig, rc llamacpp.RuntimeConfig, autoPick bool, logger *slog.Logger) (*llamacpp.Runtime, string, error) {
+	rt := llamacpp.NewRuntime(rc)
+	err := rt.Start(ctx)
+	if err == nil || !autoPick || rc.Ref == nil {
+		return rt, "", err
+	}
+
+	visited := map[string]bool{rc.Ref.Repo: true}
+	for {
+		var fitErr *llamacpp.FitError
+		if !errors.As(err, &fitErr) {
+			return nil, "", err
+		}
+		pick, ok := llamacpp.AutoPick(fitErr.Report, nil, llamacpp.DefaultFitPolicy())
+		if !ok {
+			return nil, "", fmt.Errorf("llamacpp: auto-pick found no abliterated catalog model that fits this host: %w", err)
+		}
+		ref, perr := llamacpp.ParseRef(pick.Model.Ref)
+		if perr != nil || visited[ref.Repo] {
+			return nil, "", err
+		}
+		visited[ref.Repo] = true
+		logger.Warn("llamacpp: configured model does not fit this host; auto-picking a smaller abliterated model",
+			"rejected", rc.Ref.Repo, "picked", pick.Model.Ref,
+			"params_b", pick.Model.ParamsB, "code_optimized", pick.Model.CodeOptimized,
+			"estimated_runtime_bytes", pick.EstimatedBytes, "reason", "fit_refusal",
+			"operator_ctx_dropped", lc.CtxSize != 0,
+			"disable_with", "--auto-pick-model=false / AUTO_MODEL=0")
+		/*
+			ParseRef yields a clean ref, dropping the File/Quant/MMProj pins that
+			belong to the rejected artifact; the downloader re-resolves the picked
+			repo's own artifacts and the fit gate re-validates against live memory.
+			The operator's ctx pin is dropped too: it was sized for the rejected
+			model (the example config pins 16384 precisely because that model is
+			large), and inheriting it would make every smaller candidate fail on
+			hosts where the KV reserve alone overflowed the budget. The tuner
+			re-derives ctx/KV for the replacement; a pinned gpu_layers still
+			disables tuning entirely, in which case the conservative default
+			context below is what the substituted model launches with.
+		*/
+		rc.Ref = &ref
+		rc.CtxSize = effectiveLlamaContext(nil)
+		rc.KVCacheType = ""
+		if rc.Downloader != nil {
+			rc.Downloader.ContextTokens = rc.CtxSize
+		}
+		tuneCfg := *lc
+		tuneCfg.CtxSize = 0
+		applyLlamaAutoTune(ctx, &tuneCfg, &rc, logger)
+		rt = llamacpp.NewRuntime(rc)
+		if err = rt.Start(ctx); err == nil {
+			logger.Info("llamacpp: auto-picked model launched", "model", pick.Model.Ref)
+			return rt, pick.Model.Ref, nil
+		}
+	}
+}
+
+/*
+displayModelName reduces a Hugging Face ref to the advertised model name:
+the repo's own name without the uploader prefix or the -GGUF packaging suffix,
+lowercased to match the naming style of the configured model labels.
+*/
+func displayModelName(ref string) string {
+	name := ref
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSuffix(name, "-GGUF")
+	return strings.ToLower(name)
 }
 
 /*

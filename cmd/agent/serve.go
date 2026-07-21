@@ -83,7 +83,7 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 	*/
 	var extra map[string]llm.Provider
 	if p, ok := serverCfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && f.clusterCfg == "" && serverCfg.DefaultProvider == "llamacpp" {
-		prov, err := buildLlamaCppProvider(ctx, p, logger)
+		prov, err := buildLlamaCppProvider(ctx, p, f.autoPickModel, logger)
 		if err != nil {
 			return fmt.Errorf("build llamacpp provider: %w", err)
 		}

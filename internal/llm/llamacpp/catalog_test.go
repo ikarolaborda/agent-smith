@@ -55,8 +55,8 @@ func TestFitRejectTinyHostSuggestsSmallestWithHonestNote(t *testing.T) {
 	if rep.Suggestion.Fits {
 		t.Fatal("expected Fits=false when even the smallest candidate does not fit")
 	}
-	if rep.Suggestion.Model.ParamsB != 1.7 {
-		t.Fatalf("expected the smallest candidate (1.7B) as best effort, got %.1fB", rep.Suggestion.Model.ParamsB)
+	if rep.Suggestion.Model.ParamsB != 1.5 {
+		t.Fatalf("expected the smallest candidate (1.5B coder) as best effort, got %.1fB", rep.Suggestion.Model.ParamsB)
 	}
 }
 
@@ -93,6 +93,121 @@ func TestSuggestFallbackPolicyOff(t *testing.T) {
 	}
 	if rep.Suggestion != nil {
 		t.Fatal("suggestion must be absent when the policy disables it")
+	}
+}
+
+func TestAutoPickPrefersCodeOptimizedOverLargerGeneralist(t *testing.T) {
+	/*
+		Budget seats both the 9B generalist (~6 GiB) and the 7B coder (~5 GiB).
+		Advisory suggestion picks purely by size (9B), but AutoPick must prefer
+		the code-optimized 7B even though it is smaller, because the pick is
+		launched for a coding workload with no human in the loop.
+	*/
+	host := hostWith(20, 12)
+	rep := EstimateFit(host, FitRequest{ModelBytes: 12 * byteGiB, ContextTokens: 4096})
+	if rep.Fits {
+		t.Fatal("expected reject")
+	}
+	pick, ok := AutoPick(rep, nil, DefaultFitPolicy())
+	if !ok {
+		t.Fatal("expected an auto-pick on a host that seats several candidates")
+	}
+	if !pick.Fits {
+		t.Fatal("AutoPick must never return a non-fitting candidate")
+	}
+	if !pick.Model.CodeOptimized {
+		t.Fatalf("expected a code-optimized pick, got %s", pick.Model.Ref)
+	}
+	if pick.Model.ParamsB != 7 {
+		t.Fatalf("expected the largest fitting coder (7B), got %.1fB (%s)", pick.Model.ParamsB, pick.Model.Ref)
+	}
+}
+
+func TestAutoPickFallsBackToGeneralistWhenNoCoderFits(t *testing.T) {
+	/*
+		A coder-free ladder slice: with only generalists strictly smaller than the
+		rejected model, AutoPick must still return the largest fitting one rather
+		than nothing — code preference is a ranking, not a hard filter.
+	*/
+	ladder := []AbliteratedModel{
+		{Ref: "x/general-9b", ParamsB: 9, ApproxBytes: 6 * byteGiB, Modality: ModalityText},
+		{Ref: "x/coder-huge", ParamsB: 20, ApproxBytes: 13 * byteGiB, Modality: ModalityText, CodeOptimized: true},
+	}
+	host := hostWith(20, 12)
+	rep := EstimateFit(host, FitRequest{ModelBytes: 12 * byteGiB, ContextTokens: 4096})
+	pick, ok := AutoPick(rep, ladder, DefaultFitPolicy())
+	if !ok {
+		t.Fatal("expected a generalist fallback pick")
+	}
+	if pick.Model.Ref != "x/general-9b" {
+		t.Fatalf("expected the fitting generalist, got %s", pick.Model.Ref)
+	}
+}
+
+func TestAutoPickRefusesWhenNothingFits(t *testing.T) {
+	/*
+		Unlike the advisory suggestion (which returns a best-effort Fits=false
+		candidate), AutoPick must return ok=false when no candidate passes the
+		gate: it must never hand the caller a model to LAUNCH that is already
+		known not to fit.
+	*/
+	host := hostWith(6, 1)
+	rep := EstimateFit(host, FitRequest{ModelBytes: 9 * byteGiB, ContextTokens: 4096})
+	if _, ok := AutoPick(rep, nil, DefaultFitPolicy()); ok {
+		t.Fatal("AutoPick must refuse when even the smallest candidate does not fit")
+	}
+}
+
+func TestAutoPickRespectsModality(t *testing.T) {
+	/* A vision rejection must not be answered by the text-only ladder. */
+	host := hostWith(16, 9)
+	rep := EstimateFit(host, FitRequest{ModelBytes: 9 * byteGiB, MMProjBytes: 1 * byteGiB, ContextTokens: 4096})
+	if _, ok := AutoPick(rep, nil, DefaultFitPolicy()); ok {
+		t.Fatal("text-only ladder must not answer a vision rejection")
+	}
+}
+
+func TestAutoPickSurvivesOperatorContextPinnedForTheRejectedModel(t *testing.T) {
+	/*
+		Regression for the motivating failure: a 24 GiB host with ~9 GiB available
+		rejects an ~18 GiB model at an operator-pinned ctx of 16384 (KV reserve
+		alone is 8 GiB). Judged at that inherited context nothing fits — but the
+		pin belonged to the rejected model and the tuner re-derives ctx for the
+		substitute, so AutoPick must judge candidates at the ctx floor and still
+		produce the largest fitting coder instead of giving up.
+	*/
+	host := hostWith(24, 9)
+	rep := EstimateFit(host, FitRequest{ModelBytes: 18 * byteGiB, ContextTokens: 16384})
+	if rep.Fits {
+		t.Fatal("expected reject")
+	}
+	pick, ok := AutoPick(rep, nil, DefaultFitPolicy())
+	if !ok {
+		t.Fatal("expected a pick despite the rejected model's oversized context pin")
+	}
+	if !pick.Model.CodeOptimized || pick.Model.ParamsB != 7 {
+		t.Fatalf("expected the 7B coder, got %.1fB (%s)", pick.Model.ParamsB, pick.Model.Ref)
+	}
+}
+
+func TestAutoPickOnlyProposesStrictlySmallerModels(t *testing.T) {
+	/*
+		The retry loop's termination proof rests on monotonicity: every pick is
+		strictly smaller than the ref that just failed, so exercise the boundary
+		where a same-size candidate exists and must be skipped.
+	*/
+	ladder := []AbliteratedModel{
+		{Ref: "x/same-size", ParamsB: 9, ApproxBytes: 9 * byteGiB, Modality: ModalityText, CodeOptimized: true},
+		{Ref: "x/smaller", ParamsB: 3, ApproxBytes: 2 * byteGiB, Modality: ModalityText, CodeOptimized: true},
+	}
+	host := hostWith(20, 12)
+	rep := EstimateFit(host, FitRequest{ModelBytes: 9 * byteGiB, ContextTokens: 4096})
+	pick, ok := AutoPick(rep, ladder, DefaultFitPolicy())
+	if !ok {
+		t.Fatal("expected the strictly smaller candidate to be picked")
+	}
+	if pick.Model.Ref != "x/smaller" {
+		t.Fatalf("a candidate the same size as the rejected model must be skipped, got %s", pick.Model.Ref)
 	}
 }
 

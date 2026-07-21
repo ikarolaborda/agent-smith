@@ -66,6 +66,7 @@ type flags struct {
 	pull                           string
 	inspectModel                   string
 	installRuntime                 bool
+	autoPickModel                  bool
 }
 
 /* parseFlags reads CLI flags. */
@@ -127,6 +128,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.pull, "pull", "", "download a GGUF model from Hugging Face and exit (e.g. hf.co/ggml-org/gemma-3-1b-it-GGUF:Q4_K_M). Uses the llamacpp provider's models_dir/hf_token when configured.")
 	flag.StringVar(&f.inspectModel, "inspect-model", "", "resolve a GGUF artifact manifest, inspect this host, print the fit report as JSON, and exit without downloading model data")
 	flag.BoolVar(&f.installRuntime, "install-runtime", false, "detect this host's OS/GPU, download the matching prebuilt llama.cpp llama-server (Vulkan by default), link it onto PATH, and exit. Bootstraps the llamacpp provider's runtime dependency.")
+	flag.BoolVar(&f.autoPickModel, "auto-pick-model", false, "when the configured llamacpp repo model fails the memory fit gate, automatically substitute the largest abliterated catalog model (code-optimized preferred) that fits this host and launch it instead of failing. Never replaces an explicit model_path. Also enabled by llama_cpp.auto_pick_model in the config.")
 	flag.Parse()
 	return f
 }
