@@ -637,7 +637,19 @@ func (s *Service) Augment(ctx context.Context, lastUserMessage, profileID string
 		return ""
 	}
 	maxChunks, maxBytes := s.groundingBudget()
-	docHits, err := s.Search(ctx, lastUserMessage, SearchOpts{K: maxChunks})
+	/*
+		Retrieval breadth is decoupled from injection count: when the budget is
+		small the candidate pool must stay wide, or a 1-chunk window would rank
+		over just two candidates and could seat a weaker top hit than a large
+		window sees. Rank a stable pool, then inject a byte-and-count-bounded
+		prefix of it. The static-default and operator-pinned paths keep their
+		exact prior breadth.
+	*/
+	searchK := maxChunks
+	if s.ContextTokens > 0 && !s.PinnedChunks {
+		searchK = groundingMaxChunks
+	}
+	docHits, err := s.Search(ctx, lastUserMessage, SearchOpts{K: searchK})
 	if err != nil {
 		s.Logger.Warn("rag: augment doc search failed", "err", err)
 	}
@@ -717,6 +729,9 @@ func (s *Service) Augment(ctx context.Context, lastUserMessage, profileID string
 		wrote := 0
 		perSection := map[string]int{}
 		for _, h := range docHits {
+			if wrote >= maxChunks {
+				break
+			}
 			key := h.Chunk.Source + "\x00" + h.Chunk.Heading
 			if perSection[key] >= 2 {
 				continue
