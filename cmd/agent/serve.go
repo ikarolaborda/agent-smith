@@ -91,6 +91,16 @@ func runServe(ctx context.Context, cfg *config.Config, f flags, logger *slog.Log
 			defer func() { _ = c.Close(context.Background()) }()
 		}
 		extra = map[string]llm.Provider{prov.Name(): prov}
+		/*
+			Tell the grounding layer the model's REAL window so the injection
+			budget scales with it: the tuner sizes the context dynamically, so
+			neither the config nor the RAG defaults know it.
+		*/
+		if ragSvc != nil {
+			if cw, ok := prov.(interface{ ContextWindow() int }); ok {
+				ragSvc.ContextTokens = cw.ContextWindow()
+			}
+		}
 	}
 
 	var researchMode *server.ResearchModeOptions

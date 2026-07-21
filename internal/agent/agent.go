@@ -503,6 +503,9 @@ func (a *Agent) composeFrom(ctx context.Context, msgs []llm.Message) []llm.Messa
 			leave retrieval to the model.
 		*/
 		agenticSection = prompt.AgenticRAGDirective
+		if a.RAG != nil {
+			agenticSection += a.RAG.GroundingHint()
+		}
 	} else if a.RAG != nil {
 		if q := latestUserMessage(msgs); q != "" {
 			aug = a.RAG.Augment(ctx, q, a.ProfileID, a.WebSearch)

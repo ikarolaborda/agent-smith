@@ -34,26 +34,26 @@ const (
 )
 
 type RuntimeConfig struct {
-	Binary         string
-	ModelPath      string
-	MMProjPath     string
-	Ref            *Ref
-	Downloader     *Downloader
-	Profiler       Profiler
-	FitPolicy      FitPolicy
-	Host           string
-	Port           int
-	CtxSize        int
-	Parallel       int
-	GPULayers      int
+	Binary     string
+	ModelPath  string
+	MMProjPath string
+	Ref        *Ref
+	Downloader *Downloader
+	Profiler   Profiler
+	FitPolicy  FitPolicy
+	Host       string
+	Port       int
+	CtxSize    int
+	Parallel   int
+	GPULayers  int
 	/*
 		KVCacheType quantizes the KV cache (--cache-type-k/-v) to shrink the runtime
 		footprint (Stage 3). Empty means the f16 default. It is threaded into the
 		preflight fit estimate so the gate reserves what the server will actually
 		allocate.
 	*/
-	KVCacheType KVCacheType
-	Jinja       bool
+	KVCacheType    KVCacheType
+	Jinja          bool
 	ExtraArgs      []string
 	StartupTimeout time.Duration
 	/* APIKey is optional; an ephemeral high-entropy key is generated when empty. */
@@ -875,6 +875,17 @@ func (r *Runtime) SupportsVision() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.vision
+}
+
+/*
+ContextTokens reports the context window this runtime launches llama-server
+with. NewRuntime already defaulted a zero config, so the value is always the
+real window; consumers that budget prompt content (compaction, RAG grounding)
+must prefer this over the static config, which stays unset when the tuner
+sizes the context dynamically.
+*/
+func (r *Runtime) ContextTokens() int {
+	return r.cfg.CtxSize
 }
 
 // Wait observes the sole process-reaper result without ever calling Cmd.Wait.

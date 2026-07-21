@@ -133,6 +133,13 @@ one would misreport what is answering.
 */
 func (p *Provider) Model() string { return p.model }
 
+/*
+ContextWindow reports the live context window of the supervised llama-server.
+Like Model, this is the runtime truth the static config no longer carries once
+the tuner sizes the context dynamically; budget consumers must prefer it.
+*/
+func (p *Provider) ContextWindow() int { return p.rt.ContextTokens() }
+
 // SupportsVision reports whether the supervised runtime was launched with a
 // validated multimodal projector.
 func (p *Provider) SupportsVision() bool { return p.rt.SupportsVision() }

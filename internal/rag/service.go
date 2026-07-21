@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ikarolaborda/agent-smith/internal/context7"
 	"github.com/ikarolaborda/agent-smith/internal/convomem"
@@ -95,6 +96,79 @@ type Service struct {
 	MaxBytes     int
 	Threshold    float32
 	StrictThresh float32
+	/*
+		ContextTokens is the live context window of the model this service
+		grounds (0 = unknown). When known, Augment scales its injection budget
+		proportionally instead of using the static defaults: a 2048-token host
+		must not receive the same 8KB block that once overflowed such windows,
+		and a 131072-token host should not be starved at 4 chunks. Zero keeps
+		the exact pre-dynamic behavior.
+	*/
+	ContextTokens int
+	/*
+		PinnedChunks marks MaxChunks/MaxBytes as an explicit operator override
+		(--rag-max-chunks): pins win outright and disable proportional scaling,
+		mirroring how a pinned ctx_size beats the tuner.
+	*/
+	PinnedChunks bool
+}
+
+/*
+Grounding-budget policy constants, centralized so tuning stays a constants
+change. The share is ~20% of the window; the byte conversion assumes a
+conservative 3 bytes/token so the injected bytes can never exceed the token
+share regardless of tokenizer (the LLM-agnostic direction); the caps bound the
+extremes: the floor guarantees one trimmed fragment on a 2048 host, and the
+ceiling avoids lost-in-the-middle dilution on 131k hosts.
+*/
+const (
+	groundingCtxShareDiv   = 5
+	groundingBytesPerToken = 3
+	groundingFloorBytes    = 1200
+	groundingCapBytes      = 49152
+	groundingBytesPerChunk = 2000
+	groundingMaxChunks     = 24
+)
+
+/*
+GroundingHint tells an agentic-RAG model its approximate retrieval budget so it
+paces rag_search accordingly — iterating refined queries on a small window
+instead of dumping one broad result set. Empty when the window is unknown, so
+the directive stays byte-identical to the pre-dynamic behavior.
+*/
+func (s *Service) GroundingHint() string {
+	if s.ContextTokens <= 0 {
+		return ""
+	}
+	_, maxBytes := s.groundingBudget()
+	return fmt.Sprintf(" Your grounding budget this session is roughly %d tokens; prefer several small, refined rag_search calls over one broad dump, and stop retrieving once the answer is covered.",
+		maxBytes/groundingBytesPerToken)
+}
+
+/*
+groundingBudget resolves the effective injection budget for Augment: the
+operator pin wins outright, an unknown window keeps the static defaults, and a
+known window scales proportionally within the caps.
+*/
+func (s *Service) groundingBudget() (chunks, maxBytes int) {
+	if s.PinnedChunks || s.ContextTokens <= 0 {
+		return s.MaxChunks, s.MaxBytes
+	}
+	b := s.ContextTokens / groundingCtxShareDiv * groundingBytesPerToken
+	if b < groundingFloorBytes {
+		b = groundingFloorBytes
+	}
+	if b > groundingCapBytes {
+		b = groundingCapBytes
+	}
+	c := b / groundingBytesPerChunk
+	if c < 1 {
+		c = 1
+	}
+	if c > groundingMaxChunks {
+		c = groundingMaxChunks
+	}
+	return c, b
 }
 
 /*
@@ -562,7 +636,8 @@ func (s *Service) Augment(ctx context.Context, lastUserMessage, profileID string
 	if strings.TrimSpace(lastUserMessage) == "" {
 		return ""
 	}
-	docHits, err := s.Search(ctx, lastUserMessage, SearchOpts{})
+	maxChunks, maxBytes := s.groundingBudget()
+	docHits, err := s.Search(ctx, lastUserMessage, SearchOpts{K: maxChunks})
 	if err != nil {
 		s.Logger.Warn("rag: augment doc search failed", "err", err)
 	}
@@ -626,22 +701,35 @@ func (s *Service) Augment(ctx context.Context, lastUserMessage, profileID string
 	b.WriteString(band)
 	b.WriteString("\n\n")
 
-	bytesLeft := s.MaxBytes
+	bytesLeft := maxBytes
 
+	/*
+		Assembly precedence under budget pressure: ranked doc chunks are the
+		grounding that must survive, profile memory personalizes, context7 adds
+		external authority, web goes last and is dropped first. Within docs, at
+		most two chunks per (source, heading) so a tight budget is not spent
+		twice on one section, and the FIRST fragment is trimmed to fit rather
+		than dropped — when retrieval produced hits, the model must never see
+		zero grounding just because the window is small.
+	*/
 	if len(docHits) > 0 {
 		b.WriteString("## Relevant documentation\n\n")
+		wrote := 0
+		perSection := map[string]int{}
 		for _, h := range docHits {
+			key := h.Chunk.Source + "\x00" + h.Chunk.Heading
+			if perSection[key] >= 2 {
+				continue
+			}
 			fragment := renderHit(h)
 			if bytesLeft-len(fragment) < 0 {
-				break
+				if wrote > 0 || bytesLeft <= 0 {
+					break
+				}
+				fragment = trimFragment(fragment, bytesLeft)
 			}
-			b.WriteString(fragment)
-			bytesLeft -= len(fragment)
-		}
-	}
-	if c7Docs.Text != "" && bytesLeft > 0 {
-		fragment := renderContext7(c7Docs)
-		if bytesLeft-len(fragment) >= 0 {
+			perSection[key]++
+			wrote++
 			b.WriteString(fragment)
 			bytesLeft -= len(fragment)
 		}
@@ -657,13 +745,20 @@ func (s *Service) Augment(ctx context.Context, lastUserMessage, profileID string
 			bytesLeft -= len(fragment)
 		}
 	}
+	if c7Docs.Text != "" && bytesLeft > 0 {
+		fragment := renderContext7(c7Docs)
+		if bytesLeft-len(fragment) >= 0 {
+			b.WriteString(fragment)
+			bytesLeft -= len(fragment)
+		}
+	}
 	if webEnabled && bytesLeft > 0 {
 		if webBanner != "" {
 			b.WriteString(webBanner)
 			b.WriteString("\n")
 		} else if len(webHits) > 0 {
 			b.WriteString("## Web search results (third-party, untrusted)\n\n")
-			webBudget := s.MaxBytes
+			webBudget := maxBytes
 			if webBudget > web.MaxWebSectionBytes {
 				webBudget = web.MaxWebSectionBytes
 			}
@@ -916,6 +1011,24 @@ func renderMemoryHit(h SearchResult) string {
 }
 
 /* renderHit formats a SearchResult as a labeled markdown block. */
+/*
+trimFragment cuts a rendered fragment to the byte budget on a rune boundary
+and marks the cut, preserving the heading/source header lines that anchor the
+citation. Only used for the first grounding fragment, where partial evidence
+beats none.
+*/
+func trimFragment(fragment string, budget int) string {
+	const marker = "\n[truncated to fit the context budget]\n\n"
+	if budget <= len(marker) {
+		return fragment[:0]
+	}
+	cut := budget - len(marker)
+	for cut > 0 && !utf8.RuneStart(fragment[cut]) {
+		cut--
+	}
+	return fragment[:cut] + marker
+}
+
 func renderHit(h SearchResult) string {
 	var b strings.Builder
 	b.WriteString("### ")

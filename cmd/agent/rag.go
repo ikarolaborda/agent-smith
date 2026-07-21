@@ -66,10 +66,11 @@ func buildRAG(cfg *config.Config, f *flags, logger *slog.Logger) (*rag.Service, 
 			logger.Warn("rag: --rag-max-chunks clamped to 64 (higher dilutes salience)")
 		}
 		ragSvc.MaxChunks = f.ragMaxChunks
+		ragSvc.PinnedChunks = true
 		if want := f.ragMaxChunks * 2000; want > ragSvc.MaxBytes {
 			ragSvc.MaxBytes = want
 		}
-		logger.Info("rag: grounding widened", "max_chunks", ragSvc.MaxChunks, "max_bytes", ragSvc.MaxBytes)
+		logger.Info("rag: grounding pinned by operator", "max_chunks", ragSvc.MaxChunks, "max_bytes", ragSvc.MaxBytes)
 	}
 	if !f.disableWeb {
 		ragSvc.WebSearch = web.NewDDGSearcher()

@@ -873,9 +873,10 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 		compactor stays immutable.
 	*/
 	if name == "llamacpp" && s.compactor != nil {
+		localCtx := s.effectiveLocalCtx()
 		c := *s.compactor
-		c.TriggerTokens = compactTriggerTokens(s.cfg)
-		c.MaxTotalTokens = compactTotalBudget(s.cfg)
+		c.TriggerTokens = compactTriggerTokens(localCtx)
+		c.MaxTotalTokens = compactTotalBudget(localCtx)
 		a.Compactor = &c
 		/*
 			Size read_dir's output budget to the context-limited local model so a
@@ -886,7 +887,7 @@ func (s *Server) newAgent(name string) (*agent.Agent, error) {
 		*/
 		if t, err := reg.Get("read_dir"); err == nil {
 			if rd, ok := t.(*builtin.ReadDir); ok {
-				rd.MaxBytes = readDirBudgetBytes(s.cfg)
+				rd.MaxBytes = readDirBudgetBytes(localCtx)
 			}
 		}
 	}
@@ -922,19 +923,40 @@ func buildCompactor(providers map[string]llm.Provider, cfg *config.Config, logge
 	}
 }
 
+/* defaultLocalCtxTokens is the budget fallback when no live window is known. */
+const defaultLocalCtxTokens = 8192
+
+/*
+effectiveLocalCtx resolves the local model's REAL context window for budget
+consumers: the live provider's own report first (the tuner sizes the context
+dynamically, so the config value is usually absent), the static config pin
+second, and only then the conservative default. Reading the config alone went
+stale the moment ctx_size became auto-tuned — every consumer must go through
+this resolution.
+*/
+func (s *Server) effectiveLocalCtx() int {
+	if p, ok := s.providers["llamacpp"]; ok {
+		if cw, ok := p.(interface{ ContextWindow() int }); ok && cw.ContextWindow() > 0 {
+			return cw.ContextWindow()
+		}
+	}
+	if s.cfg != nil {
+		if p, ok := s.cfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && p.LlamaCpp.CtxSize > 0 {
+			return p.LlamaCpp.CtxSize
+		}
+	}
+	return defaultLocalCtxTokens
+}
+
 /*
 compactTriggerTokens is the input size above which compaction runs for the local
-model, derived from its configured context size with headroom reserved for the
+model, derived from its effective context window with headroom reserved for the
 system prompt, RAG grounding, the model's own response, and the preserved
-head/tail. Falls back to a conservative default when the size is auto-tuned
-(unset in config).
+head/tail.
 */
-func compactTriggerTokens(cfg *config.Config) int {
-	ctxSize := 8192
-	if cfg != nil {
-		if p, ok := cfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && p.LlamaCpp.CtxSize > 0 {
-			ctxSize = p.LlamaCpp.CtxSize
-		}
+func compactTriggerTokens(ctxSize int) int {
+	if ctxSize <= 0 {
+		ctxSize = defaultLocalCtxTokens
 	}
 	trigger := ctxSize - 6144
 	if trigger < 2048 {
@@ -950,12 +972,9 @@ RAG grounding, and the model's response. When the messages sum past it, compacti
 shrinks the largest until the whole prompt fits — catching a pile-up of messages
 that are each individually under the per-message trigger.
 */
-func compactTotalBudget(cfg *config.Config) int {
-	ctxSize := 8192
-	if cfg != nil {
-		if p, ok := cfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && p.LlamaCpp.CtxSize > 0 {
-			ctxSize = p.LlamaCpp.CtxSize
-		}
+func compactTotalBudget(ctxSize int) int {
+	if ctxSize <= 0 {
+		ctxSize = defaultLocalCtxTokens
 	}
 	budget := ctxSize - 7168
 	if budget < 2048 {
@@ -971,12 +990,9 @@ so a whole-folder load leaves room for the system prompt, retrieval, and the
 response instead of overflowing. Capped at the tool's generous default so a
 large-context configuration is never made smaller than baseline.
 */
-func readDirBudgetBytes(cfg *config.Config) int {
-	ctxTokens := 8192
-	if cfg != nil {
-		if p, ok := cfg.Providers["llamacpp"]; ok && p.LlamaCpp != nil && p.LlamaCpp.CtxSize > 0 {
-			ctxTokens = p.LlamaCpp.CtxSize
-		}
+func readDirBudgetBytes(ctxTokens int) int {
+	if ctxTokens <= 0 {
+		ctxTokens = defaultLocalCtxTokens
 	}
 	budget := ctxTokens * 2
 	if budget > builtin.DefaultReadDirMaxBytes {

@@ -126,6 +126,14 @@ func run(f flags) error {
 		if ragErr != nil {
 			return fmt.Errorf("initialize required knowledge layer: %w", ragErr)
 		}
+		/*
+			A self-managing local provider knows its live context window (the
+			tuner sizes it dynamically); scale the grounding budget to it on the
+			CLI path exactly as serve does.
+		*/
+		if cw, ok := provider.(interface{ ContextWindow() int }); ok {
+			ragSvc.ContextTokens = cw.ContextWindow()
+		}
 		a.RAG = ragSvc
 		a.WebSearch = !f.disableWeb && isLocalProvider(provider.Name())
 		/*
