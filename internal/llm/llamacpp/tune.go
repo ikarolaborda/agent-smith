@@ -202,8 +202,15 @@ func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx, 
 
 	/*
 		Not enough VRAM for the whole model: offload the fraction of weights that
-		fits (leaving room for a small KV slice), and keep the context modest since
-		the KV cache is split across host and device.
+		fits (leaving room for a small KV slice). The context is bounded by the
+		HOST RAM budget like every other path — the weights that miss VRAM plus
+		the KV cache land in system memory, so that budget is the real
+		constraint. The full per-token KV cost is deliberately charged to host
+		RAM even though a slice lives in the VRAM carve-out above: double-counting
+		that slice can only over-reserve, and this tuner must never under-reserve.
+		Performance moderation is intentionally not encoded here — the tuner's
+		contract is admission safety plus the largest usable window, and
+		operators who want a smaller window for latency reasons pin ctx_size.
 	*/
 	weightVRAM := saturatingSub(vramBudget, kvAt(2048))
 	frac := 0.0
@@ -217,13 +224,19 @@ func RecommendRuntime(host HostProfile, modelBytes, mmprojBytes uint64, maxCtx, 
 	if layers > fullOffloadLayers-1 {
 		layers = fullOffloadLayers - 1
 	}
-	ctx := 4096
-	if ctx > ceiling {
-		ctx = ceiling
+	hostBase := saturatingSub(weights, weightVRAM) + scratch
+	ctx, kt := fitCtxAndKV(ramSafeBudget(host, policy), hostBase, ceiling, policy)
+	if ctx == 0 {
+		/* legacy fallback, unchanged from the static era: never worse than before */
+		ctx, kt = 4096, KVCacheF16
+		if ctx > ceiling {
+			ctx = ceiling
+		}
 	}
 	rec.GPULayers = layers
 	rec.CtxSize = ctx
-	rec.Rationale = append(rec.Rationale, fmt.Sprintf("%s GPU with %s VRAM is smaller than the model: partial offload ~%d layers, ctx=%d (KV split host/device)", host.GPU.Backend, humanGiB(host.GPU.VRAMBytes), layers, ctx))
+	rec.KVCacheType = kt
+	rec.Rationale = append(rec.Rationale, fmt.Sprintf("%s GPU with %s VRAM is smaller than the model: partial offload ~%d layers, ctx=%d%s bounded by the host-RAM KV budget (KV split host/device)", host.GPU.Backend, humanGiB(host.GPU.VRAMBytes), layers, ctx, kvNote(kt)))
 	return rec
 }
 
