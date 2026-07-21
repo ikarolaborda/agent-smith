@@ -93,6 +93,37 @@ func TestGroundingFloorKeepsTheBestEvidence(t *testing.T) {
 	}
 }
 
+func TestGroundingTopChunkStableAcrossWindows(t *testing.T) {
+	/*
+		Refactor guard for the retrieval-stability fix: the top-ranked chunk must
+		be identical at every proportional window size, because the candidate
+		pool is ranked independently of the injection budget. If a future change
+		re-couples search breadth to the budget, a small window would rank over
+		too few candidates and this top score would drift — exactly the defect
+		this harness caught.
+	*/
+	windows := []int{2048, 8192, 32768, 131072}
+	for _, q := range qualityQueries {
+		var top float64
+		haveTop := false
+		for _, w := range windows {
+			s := augmentService(t)
+			s.ContextTokens = w
+			scores := injectedScores(s.Augment(context.Background(), q, "", false))
+			if len(scores) == 0 {
+				continue
+			}
+			if !haveTop {
+				top, haveTop = scores[0], true
+				continue
+			}
+			if scores[0] != top {
+				t.Fatalf("query %q: top chunk drifted with window size (%.2f at some window vs %.2f), search breadth is coupled to the budget again", q, scores[0], top)
+			}
+		}
+	}
+}
+
 func TestGroundingCapBoundsChunkCount(t *testing.T) {
 	s := augmentService(t)
 	s.ContextTokens = 131072
